@@ -1,0 +1,73 @@
+# ── macOS ─────────────────────────────────────────────
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon
+._*
+.Spotlight-V100
+.Trashes
+
+# ── Xcode ─────────────────────────────────────────────
+build/
+DerivedData/
+xcuserdata/
+*.xcuserstate
+*.xcuserdatad
+*.pbxuser
+!default.pbxuser
+*.mode1v3
+!default.mode1v3
+*.mode2v3
+!default.mode2v3
+*.perspectivev3
+!default.perspectivev3
+*.moved-aside
+*.xccheckout
+*.xcscmblueprint
+*.hmap
+*.ipa
+*.dSYM
+*.dSYM.zip
+timeline.xctimeline
+playground.xcworkspace
+
+# 서명·배포 산출물 (ADR-16 Developer ID 직접 배포)
+*.app
+*.dmg
+*.pkg
+*.p12
+*.mobileprovision
+ExportOptions.plist
+notarization-*.json
+
+# ── Swift Package Manager ─────────────────────────────
+.build/
+.swiftpm/
+# Package.resolved 는 앱이므로 커밋합니다 (의존성 버전 고정용).
+# 라이브러리로 바꾸면 아래 주석을 해제하세요.
+# Dure.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved
+
+# ── Claude Code / AI 에이전트 산출물 ──────────────────
+# 지시문·설계문서·세션·로컬 설정까지 클로드 관련 파일은 전부 로컬에만 둡니다.
+docs/
+.claude/
+CLAUDE.md
+CLAUDE.local.md
+AGENTS.md
+.mcp.json
+.mcp.local.json
+.gstack/
+.superpowers/
+.context/
+*.plan.md
+*.session.jsonl
+
+# 에이전트 작업용 워크트리·임시 디렉토리
+.worktrees/
+scratchpad/
+tmp/
+
+# ── 로컬 환경 ─────────────────────────────────────────
+.env
+.env.local
+*.log
