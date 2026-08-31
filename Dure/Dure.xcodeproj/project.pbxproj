@@ -580,10 +580,10 @@
 /* Begin XCRemoteSwiftPackageReference section */
 		9EA06E5430454D2500872DAA /* XCRemoteSwiftPackageReference "SwiftTerm" */ = {
 			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/migueldeicaza/SwiftTerm";
+			repositoryURL = "https://github.com/jungee123213/SwiftTerm";
 			requirement = {
-				kind = exactVersion;
-				version = 1.20.0;
+				kind = revision;
+				revision = 197d730b85524ce38aedccbef606e3198986d3e7;
 			};
 		};
 		DU0000000000000000000021 /* XCRemoteSwiftPackageReference "GRDB" */ = {
