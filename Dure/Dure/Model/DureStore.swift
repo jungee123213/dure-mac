@@ -11,6 +11,8 @@ import Observation
 final class DureStore {
     private(set) var workspaces: [Workspace] = []
     private(set) var repos: [Repo] = []
+    /// 페인별 에이전트. F4 상태가 여기 산다.
+    private(set) var agents: [Agent] = []
     /// ADR-17 의 매핑 결과. Step 5(F6·F7) 가 여기 `transcriptPath` 를 직접 읽는다.
     private(set) var ccSessions: [CCSession] = []
     /// 페인별 토큰 합계. `/clear` 로 갈라진 cc_session 들을 **합산한다** (부록 A4 주석).
@@ -98,27 +100,35 @@ final class DureStore {
         let agent = Agent(dureSession: uuid,
                           repoId: repo.id,
                           agentKind: kind.rawValue,
-                          // 전이는 Step 6(F4). 여기서는 넣기만 한다.
-                          state: "started",
+                          state: .started,
                           model: repo.model,
                           startedAt: Int(Date().timeIntervalSince1970),
                           endedAt: nil)
-        do { try AppDatabase.queue.write { try agent.insert($0) } }
-        catch { NSLog("[Dure] agent 등록 실패: \(error)") }
+        do {
+            try AppDatabase.queue.write { try agent.insert($0) }
+            agents.append(agent)
+        } catch { NSLog("[Dure] agent 등록 실패: \(error)") }
         return uuid
     }
 
     /// 훅 이벤트 하나를 반영한다. 부록 A2.
+    /// **무엇을 할지 정하는 판단은 `AgentStateMachine` 에 있다.** 여기는 실행만 한다.
     func apply(_ event: HookEvent) {
-        switch event.ev {
-        case "SessionStart":
-            bridgeSession(event)
-        case "Stop":
-            // 응답이 끝났다 = 트랜스크립트에 usage 가 다 적혔다. **이때가 읽을 때다.**
-            // 파일 감시자를 세션마다 다는 것보다 싸고, 훅이 이미 알려주는 것을 또 볼 이유가 없다 (ADR-3).
-            ingestTranscripts(for: event.dureSession)
-        default:
-            // UserPromptSubmit · Notification 은 상태·알림용이라 Step 6 에서 쓴다.
+        let current = agents.first { $0.dureSession == event.dureSession }?.state
+        let reaction = AgentStateMachine.reaction(to: event, current: current)
+
+        if reaction.bridgeSession { bridgeSession(event) }
+        if let next = reaction.next { setState(next, for: event.dureSession) }
+        if reaction.ingestTranscript { ingestTranscripts(for: event.dureSession) }
+
+        switch reaction.alert {
+        case .waiting(let message):
+            Notifier.post(title: "\(repoName(for: event.dureSession)) — 답을 기다립니다",
+                          body: message, dureSession: event.dureSession)
+        case .done:
+            Notifier.post(title: "\(repoName(for: event.dureSession)) — 작업 완료",
+                          body: "응답이 끝났습니다.", dureSession: event.dureSession)
+        case nil:
             break
         }
     }
@@ -140,6 +150,47 @@ final class DureStore {
             }
         } catch {
             NSLog("[Dure] cc_session 기록 실패: \(error)")
+        }
+    }
+
+    // MARK: - F4 상태 (Step 6)
+
+    /// 페인의 현재 상태. 사이드바·페인 헤더가 읽는다.
+    func state(forRepo repoID: String) -> AgentState? {
+        guard let session = sessionIDs[repoID] else { return nil }
+        return agents.first { $0.dureSession == session }?.state
+    }
+
+    func repoName(for dureSession: String) -> String {
+        guard let agent = agents.first(where: { $0.dureSession == dureSession }),
+              let repo = repos.first(where: { $0.id == agent.repoId })
+        else { return "에이전트" }
+        return repo.displayName
+    }
+
+    /// **`dead` 는 훅이 아니라 PTY 종료로 들어온다** (ADR-13 — 앱이 PTY 를 소유한다).
+    /// `SessionEnd` 훅을 쓰지 않는 이유는 1차 훅 목록에 없고, 프로세스 종료가 더 확실해서다.
+    func markDead(_ dureSession: String) {
+        setState(.dead, for: dureSession, endedNow: true)
+    }
+
+    private func setState(_ next: AgentState, for dureSession: String, endedNow: Bool = false) {
+        guard var agent = agents.first(where: { $0.dureSession == dureSession }) else {
+            // 앱 밖 세션은 훅이 발화하지 않지만, 앱을 다시 깐 뒤 남은 이벤트가 들어올 수 있다.
+            return
+        }
+        // 죽은 페인은 되살리지 않는다. 종료 후 도착한 늦은 이벤트가 상태를 되돌리면 안 된다.
+        guard agent.state != .dead else { return }
+
+        agent.state = next
+        if endedNow { agent.endedAt = Int(Date().timeIntervalSince1970) }
+        do {
+            try AppDatabase.queue.write { try agent.update($0) }
+            if let i = agents.firstIndex(where: { $0.dureSession == dureSession }) {
+                agents[i] = agent
+            }
+        } catch {
+            NSLog("[Dure] 상태 갱신 실패: \(error)")
         }
     }
 

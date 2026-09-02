@@ -44,7 +44,11 @@ struct ContentView: View {
             Section("레포") {
                 ForEach(store.visibleRepos) { repo in
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(repo.displayName).font(.body)
+                        HStack(spacing: 6) {
+                            Text(repo.displayName).font(.body)
+                            Spacer(minLength: 0)
+                            StateChip(state: store.state(forRepo: repo.id))
+                        }
                         Text(repo.path)
                             .font(.caption)
                             .foregroundStyle(.secondary)
@@ -92,14 +96,35 @@ struct ContentView: View {
                 // 높이 균등 고정. 탭 바 없음, 스플리터 없음, 재배치 없음 (ADR-13).
                 VStack(spacing: 1) {
                     ForEach(store.visibleRepos) { repo in
-                        TerminalPane(repo: repo, sessionID: store.sessionID(for: repo))
-                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        let sessionID = store.sessionID(for: repo)
+                        VStack(spacing: 0) {
+                            paneHeader(for: repo)
+                            TerminalPane(repo: repo, sessionID: sessionID,
+                                         onExit: { _ in store.markDead(sessionID) })
+                        }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
                     }
                 }
                 .background(Color(nsColor: .separatorColor))
             }
         }
         .frame(minWidth: 720, minHeight: 480)
+    }
+
+    /// 페인이 여러 개 쌓이므로 어느 레포인지와 지금 상태를 한 줄로 보여준다.
+    /// 탭·스플리터를 두지 않는다는 결정(ADR-13)과 별개로, 이름표는 있어야 구분된다.
+    private func paneHeader(for repo: Repo) -> some View {
+        HStack(spacing: 8) {
+            Text(repo.displayName).font(.caption).bold()
+            StateChip(state: store.state(forRepo: repo.id))
+            Spacer()
+            if let model = repo.model {
+                Text(model).font(.caption2).foregroundStyle(.secondary)
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 4)
+        .background(.bar)
     }
 
     // MARK: - 폴더 선택
@@ -116,6 +141,32 @@ struct ContentView: View {
             for url in panel.urls {
                 store.addRepo(path: url.path, to: wsID)
             }
+        }
+    }
+}
+
+/// F4 — 상태를 한눈에. `대기중`(사람 답을 기다림)만 눈에 띄게 한다.
+struct StateChip: View {
+    let state: AgentState?
+
+    var body: some View {
+        if let state {
+            Text(state.label)
+                .font(.caption2)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(color.opacity(0.18), in: Capsule())
+                .foregroundStyle(color)
+        }
+    }
+
+    private var color: Color {
+        switch state {
+        case .waiting: .orange     // 사람이 붙어야 하는 유일한 상태
+        case .running: .blue
+        case .done:    .green
+        case .dead:    .secondary
+        default:       .secondary
         }
     }
 }

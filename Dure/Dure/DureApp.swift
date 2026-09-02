@@ -9,6 +9,9 @@ struct DureApp: App {
         // 실패해도 앱은 뜬다. 훅이 없으면 관측이 안 될 뿐 터미널은 정상 동작한다.
         do { try HookBridge.install() }
         catch { NSLog("[Dure] 훅 브리지 설치 실패: \(error)") }
+
+        // F5 — 권한을 거부해도 앱은 정상 동작한다. 알림만 안 뜬다.
+        Notifier.configure()
     }
 
     var body: some Scene {

@@ -7,8 +7,10 @@ struct TerminalPane: NSViewRepresentable {
     let repo: Repo
     /// ADR-14 의 게이트 값. 페인 하나당 하나이며 앱이 만든다.
     let sessionID: String
+    /// PTY 가 죽으면 부른다. F4 의 `dead` 는 훅이 아니라 이 경로로 들어온다.
+    var onExit: (Int32?) -> Void = { _ in }
 
-    func makeCoordinator() -> Coordinator { Coordinator() }
+    func makeCoordinator() -> Coordinator { Coordinator(onExit: onExit) }
 
     func makeNSView(context: Context) -> LocalProcessTerminalView {
         let view = LocalProcessTerminalView(frame: .init(x: 0, y: 0, width: 800, height: 240))
@@ -37,15 +39,20 @@ struct TerminalPane: NSViewRepresentable {
         // 1차에서는 재구성하지 않는다. 프로세스는 makeNSView 에서 한 번만 띄운다.
     }
 
-    /// Step 0-A 실측 — claude 의 OSC 타이틀이 여기로 올라온다. Step 6 의 F4 보조 신호.
+    /// Step 0-A 실측 — claude 의 OSC 타이틀이 여기로 올라온다 (F4 보조 신호, 아직 안 쓴다).
     @MainActor
     final class Coordinator: NSObject, LocalProcessTerminalViewDelegate {
+        private let onExit: (Int32?) -> Void
+        init(onExit: @escaping (Int32?) -> Void) { self.onExit = onExit }
+
         func sizeChanged(source: LocalProcessTerminalView, newCols: Int, newRows: Int) {}
         func setTerminalTitle(source: LocalProcessTerminalView, title: String) {}
         func hostCurrentDirectoryUpdate(source: TerminalView, directory: String?) {}
+
+        /// **F4 의 `dead` 진입점.** 앱이 PTY 를 소유하므로(ADR-13) 훅보다 이쪽이 확실하다.
         func processTerminated(source: TerminalView, exitCode: Int32?) {
-            // Step 6 — `dead` 는 훅이 아니라 PTY 종료로 진입한다. 지금은 기록만.
             NSLog("[Dure] PTY 종료 exitCode=\(exitCode.map(String.init) ?? "nil")")
+            onExit(exitCode)
         }
     }
 }
