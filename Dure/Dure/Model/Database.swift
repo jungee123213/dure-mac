@@ -2,8 +2,8 @@ import Foundation
 import GRDB
 
 /// 부록 A4 스키마.
-/// v1: workspace · repo (Step 2) — v2: agent · cc_session (Step 4).
-/// read_cursor · token_usage · tool_use 는 Step 5 에서 얹는다.
+/// v1: workspace · repo (Step 2) — v2: agent · cc_session (Step 4)
+/// — v3: read_cursor · token_usage · tool_use (Step 5).
 enum AppDatabase {
 
     /// 부록 A5 — GRDB 는 `DatabaseQueue` 하나로 직렬화한다.
@@ -67,6 +67,47 @@ enum AppDatabase {
                 t.column("started_at", .integer).notNull()
             }
             try db.create(index: "idx_ccsession_agent", on: "cc_session", columns: ["dure_session"])
+        }
+        m.registerMigration("v3_usage") { db in
+            try db.create(table: "read_cursor") { t in
+                t.primaryKey("path", .text)          // transcript_path
+                t.column("byte_offset", .integer).notNull()
+                t.column("line_no", .integer).notNull()
+                t.column("updated_at", .integer).notNull()
+            }
+
+            try db.create(table: "token_usage") { t in
+                // ⚠️ PK 가 (cc_session_id, message_id) 다. 부록 A4 의 line_no 가 아니다.
+                //    한 응답이 여러 줄로 기록되고 각 줄이 usage 를 통째로 복사해 가지므로
+                //    줄 단위로 쌓으면 약 2배가 된다 (A7-1). message_id 를 키로 잡으면
+                //    둘째·셋째 줄이 같은 행을 덮어써서 중복이 구조적으로 불가능해진다.
+                t.column("cc_session_id", .text).notNull()
+                    .references("cc_session", onDelete: .cascade)
+                t.column("message_id", .text).notNull()
+                t.column("line_no", .integer).notNull()
+                t.column("ts", .integer).notNull()
+                t.column("input", .integer).notNull().defaults(to: 0)
+                t.column("output", .integer).notNull().defaults(to: 0)
+                t.column("cache_read", .integer).notNull().defaults(to: 0)
+                t.column("cache_creation", .integer).notNull().defaults(to: 0)
+                t.column("thinking", .integer).notNull().defaults(to: 0)
+                t.column("service_tier", .text)
+                t.column("model", .text)
+                t.primaryKey(["cc_session_id", "message_id"])
+            }
+
+            try db.create(table: "tool_use") { t in
+                // 한 줄에 tool_use 블록은 최대 1개다 (트랜스크립트 25개 실측, 2개 이상 0건).
+                t.column("cc_session_id", .text).notNull()
+                    .references("cc_session", onDelete: .cascade)
+                t.column("line_no", .integer).notNull()
+                t.column("ts", .integer).notNull()
+                t.column("tool_name", .text).notNull()
+                t.column("mcp_server", .text)
+                t.column("skill_name", .text)
+                t.primaryKey(["cc_session_id", "line_no"])
+            }
+            try db.create(index: "idx_tool_ts", on: "tool_use", columns: ["ts"])
         }
         return m
     }

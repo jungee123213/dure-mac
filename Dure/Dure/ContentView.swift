@@ -19,6 +19,8 @@ struct ContentView: View {
             }
             // 터미널을 띄우기 전에 시작한다. 밀린 이벤트를 먼저 훑고 감시를 건다.
             ingestor.start(store: store)
+            // 앱이 꺼져 있던 동안 붙은 트랜스크립트 분량을 따라잡는다 (커서가 있어 증분이다).
+            store.ingestTranscripts()
         }
     }
 

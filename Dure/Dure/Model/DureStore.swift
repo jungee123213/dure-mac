@@ -13,6 +13,8 @@ final class DureStore {
     private(set) var repos: [Repo] = []
     /// ADR-17 의 매핑 결과. Step 5(F6·F7) 가 여기 `transcriptPath` 를 직접 읽는다.
     private(set) var ccSessions: [CCSession] = []
+    /// 페인별 토큰 합계. `/clear` 로 갈라진 cc_session 들을 **합산한다** (부록 A4 주석).
+    private(set) var usageByAgent: [String: UsageTotals] = [:]
     var selectedWorkspaceID: String?
 
     /// 페인 하나당 UUID 하나 (ADR-14 의 `DURE_SESSION`).
@@ -111,9 +113,12 @@ final class DureStore {
         switch event.ev {
         case "SessionStart":
             bridgeSession(event)
+        case "Stop":
+            // 응답이 끝났다 = 트랜스크립트에 usage 가 다 적혔다. **이때가 읽을 때다.**
+            // 파일 감시자를 세션마다 다는 것보다 싸고, 훅이 이미 알려주는 것을 또 볼 이유가 없다 (ADR-3).
+            ingestTranscripts(for: event.dureSession)
         default:
-            // UserPromptSubmit · Notification · Stop 은 상태·알림용이라 Step 6 에서 쓴다.
-            // 지금 버리는 것이 아니라 **아직 소비처가 없다**. 이벤트 파일은 삭제된다.
+            // UserPromptSubmit · Notification 은 상태·알림용이라 Step 6 에서 쓴다.
             break
         }
     }
@@ -135,6 +140,40 @@ final class DureStore {
             }
         } catch {
             NSLog("[Dure] cc_session 기록 실패: \(error)")
+        }
+    }
+
+    // MARK: - F6 · F7 (Step 5)
+
+    /// 트랜스크립트에서 **새로 붙은 줄만** 읽어 반영한다.
+    /// `dureSession` 을 주면 그 페인만, 없으면 전부 (앱 시작 시 밀린 분량 따라잡기).
+    func ingestTranscripts(for dureSession: String? = nil) {
+        let targets = dureSession.map { id in ccSessions.filter { $0.dureSession == id } }
+            ?? ccSessions
+        guard !targets.isEmpty else { return }
+        do {
+            try AppDatabase.queue.write { db in
+                for session in targets { try TranscriptIngestor.ingest(session, in: db) }
+            }
+            refreshUsage()
+        } catch {
+            NSLog("[Dure] 트랜스크립트 반영 실패: \(error)")
+        }
+    }
+
+    private func refreshUsage() {
+        do {
+            let rows = try AppDatabase.queue.read { try TokenUsage.fetchAll($0) }
+            var byCCSession: [String: [TokenUsage]] = [:]
+            for row in rows { byCCSession[row.ccSessionId, default: []].append(row) }
+
+            var byAgent: [String: [TokenUsage]] = [:]
+            for session in ccSessions {
+                byAgent[session.dureSession, default: []] += byCCSession[session.ccSessionId] ?? []
+            }
+            usageByAgent = byAgent.mapValues(UsageTotals.of)
+        } catch {
+            NSLog("[Dure] 사용량 집계 실패: \(error)")
         }
     }
 
