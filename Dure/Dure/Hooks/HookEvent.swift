@@ -37,6 +37,14 @@ struct HookEvent {
     var cwd: String? { payload?["cwd"] as? String }
     /// startup|clear|resume|compact. 부록 A4 에서 NOT NULL 이다.
     var source: String { payload?["source"] as? String ?? "unknown" }
+    /// ⚠️ `Notification` 의 두 갈래를 가르는 필드. F5 의 신뢰도가 여기 걸려 있다.
+    /// `permission_prompt` — 진짜로 사람 답을 기다린다.
+    /// `idle_prompt` — 그냥 60초 놀고 있다. **알림도 상태 변경도 하지 않는다.**
+    var notificationType: String? { payload?["notification_type"] as? String }
+
+    /// 알림 문구. 길 수 있으므로 표시할 때 자른다.
+    var message: String? { payload?["message"] as? String }
+
     /// SessionStart 가 **실제 적용된** 모델을 준다. 사용자가 고른 값(repo.model)과는 별개다.
     var model: String? { payload?["model"] as? String }
 }

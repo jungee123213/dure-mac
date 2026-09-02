@@ -1,6 +1,32 @@
 import Foundation
 import GRDB
 
+/// 에이전트가 지금 뭘 하고 있는지. F4.
+///
+/// 앞의 넷은 훅이 알려준다. **`dead` 만 훅이 아니라 PTY 종료로 진입한다** —
+/// 앱이 PTY 를 직접 소유하므로(ADR-13) 자식 프로세스 종료를 직접 보는 쪽이
+/// `SessionEnd` 훅보다 신뢰할 수 있다.
+enum AgentState: String, Codable, CaseIterable {
+    case started    // SessionStart
+    case running    // UserPromptSubmit
+    case waiting    // Notification(permission_prompt) — idle_prompt 는 여기 오지 않는다
+    case done       // Stop
+    case dead       // PTY 종료
+
+    var label: String {
+        switch self {
+        case .started: "시작됨"
+        case .running: "실행중"
+        case .waiting: "대기중"
+        case .done:    "완료"
+        case .dead:    "종료"
+        }
+    }
+
+    /// 사람 손이 필요한 상태인가. 사이드바에서 눈에 띄어야 하는 것들이다.
+    var needsAttention: Bool { self == .waiting }
+}
+
 /// 터미널(PTY) 하나 = 에이전트 하나. 앱이 만든 `DURE_SESSION` UUID 가 여기 산다.
 /// 부록 A4.
 struct Agent: Codable, Identifiable, Hashable, FetchableRecord, PersistableRecord {
@@ -8,9 +34,7 @@ struct Agent: Codable, Identifiable, Hashable, FetchableRecord, PersistableRecor
     var repoId: String
     /// D-3 — claude / codex. 이벤트 줄에도 같은 값이 실린다.
     var agentKind: String
-    /// started|running|waiting|done|dead. **전이는 Step 6(F4) 에서 한다.**
-    /// Step 4 는 매핑만 만들고 상태는 `started` 로 두고 건드리지 않는다.
-    var state: String
+    var state: AgentState
     var model: String?
     var startedAt: Int
     var endedAt: Int?

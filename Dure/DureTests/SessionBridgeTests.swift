@@ -68,7 +68,7 @@ struct SessionBridgeTests {
             try Repo(id: "r1", workspaceId: "w1", path: "/repo", label: nil, model: nil).insert(db)
             if let s = agentSession {
                 try Agent(dureSession: s, repoId: "r1", agentKind: "claude",
-                          state: "started", model: nil, startedAt: 0, endedAt: nil).insert(db)
+                          state: .started, model: nil, startedAt: 0, endedAt: nil).insert(db)
             }
         }
         return q
@@ -118,7 +118,7 @@ struct SessionBridgeTests {
             try Repo(id: "r1", workspaceId: "w1", path: "/repo", label: nil, model: nil).insert(db)
             for pane in ["pane-A", "pane-B"] {
                 try Agent(dureSession: pane, repoId: "r1", agentKind: "claude",
-                          state: "started", model: nil, startedAt: 0, endedAt: nil).insert(db)
+                          state: .started, model: nil, startedAt: 0, endedAt: nil).insert(db)
             }
         }
         let a = try Self.event(Self.sessionStartJSON
