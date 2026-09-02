@@ -3,8 +3,8 @@ import UniformTypeIdentifiers
 
 struct ContentView: View {
     @State private var store = DureStore()
-    /// 페인마다 하나씩. 앱이 만드는 DURE_SESSION 값 (ADR-14).
-    @State private var sessionIDs: [String: String] = [:]
+    /// Step 4 — 훅이 떨어뜨린 이벤트를 소비해 매핑 테이블을 갱신한다.
+    @State private var ingestor = EventIngestor()
 
     var body: some View {
         NavigationSplitView {
@@ -17,6 +17,10 @@ struct ContentView: View {
             if store.workspaces.isEmpty {
                 store.addWorkspace(name: "기본 워크스페이스")
             }
+            // 터미널을 띄우기 전에 시작한다. 밀린 이벤트를 먼저 훑고 감시를 건다.
+            ingestor.start(store: store)
+            // 앱이 꺼져 있던 동안 붙은 트랜스크립트 분량을 따라잡는다 (커서가 있어 증분이다).
+            store.ingestTranscripts()
         }
     }
 
@@ -88,7 +92,7 @@ struct ContentView: View {
                 // 높이 균등 고정. 탭 바 없음, 스플리터 없음, 재배치 없음 (ADR-13).
                 VStack(spacing: 1) {
                     ForEach(store.visibleRepos) { repo in
-                        TerminalPane(repo: repo, sessionID: sessionID(for: repo))
+                        TerminalPane(repo: repo, sessionID: store.sessionID(for: repo))
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
                     }
                 }
@@ -96,15 +100,6 @@ struct ContentView: View {
             }
         }
         .frame(minWidth: 720, minHeight: 480)
-    }
-
-    /// 페인 하나당 UUID 하나. 뷰가 다시 그려져도 같은 값을 유지해야
-    /// 훅이 보내는 DURE_SESSION 과 앱의 매핑이 어긋나지 않는다 (ADR-17).
-    private func sessionID(for repo: Repo) -> String {
-        if let existing = sessionIDs[repo.id] { return existing }
-        let new = UUID().uuidString
-        DispatchQueue.main.async { sessionIDs[repo.id] = new }
-        return new
     }
 
     // MARK: - 폴더 선택
