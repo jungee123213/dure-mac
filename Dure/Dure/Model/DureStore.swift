@@ -17,12 +17,26 @@ final class DureStore {
     private(set) var ccSessions: [CCSession] = []
     /// 페인별 토큰 합계. `/clear` 로 갈라진 cc_session 들을 **합산한다** (부록 A4 주석).
     private(set) var usageByAgent: [String: UsageTotals] = [:]
-    var selectedWorkspaceID: String?
+    /// 레포별 git 상태. F8. 읽기 실패는 값을 지우지 않는다 (D-13).
+    private(set) var git = GitStatusCache()
+    /// F10a — 출발할 때 모든 페인이 함께 받을 브리핑. 비어 있어도 된다.
+    var broadcastPrompt: String = ""
+    /// 이미 출발한 레포. **자동 기동을 하지 않으므로** 여기 없는 페인은 아직 안 떴다.
+    private(set) var startedRepos: Set<String> = []
+    var selectedWorkspaceID: String? {
+        didSet { refreshAllGit() }
+    }
 
     /// 페인 하나당 UUID 하나 (ADR-14 의 `DURE_SESSION`).
     /// 뷰가 다시 그려져도 같은 값이어야 훅이 보내는 값과 앱의 매핑이 어긋나지 않는다.
     /// **뷰 갱신을 유발하면 안 되므로** 관측 대상에서 뺀다.
     @ObservationIgnored private var sessionIDs: [String: String] = [:]
+
+    /// F8 의 저빈도 폴링 (D-13). 뷰 갱신을 유발할 값이 아니다.
+    @ObservationIgnored private var gitPollTask: Task<Void, Never>?
+
+    /// 출발할 때 실제로 넘긴 브리핑. 입력란은 그 뒤에 바뀔 수 있으므로 따로 붙잡아둔다.
+    @ObservationIgnored private var promptByRepo: [String: String] = [:]
 
     var selectedWorkspace: Workspace? {
         workspaces.first { $0.id == selectedWorkspaceID }
@@ -70,6 +84,7 @@ final class DureStore {
         do {
             try AppDatabase.queue.write { try r.insert($0) }
             load()
+            refreshGit(for: r)
         } catch {
             // path 가 UNIQUE 라 이미 등록된 폴더면 여기로 온다.
             NSLog("[Dure] addRepo 실패(중복 가능): \(error)")
@@ -120,6 +135,7 @@ final class DureStore {
         if reaction.bridgeSession { bridgeSession(event) }
         if let next = reaction.next { setState(next, for: event.dureSession) }
         if reaction.ingestTranscript { ingestTranscripts(for: event.dureSession) }
+        if reaction.refreshGit, let repo = repo(for: event.dureSession) { refreshGit(for: repo) }
 
         switch reaction.alert {
         case .waiting(let message):
@@ -162,10 +178,12 @@ final class DureStore {
     }
 
     func repoName(for dureSession: String) -> String {
-        guard let agent = agents.first(where: { $0.dureSession == dureSession }),
-              let repo = repos.first(where: { $0.id == agent.repoId })
-        else { return "에이전트" }
-        return repo.displayName
+        repo(for: dureSession)?.displayName ?? "에이전트"
+    }
+
+    private func repo(for dureSession: String) -> Repo? {
+        guard let agent = agents.first(where: { $0.dureSession == dureSession }) else { return nil }
+        return repos.first { $0.id == agent.repoId }
     }
 
     /// **`dead` 는 훅이 아니라 PTY 종료로 들어온다** (ADR-13 — 앱이 PTY 를 소유한다).
@@ -231,6 +249,66 @@ final class DureStore {
     /// 한 페인의 현재 세션. `/clear` 로 여러 개가 쌓이면 **가장 최근 것**이 현재다 (부록 A4).
     func currentSession(for dureSession: String) -> CCSession? {
         ccSessions.filter { $0.dureSession == dureSession }.max { $0.startedAt < $1.startedAt }
+    }
+
+    // MARK: - F10a 실행 시점 브로드캐스트 (Step 7)
+
+    /// **앱을 켜도 `claude` 는 저절로 뜨지 않는다.** 브리핑을 인자로 넘기려면
+    /// 프로세스가 시작되기 *전에* 문구가 있어야 하기 때문이다 (설계문서 성공기준 3).
+    func hasStarted(_ repoID: String) -> Bool { startedRepos.contains(repoID) }
+
+    /// 그 페인이 출발할 때 받은 브리핑. 없으면 nil.
+    func prompt(for repoID: String) -> String? { promptByRepo[repoID] }
+
+    /// 페인 하나를 출발시킨다. 이미 떠 있으면 아무것도 하지 않는다 —
+    /// 진행 중인 작업을 재시작으로 날리지 않기 위해서다.
+    func start(_ repo: Repo) {
+        guard !startedRepos.contains(repo.id) else { return }
+        let prompt = broadcastPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !prompt.isEmpty { promptByRepo[repo.id] = prompt }
+        startedRepos.insert(repo.id)
+    }
+
+    /// F10a 의 본체 — 지금 보이는 페인 전부를 **같은 브리핑으로** 출발시킨다.
+    func startAll() {
+        for repo in visibleRepos { start(repo) }
+    }
+
+    /// 아직 안 뜬 페인이 하나라도 있는가. 버튼을 잠그는 데 쓴다.
+    var hasUnstartedPanes: Bool {
+        visibleRepos.contains { !startedRepos.contains($0.id) }
+    }
+
+    // MARK: - F8 git 상태 (Step 7)
+
+    /// 한 레포의 git 상태를 다시 읽는다.
+    ///
+    /// **메인액터에서 `git` 을 부르지 않는다.** MCP 가 많은 큰 레포는 `status` 가
+    /// 수백 ms 걸릴 수 있고, 페인 수만큼 곱해지면 30초마다 UI 가 끊긴다.
+    func refreshGit(for repo: Repo) {
+        let (id, path) = (repo.id, repo.path)
+        Task.detached(priority: .utility) {
+            let fresh = GitReader.read(at: path)
+            await MainActor.run { self.git.update(id, with: fresh) }
+        }
+    }
+
+    /// 지금 페인이 떠 있는 레포들만 읽는다.
+    func refreshAllGit() {
+        for repo in visibleRepos { refreshGit(for: repo) }
+    }
+
+    /// D-13 — 훅만으로는 **사람이 앱 밖에서 한 커밋·체크아웃**을 놓친다.
+    /// 커밋 직후가 바로 브랜치명을 확인하고 싶은 순간이라, 거기서 틀리면 기능의 의미가 없다.
+    func startGitPolling(every seconds: Double = 30) {
+        gitPollTask?.cancel()
+        gitPollTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(seconds))
+                guard let self else { return }
+                self.refreshAllGit()
+            }
+        }
     }
 
     func setModel(_ model: String?, for repo: Repo) {

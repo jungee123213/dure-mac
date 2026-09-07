@@ -20,6 +20,8 @@ enum AgentStateMachine {
         var bridgeSession = false
         /// 응답이 끝났으니 트랜스크립트를 읽을 때다 (Step 5)
         var ingestTranscript = false
+        /// 방금 파일을 건드렸을 시점이니 git 을 다시 읽을 때다 (Step 7, D-13)
+        var refreshGit = false
 
         static let ignore = Reaction()
     }
@@ -46,7 +48,7 @@ enum AgentStateMachine {
                             alert: .waiting(event.message ?? "승인이 필요합니다."))
 
         case "Stop":
-            return Reaction(next: .done, alert: .done, ingestTranscript: true)
+            return Reaction(next: .done, alert: .done, ingestTranscript: true, refreshGit: true)
 
         default:
             return .ignore

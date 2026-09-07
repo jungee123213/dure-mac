@@ -7,6 +7,8 @@ struct TerminalPane: NSViewRepresentable {
     let repo: Repo
     /// ADR-14 의 게이트 값. 페인 하나당 하나이며 앱이 만든다.
     let sessionID: String
+    /// F10a — 출발할 때 함께 넘길 브리핑. `claude "<prompt>"` 인자가 된다.
+    var initialPrompt: String? = nil
     /// PTY 가 죽으면 부른다. F4 의 `dead` 는 훅이 아니라 이 경로로 들어온다.
     var onExit: (Int32?) -> Void = { _ in }
 
@@ -29,7 +31,8 @@ struct TerminalPane: NSViewRepresentable {
         view.startProcess(
             executable: Spawn.shell,
             args: Spawn.shellArgs + [
-                Spawn.script(repoPath: repo.path, sessionID: sessionID, model: repo.model)
+                Spawn.script(repoPath: repo.path, sessionID: sessionID,
+                             model: repo.model, initialPrompt: initialPrompt)
             ]
         )
         return view
