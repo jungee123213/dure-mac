@@ -21,6 +21,8 @@ struct ContentView: View {
             ingestor.start(store: store)
             // 앱이 꺼져 있던 동안 붙은 트랜스크립트 분량을 따라잡는다 (커서가 있어 증분이다).
             store.ingestTranscripts()
+            // F8 — 훅이 놓치는 "사람이 앱 밖에서 한 커밋" 을 메운다 (D-13).
+            store.startGitPolling()
         }
     }
 
@@ -49,6 +51,7 @@ struct ContentView: View {
                             Spacer(minLength: 0)
                             StateChip(state: store.state(forRepo: repo.id))
                         }
+                        GitChip(status: store.git[repo.id])
                         Text(repo.path)
                             .font(.caption)
                             .foregroundStyle(.secondary)
@@ -117,6 +120,7 @@ struct ContentView: View {
         HStack(spacing: 8) {
             Text(repo.displayName).font(.caption).bold()
             StateChip(state: store.state(forRepo: repo.id))
+            GitChip(status: store.git[repo.id])
             Spacer()
             if let model = repo.model {
                 Text(model).font(.caption2).foregroundStyle(.secondary)
@@ -167,6 +171,33 @@ struct StateChip: View {
         case .done:    .green
         case .dead:    .secondary
         default:       .secondary
+        }
+    }
+}
+
+/// F8 — 브랜치명과 변경 파일 수. **읽기만 한다** (ADR-4).
+///
+/// 값이 없으면 아무것도 그리지 않는다. 못 읽은 것을 `clean` 으로 보이면 거짓말이다 (D-13).
+struct GitChip: View {
+    let status: GitStatus?
+
+    var body: some View {
+        if let status {
+            HStack(spacing: 4) {
+                Image(systemName: status.isDetached ? "arrow.triangle.branch" : "arrow.branch")
+                    .font(.caption2)
+                Text(status.isDetached ? "detached" : status.branch)
+                    .font(.caption2)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                if !status.isClean {
+                    // dirty 는 개수만. 파일 이름도 diff 도 보여주지 않는다 (ADR-15).
+                    Text("●\(status.dirtyCount)")
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
+                }
+            }
+            .foregroundStyle(status.isClean ? .secondary : .primary)
         }
     }
 }
