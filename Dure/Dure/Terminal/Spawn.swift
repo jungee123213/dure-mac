@@ -15,26 +15,37 @@ enum Spawn {
     ///
     /// F3 — `--settings` 로 훅을 이 세션에만 얹는다 (DECISIONS.md D-1).
     /// 사용자의 `~/.claude/settings.json` 은 읽지도 쓰지도 않는다.
+    /// `initialPrompt` — F10a 브로드캐스트. `claude "<prompt>"` 인자로 넘긴다
+    /// (설계문서 F10a). PTY 에 타이핑하지 않는 이유는 그러려면 "언제 다 떴는지" 를
+    /// 알아야 하고, 그 판단이 곧 터미널 화면 파싱이라 ADR-3 에 걸리기 때문이다.
     static func script(repoPath: String,
                        sessionID: String,
                        model: String?,
-                       kind: AgentKind = .claude) -> String {
+                       kind: AgentKind = .claude,
+                       initialPrompt: String? = nil) -> String {
         var parts = [
             "export DURE_SESSION=\(quoted(sessionID))",
             "export DURE_AGENT_KIND=\(quoted(kind.rawValue))",
             "cd \(quoted(repoPath))"
         ]
-        parts.append("exec " + agentCommand(kind: kind, model: model))
+        parts.append("exec " + agentCommand(kind: kind, model: model, initialPrompt: initialPrompt))
         return parts.joined(separator: "; ")
     }
 
     /// 에이전트별 실행 명령. D-3 — Codex 는 자리만 열어두고 1차에서는 쓰지 않는다.
-    private static func agentCommand(kind: AgentKind, model: String?) -> String {
+    private static func agentCommand(kind: AgentKind, model: String?,
+                                     initialPrompt: String?) -> String {
         switch kind {
         case .claude:
             var cmd = "claude --settings \(quoted(HookBridge.settingsURL.path))"
             if let model, !model.isEmpty {
                 cmd += " --model \(quoted(model))"
+            }
+            // 공백뿐인 브리핑은 없는 것과 같다. 빈 인자를 넘기면 claude 가
+            // 빈 프롬프트를 제출한 것으로 받는다.
+            if let prompt = initialPrompt?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !prompt.isEmpty {
+                cmd += " " + quoted(prompt)
             }
             return cmd
         case .codex:

@@ -21,7 +21,9 @@ struct ContentView: View {
             ingestor.start(store: store)
             // 앱이 꺼져 있던 동안 붙은 트랜스크립트 분량을 따라잡는다 (커서가 있어 증분이다).
             store.ingestTranscripts()
-            // F8 — 훅이 놓치는 "사람이 앱 밖에서 한 커밋" 을 메운다 (D-13).
+            // F8 — 페인이 아직 안 떴어도 브랜치는 보여야 한다.
+            store.refreshAllGit()
+            // 훅이 놓치는 "사람이 앱 밖에서 한 커밋" 을 메운다 (D-13).
             store.startGitPolling()
         }
     }
@@ -98,12 +100,20 @@ struct ContentView: View {
             } else {
                 // 높이 균등 고정. 탭 바 없음, 스플리터 없음, 재배치 없음 (ADR-13).
                 VStack(spacing: 1) {
+                    briefingBar
                     ForEach(store.visibleRepos) { repo in
-                        let sessionID = store.sessionID(for: repo)
                         VStack(spacing: 0) {
                             paneHeader(for: repo)
-                            TerminalPane(repo: repo, sessionID: sessionID,
-                                         onExit: { _ in store.markDead(sessionID) })
+                            if store.hasStarted(repo.id) {
+                                // `sessionID` 는 출발할 때 처음 만들어진다. 훅이 발화하기 전에
+                                // agent 행이 있어야 하므로 스폰 직전인 여기가 맞다 (ADR-17).
+                                let sessionID = store.sessionID(for: repo)
+                                TerminalPane(repo: repo, sessionID: sessionID,
+                                             initialPrompt: store.prompt(for: repo.id),
+                                             onExit: { _ in store.markDead(sessionID) })
+                            } else {
+                                waitingToStart(repo)
+                            }
                         }
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                     }
@@ -112,6 +122,36 @@ struct ContentView: View {
             }
         }
         .frame(minWidth: 720, minHeight: 480)
+    }
+
+    /// F10a — 여기 넣은 문구를 **모든 페인이 같이 받고 출발한다.**
+    /// 비워두고 시작해도 된다. 그러면 그냥 `claude` 만 뜬다.
+    private var briefingBar: some View {
+        HStack(spacing: 8) {
+            TextField("브리핑 (비워도 됩니다) — 모든 터미널이 이 문장으로 출발합니다",
+                      text: $store.broadcastPrompt, axis: .vertical)
+                .textFieldStyle(.roundedBorder)
+                .lineLimit(1...4)
+                .font(.callout)
+            Button("전체 시작") { store.startAll() }
+                .keyboardShortcut(.return, modifiers: .command)
+                .disabled(!store.hasUnstartedPanes)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(.bar)
+    }
+
+    /// 아직 안 뜬 페인. **자동 기동을 하지 않는다** — 브리핑을 넣을 틈이 있어야 하기 때문이다.
+    private func waitingToStart(_ repo: Repo) -> some View {
+        VStack(spacing: 10) {
+            Text("시작 대기")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+            Button("이 페인만 시작") { store.start(repo) }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color(nsColor: .textBackgroundColor))
     }
 
     /// 페인이 여러 개 쌓이므로 어느 레포인지와 지금 상태를 한 줄로 보여준다.
