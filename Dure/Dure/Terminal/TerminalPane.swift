@@ -7,7 +7,8 @@ struct TerminalPane: NSViewRepresentable {
     let repo: Repo
     /// ADR-14 의 게이트 값. 페인 하나당 하나이며 앱이 만든다.
     let sessionID: String
-    /// F10a — 출발할 때 함께 넘길 브리핑. `claude "<prompt>"` 인자가 된다.
+    /// 출발할 때 넘길 첫 프롬프트. `claude "<prompt>"` 인자가 된다.
+    /// D-30 으로 브리핑 칸을 빼서 지금은 늘 nil 이다. 단계 4 에서 조율자가 할 일을 넘길 때 쓴다.
     var initialPrompt: String? = nil
     /// D-27 — 숨긴 층의 페인인가. 숨긴 터미널이 first responder 로 남아 있으면
     /// **타이핑이 안 보이는 페인으로 들어간다.**

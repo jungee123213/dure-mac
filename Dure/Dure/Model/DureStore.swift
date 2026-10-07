@@ -40,8 +40,6 @@ final class DureStore {
 
     /// 저장 안 된 편집이 있는가.
     var contextIsDirty: Bool { contextText != contextAsLoaded }
-    /// F10a — 출발할 때 모든 페인이 함께 받을 브리핑. 비어 있어도 된다.
-    var broadcastPrompt: String = ""
     /// 이미 출발한 레포. **자동 기동을 하지 않으므로** 여기 없는 페인은 아직 안 떴다.
     private(set) var startedRepos: Set<String> = []
     var selectedWorkspaceID: String? {
@@ -65,9 +63,6 @@ final class DureStore {
 
     /// F8 의 저빈도 폴링 (D-13). 뷰 갱신을 유발할 값이 아니다.
     @ObservationIgnored private var gitPollTask: Task<Void, Never>?
-
-    /// 출발할 때 실제로 넘긴 브리핑. 입력란은 그 뒤에 바뀔 수 있으므로 따로 붙잡아둔다.
-    @ObservationIgnored private var promptByRepo: [String: String] = [:]
 
     var selectedWorkspace: Workspace? {
         workspaces.first { $0.id == selectedWorkspaceID }
@@ -173,7 +168,6 @@ final class DureStore {
         for id in repoIDs {
             startedRepos.remove(id)
             sessionIDs[id] = nil
-            promptByRepo[id] = nil
         }
         if selectedWorkspaceID == workspaceID { selectedWorkspaceID = nil }
         // 선택이 비었으면 load 가 첫 워크스페이스를 고른다.
@@ -318,6 +312,15 @@ final class DureStore {
     /// `SessionEnd` 훅을 쓰지 않는 이유는 1차 훅 목록에 없고, 프로세스 종료가 더 확실해서다.
     func markDead(_ dureSession: String) {
         setState(.dead, for: dureSession, endedNow: true)
+        // 이슈 #14 — 끝난 페인은 시작 대기로 되돌린다. 남겨두면 죽은 터미널에 묶여
+        // `이 페인만 시작` 도 무시되고 앱을 껐다 켜야 했다. 기록(agent 행·토큰)은 DB 에 남는다.
+        // 다시 시작하면 `sessionID(for:)` 가 새 DURE_SESSION 과 새 agent 행을 만든다.
+        guard let repoID = PaneReset.repoToReset(exitedSession: dureSession,
+                                                 sessionIDs: sessionIDs) else { return }
+        startedRepos.remove(repoID)
+        sessionIDs[repoID] = nil
+        // "지금 페인이 열려 있음" 이 지도에서 빠져야 한다.
+        refreshWorkspaceDoc()
     }
 
     private func setState(_ next: AgentState, for dureSession: String, endedNow: Bool = false) {
@@ -379,14 +382,11 @@ final class DureStore {
         ccSessions.filter { $0.dureSession == dureSession }.max { $0.startedAt < $1.startedAt }
     }
 
-    // MARK: - F10a 실행 시점 브로드캐스트 (Step 7)
+    // MARK: - 페인 시작
 
-    /// **앱을 켜도 `claude` 는 저절로 뜨지 않는다.** 브리핑을 인자로 넘기려면
-    /// 프로세스가 시작되기 *전에* 문구가 있어야 하기 때문이다 (설계문서 성공기준 3).
+    /// **앱을 켜도 `claude` 는 저절로 뜨지 않는다.** 원래 이유(브리핑을 넣을 틈)는 D-30 으로
+    /// 사라졌지만, 어떤 페인을 언제 띄울지는 사람이 정한다.
     func hasStarted(_ repoID: String) -> Bool { startedRepos.contains(repoID) }
-
-    /// 그 페인이 출발할 때 받은 브리핑. 없으면 nil.
-    func prompt(for repoID: String) -> String? { promptByRepo[repoID] }
 
     /// 페인 하나를 출발시킨다. 이미 떠 있으면 아무것도 하지 않는다 —
     /// 진행 중인 작업을 재시작으로 날리지 않기 위해서다.
@@ -394,8 +394,6 @@ final class DureStore {
         guard !startedRepos.contains(repo.id) else { return }
         // 폴더가 없으면 띄워봐야 `cd` 에서 끝난다 (이슈 #10). 버튼을 잠그지만 여기서도 막는다.
         guard repo.folderExists else { return }
-        let prompt = broadcastPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !prompt.isEmpty { promptByRepo[repo.id] = prompt }
         startedRepos.insert(repo.id)
         // agent 행을 여기서 만든다. workspace.md 의 "열려 있음 (X)" 는 이 행의 agentKind 를
         // 읽는다 (최종 리뷰 F4). 스폰보다 먼저이므로 훅 외래키 조건(ADR-17)도 그대로 지켜진다.
@@ -404,7 +402,7 @@ final class DureStore {
         refreshWorkspaceDoc()
     }
 
-    /// F10a 의 본체 — 지금 보이는 페인 전부를 **같은 브리핑으로** 출발시킨다.
+    /// 지금 보이는 워크스페이스의 페인을 한 번에 띄운다 (`전체 시작`, ⌘↩).
     func startAll() {
         for repo in visibleRepos { start(repo) }
     }
