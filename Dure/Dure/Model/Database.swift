@@ -3,7 +3,8 @@ import GRDB
 
 /// 부록 A4 스키마.
 /// v1: workspace · repo (Step 2) — v2: agent · cc_session (Step 4)
-/// — v3: read_cursor · token_usage · tool_use (Step 5).
+/// — v3: read_cursor · token_usage · tool_use (Step 5)
+/// — v4: workspace.default_agent_kind · repo.role (조율자 단계 1).
 enum AppDatabase {
 
     /// 부록 A5 — GRDB 는 `DatabaseQueue` 하나로 직렬화한다.
@@ -109,6 +110,17 @@ enum AppDatabase {
             }
             try db.create(index: "idx_tool_ts", on: "tool_use", columns: ["ts"])
         }
+        m.registerMigration("v4_workspace_orchestrator") { db in
+            // 기존 행에도 값이 있어야 하므로 NOT NULL + DEFAULT 로 넣는다.
+            try db.alter(table: "workspace") { t in
+                t.add(column: "default_agent_kind", .text).notNull().defaults(to: "claude")
+            }
+            // 역할은 안 적어도 되므로 nullable.
+            try db.alter(table: "repo") { t in
+                t.add(column: "role", .text)
+            }
+        }
+
         return m
     }
 }

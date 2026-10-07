@@ -191,3 +191,61 @@ struct GitRefreshTriggerTests {
         #expect(!AgentStateMachine.reaction(to: try AgentStateTests.event("Stop"), current: .dead).refreshGit)
     }
 }
+
+/// 설계문서 4절 — `workspace.md` 의 "최근 커밋 5줄".
+/// 조율자가 "백엔드에 뭐가 바뀌었나" 를 읽는 값이다.
+struct GitLogTests {
+
+    @Test func 로그를_줄_단위로_쪼갠다() {
+        let log = "a1b2c3d 로그인 응답에 refreshToken 추가\ne4f5g6h 에러 코드 정리\n"
+        let s = GitStatusParser.parse(branch: "dev", porcelain: "", log: log)
+        #expect(s.recentCommits == ["a1b2c3d 로그인 응답에 refreshToken 추가",
+                                    "e4f5g6h 에러 코드 정리"])
+    }
+
+    @Test func 로그가_비면_빈_배열이다() {
+        #expect(GitStatusParser.parse(branch: "dev", porcelain: "", log: "").recentCommits.isEmpty)
+    }
+
+    /// 기존 호출부를 깨지 않는다. `log` 는 기본값이 있다.
+    @Test func log_없이_불러도_된다() {
+        #expect(GitStatusParser.parse(branch: "dev", porcelain: "").recentCommits.isEmpty)
+    }
+
+    @Test func 실제_레포에서_커밋_메시지를_읽는다() throws {
+        let repo = try GitReaderTests.makeRepo()
+        defer { try? FileManager.default.removeItem(at: repo) }
+
+        let s = try #require(GitReader.read(at: repo.path))
+        #expect(s.recentCommits.count == 1)
+        #expect(s.recentCommits[0].hasSuffix("init"))
+    }
+
+    /// 최종 리뷰 F7 — 사용자 설정(`log.decorate`, `color.ui=always`)이 `workspace.md` 에
+    /// `(HEAD -> main)` 이나 ANSI 이스케이프를 섞으면 안 된다.
+    @Test func 사용자_git_설정이_로그를_오염시키지_않는다() throws {
+        let repo = try GitReaderTests.makeRepo()
+        defer { try? FileManager.default.removeItem(at: repo) }
+        try GitReaderTests.run("config", "log.decorate", "short", in: repo)
+        try GitReaderTests.run("config", "color.ui", "always", in: repo)
+
+        let s = try #require(GitReader.read(at: repo.path))
+        #expect(s.recentCommits.count == 1)
+        #expect(!s.recentCommits[0].contains("HEAD"))
+        #expect(!s.recentCommits[0].contains("\u{1B}"))
+    }
+
+    /// **커밋이 하나도 없는 레포에서 `git log` 는 실패한다.**
+    /// 그것 때문에 상태 전체가 nil 이 되면 브랜치도 dirty 도 못 보게 된다.
+    @Test func 커밋이_없어도_상태를_돌려준다() throws {
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("dure-empty-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try GitReaderTests.run("init", "-b", "main", in: dir)
+
+        let s = try #require(GitReader.read(at: dir.path))
+        #expect(s.recentCommits.isEmpty)
+        #expect(s.branch == "main")
+    }
+}
