@@ -22,9 +22,21 @@ enum WorkspaceDoc {
         var git: GitStatus?
         /// 지금 페인이 열려 있다면 어떤 CLI 인지. nil 이면 안 열려 있다.
         var openedWith: AgentKind?
+        /// #16 — 레포 `CLAUDE.md` 경로(있을 때). 조율자는 이걸 자동으로 싣지 않고 필요할 때 읽는다(D-31 ②).
+        var instructionsPath: String? = nil
+        /// #16 — 이 레포 페인의 `claude --name`. 조율자가 메시지 대상을 찾을 때 쓴다.
+        var sessionName: String? = nil
+        /// #16 — 등록된 폴더가 없다(이슈 #10). 조율자가 없는 경로를 읽으려 하지 않게.
+        var folderMissing: Bool = false
     }
 
-    static func render(name: String, repos: [RepoLine]) -> String {
+    struct OrchestratorLine {
+        var sessionName: String
+        var openedWith: AgentKind?
+    }
+
+    static func render(name: String, repos: [RepoLine],
+                       orchestrator: OrchestratorLine? = nil) -> String {
         var out = """
         # \(name)
 
@@ -32,6 +44,11 @@ enum WorkspaceDoc {
         사람이 쓰는 문서는 같은 폴더의 `context.md` 다.
 
         """
+
+        if let o = orchestrator {
+            out += "\n## 조율자\n\n- 세션 이름: `\(o.sessionName)`\n"
+            out += o.openedWith.map { "- 지금 열려 있음 (\($0.rawValue))\n" } ?? "- 닫혀 있음\n"
+        }
 
         guard !repos.isEmpty else {
             return out + "\n등록된 레포가 없습니다.\n"
@@ -41,9 +58,12 @@ enum WorkspaceDoc {
         for repo in repos {
             out += "\n### \(repo.name)\n\n"
             out += "- 경로: `\(repo.path)`\n"
+            if repo.folderMissing { out += "- ⚠️ 폴더 없음 — 등록된 경로에 폴더가 없다\n" }
             if let role = repo.role, !role.isEmpty {
                 out += "- 역할: \(role)\n"
             }
+            if let p = repo.instructionsPath { out += "- 지시문: `\(p)`\n" }
+            if let n = repo.sessionName { out += "- 세션 이름: `\(n)`\n" }
             out += "- 상태: \(statusLine(repo.git))\n"
             if let kind = repo.openedWith {
                 out += "- 지금 페인이 열려 있음 (\(kind.rawValue))\n"

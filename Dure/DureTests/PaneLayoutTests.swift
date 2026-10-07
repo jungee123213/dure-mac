@@ -34,7 +34,7 @@ struct PaneLayoutTests {
         #expect(b.map(\.workspaceID) == ids)
     }
 
-    /// 삭제된 워크스페이스의 흔적이 `startedRepos` 에 남아 있어도 층을 만들지 않는다.
+    /// 삭제된 워크스페이스의 흔적이 `startedPanes` 에 남아 있어도 층을 만들지 않는다.
     @Test func 목록에_없는_워크스페이스는_무시한다() {
         let layers = PaneLayout.layers(workspaceIDs: ["w1"], selected: "w1", startedWorkspaceIDs: ["gone"])
         #expect(layers.map(\.workspaceID) == ["w1"])

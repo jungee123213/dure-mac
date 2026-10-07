@@ -30,7 +30,6 @@ enum HookBridge {
     static var shimURL: URL { binDir.appendingPathComponent("hook") }
     /// 이벤트 하나당 파일 하나. `events.jsonl` 공유 append 를 쓰지 않는 이유는 shimSource 주석 참조.
     static var eventsDir: URL { home.appendingPathComponent("events", isDirectory: true) }
-    static var settingsURL: URL { home.appendingPathComponent("hooks.json") }
 
     /// ADR-17 의 1차 훅 4종. `PreToolUse` 는 1차에 설치하지 않는다
     /// (툴 로그는 트랜스크립트에 이미 있고, 모든 툴 호출에 프로세스 spawn 비용이 붙는다).
@@ -50,16 +49,19 @@ enum HookBridge {
         try Data(shimSource.utf8).write(to: shimURL, options: .atomic)
         try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: shimURL.path)
 
-        try settingsJSON().write(to: settingsURL, options: .atomic)
-        try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: settingsURL.path)
+        // #16 — 페인 종류별 설정. 레포 페인용은 내용이 고정이라 시작 때 쓴다.
+        // 조율자용은 레포 목록이 바뀌므로 조율자를 띄울 때마다 쓴다 (SessionSettings.writeOrchestrator).
+        try SessionSettings.writeRepoPane()
+        // 예전 공용 파일. 더는 아무도 읽지 않는다.
+        try? fm.removeItem(at: home.appendingPathComponent("hooks.json"))
     }
 
-    /// `--settings` 로 넘길 훅 설정.
+    /// `--settings` 의 `"hooks"` 값. 페인 종류별 설정 파일이 이것을 공통으로 담는다 (#16).
     ///
     /// **이벤트 이름을 shim 의 인자로 넘긴다.** 이게 핵심이다 —
     /// shim 이 stdin JSON 을 파싱하지 않고도 무슨 이벤트인지 알 수 있어서,
     /// 훅 스크립트에 `jq` 같은 외부 의존이 하나도 없다.
-    static func settingsJSON() throws -> Data {
+    static func hooksObject() -> [String: Any] {
         let quoted = "'" + shimURL.path.replacingOccurrences(of: "'", with: "'\\''") + "'"
         var hooks: [String: Any] = [:]
         for event in hookEvents {
@@ -72,8 +74,13 @@ enum HookBridge {
                 ]]
             ]]
         }
-        return try JSONSerialization.data(withJSONObject: ["hooks": hooks],
-                                          options: [.prettyPrinted, .sortedKeys])
+        return hooks
+    }
+
+    /// 훅만 담은 설정. 테스트와 진단용으로 남긴다 — 실제 스폰은 `SessionSettings` 의 파일을 쓴다.
+    static func settingsJSON() throws -> Data {
+        try JSONSerialization.data(withJSONObject: ["hooks": hooksObject()],
+                                   options: [.prettyPrinted, .sortedKeys])
     }
 
     // MARK: - shim

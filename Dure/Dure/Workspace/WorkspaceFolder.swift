@@ -107,6 +107,16 @@ enum WorkspaceFolder {
         try Data(text.utf8).write(to: mapURL(for: workspaceID, root: root), options: .atomic)
     }
 
+    /// #16 — 조율자 지시문. 조율자의 cwd 라 claude 가 자동으로 읽는다. 앱이 관리하고 매번 덮어쓴다.
+    static func instructionsURL(for workspaceID: String, root: URL = defaultRoot) -> URL {
+        url(for: workspaceID, root: root).appendingPathComponent("CLAUDE.md")
+    }
+
+    static func writeInstructions(_ workspaceID: String, _ text: String,
+                                  root: URL = defaultRoot) throws {
+        try Data(text.utf8).write(to: instructionsURL(for: workspaceID, root: root), options: .atomic)
+    }
+
     /// D-26 — 삭제한 워크스페이스의 폴더는 지우지 않고 **휴지통으로 보낸다.**
     /// `context.md` 는 사람이 쓴 문서라 실수했을 때 되살릴 길이 있어야 한다.
     ///

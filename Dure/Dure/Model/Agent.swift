@@ -31,7 +31,9 @@ enum AgentState: String, Codable, CaseIterable {
 /// 부록 A4.
 struct Agent: Codable, Identifiable, Hashable, FetchableRecord, PersistableRecord {
     var dureSession: String
-    var repoId: String
+    /// 이슈 #16 · v5 — 에이전트는 워크스페이스에 속한다. 레포는 선택이다(조율자는 레포가 없다).
+    var workspaceId: String
+    var repoId: String?
     /// D-3 — claude / codex. 이벤트 줄에도 같은 값이 실린다.
     var agentKind: String
     var state: AgentState
@@ -44,6 +46,7 @@ struct Agent: Codable, Identifiable, Hashable, FetchableRecord, PersistableRecor
 
     enum CodingKeys: String, CodingKey {
         case dureSession = "dure_session"
+        case workspaceId = "workspace_id"
         case repoId = "repo_id"
         case agentKind = "agent_kind"
         case state, model

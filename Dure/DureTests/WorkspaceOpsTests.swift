@@ -17,7 +17,7 @@ struct WorkspaceOpsTests {
             try Workspace(id: "w2", name: "웹").insert(db)
             try Repo(id: "r1", workspaceId: "w1", path: "/repo1",
                      label: nil, model: nil, role: nil).insert(db)
-            try Agent(dureSession: "a1", repoId: "r1", agentKind: "claude",
+            try Agent(dureSession: "a1", workspaceId: "w1", repoId: "r1", agentKind: "claude",
                       state: .dead, model: nil, startedAt: 0, endedAt: 1).insert(db)
             try db.execute(sql: """
                 INSERT INTO cc_session (cc_session_id, dure_session, transcript_path, source, started_at)
@@ -69,7 +69,7 @@ struct WorkspaceOpsTests {
 
     @Test func 삭제하면_레포와_기록이_함께_지워진다() throws {
         let q = try Self.makeDB()
-        try q.write { try WorkspaceOps.delete("w1", runningRepoIDs: [], in: $0) }
+        try q.write { try WorkspaceOps.delete("w1", runningWorkspaceIDs: [], in: $0) }
         // #expect 매크로 안의 try 는 read 클로저에서 던지는 것으로 추론되지 않아 값을 먼저 꺼낸다.
         let (ws, repos, agents, sessions) = try q.read { db in
             (try Workspace.fetchOne(db, key: "w1"),
@@ -85,16 +85,16 @@ struct WorkspaceOpsTests {
 
     @Test func 다른_워크스페이스는_남는다() throws {
         let q = try Self.makeDB()
-        try q.write { try WorkspaceOps.delete("w1", runningRepoIDs: [], in: $0) }
+        try q.write { try WorkspaceOps.delete("w1", runningWorkspaceIDs: [], in: $0) }
         #expect(try q.read { try Workspace.fetchOne($0, key: "w2") } != nil)
     }
 
     /// 0개일 때의 빈 화면을 두지 않는다 (D-26).
     @Test func 마지막_워크스페이스는_지울_수_없다() throws {
         let q = try Self.makeDB()
-        try q.write { try WorkspaceOps.delete("w2", runningRepoIDs: [], in: $0) }
+        try q.write { try WorkspaceOps.delete("w2", runningWorkspaceIDs: [], in: $0) }
         #expect(throws: WorkspaceOps.Refusal.lastWorkspace) {
-            try q.write { try WorkspaceOps.delete("w1", runningRepoIDs: [], in: $0) }
+            try q.write { try WorkspaceOps.delete("w1", runningWorkspaceIDs: [], in: $0) }
         }
     }
 
@@ -102,14 +102,24 @@ struct WorkspaceOpsTests {
     @Test func 실행_중인_페인이_있으면_지울_수_없다() throws {
         let q = try Self.makeDB()
         #expect(throws: WorkspaceOps.Refusal.hasRunningPanes) {
-            try q.write { try WorkspaceOps.delete("w1", runningRepoIDs: ["r1"], in: $0) }
+            try q.write { try WorkspaceOps.delete("w1", runningWorkspaceIDs: ["w1"], in: $0) }
         }
         #expect(try q.read { try Repo.fetchCount($0) } == 1)
     }
 
     @Test func 다른_워크스페이스의_실행_중_페인은_막지_않는다() throws {
         let q = try Self.makeDB()
-        try q.write { try WorkspaceOps.delete("w2", runningRepoIDs: ["r1"], in: $0) }
+        try q.write { try WorkspaceOps.delete("w2", runningWorkspaceIDs: ["w1"], in: $0) }
         #expect(try q.read { try Workspace.fetchOne($0, key: "w2") } == nil)
+    }
+
+    /// 조율자 기록도 "사라지는 것" 에 센다.
+    @Test func 삭제_영향에_조율자_기록도_센다() throws {
+        let q = try Self.makeDB()
+        try q.write { db in
+            try Agent(dureSession: "orch", workspaceId: "w1", repoId: nil, agentKind: "claude",
+                      state: .dead, model: nil, startedAt: 0, endedAt: nil).insert(db)
+        }
+        #expect(try q.read { try WorkspaceOps.impact(of: "w1", in: $0) } == .init(repos: 1, sessions: 2))
     }
 }

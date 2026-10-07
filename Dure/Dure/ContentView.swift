@@ -39,9 +39,10 @@ struct ContentView: View {
             store.ingestTranscripts()
             // F8 — 페인이 아직 안 떴어도 브랜치는 보여야 한다.
             store.refreshAllGit()
-            // 훅이 놓치는 "사람이 앱 밖에서 한 커밋" 을 메운다 (D-13).
-            // 조율자가 읽을 폴더와 문서를 준비한다 (설계문서 4절).
+            // 조율자가 읽을 폴더와 문서를 **모든 워크스페이스**에 준비한다 (설계문서 4절, #16).
+            store.prepareAllWorkspaceFolders()
             store.openWorkspaceFolder()
+            // 훅이 놓치는 "사람이 앱 밖에서 한 커밋" 을 메운다 (D-13).
             store.startGitPolling()
         }
         // 최종 리뷰 F3 — 저장을 안 누르고 끄면 context.md 편집이 사라진다.
@@ -110,12 +111,17 @@ struct ContentView: View {
             }
 
             Section("레포") {
+                if store.visibleRepos.isEmpty {
+                    Text("레포를 추가하면 그 아래로 터미널이 쌓입니다. 조율자는 레포 없이도 띄울 수 있습니다.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
                 ForEach(store.visibleRepos) { repo in
                     VStack(alignment: .leading, spacing: 2) {
                         HStack(spacing: 6) {
                             Text(repo.displayName).font(.body)
                             Spacer(minLength: 0)
-                            StateChip(state: store.state(forRepo: repo.id))
+                            StateChip(state: store.state(for: .repo(repo)))
                         }
                         GitChip(status: store.git[repo.id])
                         RoleField(repo: repo) { store.setRole($0, for: repo) }
@@ -168,7 +174,8 @@ struct ContentView: View {
 
     private var terminalStack: some View {
         VStack(spacing: 0) {
-            if !store.visibleRepos.isEmpty { startBar }
+            // 조율자가 늘 있으므로 시작 바도 늘 보인다 (레포가 없어도 조율자는 띄운다).
+            startBar
             ZStack {
                 // D-27 — 시작한 페인이 있는 워크스페이스는 안 보여도 트리에 남긴다.
                 // 트리에서 빠지면 SwiftTerm 이 PTY 를 닫아 claude 가 끊긴다.
@@ -179,36 +186,28 @@ struct ContentView: View {
                         .accessibilityHidden(!layer.isActive)
                         .zIndex(layer.isActive ? 1 : 0)
                 }
-                if store.visibleRepos.isEmpty {
-                    ContentUnavailableView(
-                        "레포가 없습니다",
-                        systemImage: "folder.badge.plus",
-                        description: Text("왼쪽에서 레포 폴더를 추가하면 터미널이 열립니다.")
-                    )
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .background(Color(nsColor: .windowBackgroundColor))
-                    .zIndex(2)
-                }
             }
         }
         .frame(minWidth: 720, minHeight: 480)
     }
 
-    /// 한 워크스페이스의 세로 스택. 높이 균등 고정. 탭 바 없음, 스플리터 없음, 재배치 없음 (ADR-13).
+    /// 한 워크스페이스의 세로 스택. **조율자가 맨 위**, 레포가 그 아래 (스펙 6절).
+    /// 높이 균등 고정. 탭 바 없음, 스플리터 없음, 재배치 없음 (ADR-13).
     private func paneStack(workspaceID: String, isActive: Bool) -> some View {
         VStack(spacing: 1) {
-            ForEach(store.repos(in: workspaceID)) { repo in
+            ForEach(store.panes(in: workspaceID)) { target in
                 VStack(spacing: 0) {
-                    paneHeader(for: repo)
-                    if store.hasStarted(repo.id) {
+                    paneHeader(for: target)
+                    if store.hasStarted(target) {
                         // `sessionID` 는 출발할 때 처음 만들어진다. 훅이 발화하기 전에
                         // agent 행이 있어야 하므로 스폰 직전인 여기가 맞다 (ADR-17).
-                        let sessionID = store.sessionID(for: repo)
-                        TerminalPane(repo: repo, sessionID: sessionID,
+                        // 조율자는 `start(_:)` 가 설정·CLAUDE.md 를 쓴 뒤에만 이 가지에 온다.
+                        let sessionID = store.sessionID(for: target)
+                        TerminalPane(script: store.launchScript(for: target, sessionID: sessionID),
                                      isActive: isActive && !showingDashboard,
                                      onExit: { _ in store.markDead(sessionID) })
                     } else {
-                        waitingToStart(repo)
+                        waitingToStart(target)
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -249,40 +248,62 @@ struct ContentView: View {
     }
 
     /// 아직 안 뜬 페인. **자동 기동을 하지 않는다** — 어떤 페인을 언제 띄울지는 사람이 정한다 (D-30).
-    private func waitingToStart(_ repo: Repo) -> some View {
+    private func waitingToStart(_ target: PaneTarget) -> some View {
         VStack(spacing: 10) {
-            if repo.folderExists {
-                Text("시작 대기")
+            switch target {
+            case .orchestrator:
+                Text("조율자 — 시작 대기")
                     .font(.callout)
                     .foregroundStyle(.secondary)
-            } else {
-                // 이슈 #10 — 왜 못 띄우는지와 어떻게 하면 되는지를 같이 준다.
-                Text("레포 폴더를 찾을 수 없습니다")
-                    .font(.callout)
-                    .foregroundStyle(.red)
-                Text(repo.path)
+                Text("워크스페이스 문서와 레포들을 읽고 작업을 상의합니다.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                    .textSelection(.enabled)
-                Text("폴더를 되돌리거나, 사이드바에서 이 레포를 제거하고 다시 추가하세요.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+            case .repo(let repo):
+                if repo.folderExists {
+                    Text("시작 대기")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                } else {
+                    // 이슈 #10 — 왜 못 띄우는지와 어떻게 하면 되는지를 같이 준다.
+                    Text("레포 폴더를 찾을 수 없습니다")
+                        .font(.callout)
+                        .foregroundStyle(.red)
+                    Text(repo.path)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                    Text("폴더를 되돌리거나, 사이드바에서 이 레포를 제거하고 다시 추가하세요.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
-            Button("이 페인만 시작") { store.start(repo) }
-                .disabled(!repo.folderExists)
+            if let problem = store.paneProblems[target.key] {
+                Text(problem)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .textSelection(.enabled)
+            }
+            Button("이 페인만 시작") { store.start(target) }
+                .disabled(!store.canStart(target))
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(nsColor: .textBackgroundColor))
     }
 
-    /// 페인이 여러 개 쌓이므로 어느 레포인지와 지금 상태를 한 줄로 보여준다.
+    /// 페인이 여러 개 쌓이므로 무엇인지와 지금 상태를 한 줄로 보여준다.
     /// 탭·스플리터를 두지 않는다는 결정(ADR-13)과 별개로, 이름표는 있어야 구분된다.
-    private func paneHeader(for repo: Repo) -> some View {
+    private func paneHeader(for target: PaneTarget) -> some View {
         HStack(spacing: 8) {
-            Text(repo.displayName).font(.caption).bold()
-            StateChip(state: store.state(forRepo: repo.id))
-            if !repo.folderExists { MissingFolderChip() }
-            GitChip(status: store.git[repo.id])
+            switch target {
+            case .orchestrator:
+                Label("조율자", systemImage: "person.3").font(.caption).bold()
+                StateChip(state: store.state(for: target))
+            case .repo(let repo):
+                Text(repo.displayName).font(.caption).bold()
+                StateChip(state: store.state(for: target))
+                if !repo.folderExists { MissingFolderChip() }
+                GitChip(status: store.git[repo.id])
+            }
             Spacer()
         }
         .padding(.horizontal, 10)
