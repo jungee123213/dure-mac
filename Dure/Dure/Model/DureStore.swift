@@ -318,6 +318,16 @@ final class DureStore {
     /// `SessionEnd` 훅을 쓰지 않는 이유는 1차 훅 목록에 없고, 프로세스 종료가 더 확실해서다.
     func markDead(_ dureSession: String) {
         setState(.dead, for: dureSession, endedNow: true)
+        // 이슈 #14 — 끝난 페인은 시작 대기로 되돌린다. 남겨두면 죽은 터미널에 묶여
+        // `이 페인만 시작` 도 무시되고 앱을 껐다 켜야 했다. 기록(agent 행·토큰)은 DB 에 남는다.
+        // 다시 시작하면 `sessionID(for:)` 가 새 DURE_SESSION 과 새 agent 행을 만든다.
+        guard let repoID = PaneReset.repoToReset(exitedSession: dureSession,
+                                                 sessionIDs: sessionIDs) else { return }
+        startedRepos.remove(repoID)
+        sessionIDs[repoID] = nil
+        promptByRepo[repoID] = nil
+        // "지금 페인이 열려 있음" 이 지도에서 빠져야 한다.
+        refreshWorkspaceDoc()
     }
 
     private func setState(_ next: AgentState, for dureSession: String, endedNow: Bool = false) {
