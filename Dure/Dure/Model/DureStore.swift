@@ -264,6 +264,8 @@ final class DureStore {
     /// 진행 중인 작업을 재시작으로 날리지 않기 위해서다.
     func start(_ repo: Repo) {
         guard !startedRepos.contains(repo.id) else { return }
+        // 폴더가 없으면 띄워봐야 `cd` 에서 끝난다 (이슈 #10). 버튼을 잠그지만 여기서도 막는다.
+        guard repo.folderExists else { return }
         let prompt = broadcastPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
         if !prompt.isEmpty { promptByRepo[repo.id] = prompt }
         startedRepos.insert(repo.id)
@@ -276,7 +278,8 @@ final class DureStore {
 
     /// 아직 안 뜬 페인이 하나라도 있는가. 버튼을 잠그는 데 쓴다.
     var hasUnstartedPanes: Bool {
-        visibleRepos.contains { !startedRepos.contains($0.id) }
+        // 폴더 없는 레포는 셈에서 뺀다. 안 그러면 그것 하나 때문에 `전체 시작` 이 영영 켜져 있다.
+        visibleRepos.contains { !startedRepos.contains($0.id) && $0.folderExists }
     }
 
     // MARK: - F8 git 상태 (Step 7)

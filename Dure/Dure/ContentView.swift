@@ -54,11 +54,14 @@ struct ContentView: View {
                             StateChip(state: store.state(forRepo: repo.id))
                         }
                         GitChip(status: store.git[repo.id])
-                        Text(repo.path)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                            .truncationMode(.head)
+                        HStack(spacing: 4) {
+                            if !repo.folderExists { MissingFolderChip() }
+                            Text(repo.path)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .truncationMode(.head)
+                        }
                         Picker("모델", selection: modelBinding(for: repo)) {
                             Text("기본").tag("")
                             Text("opus").tag("opus")
@@ -145,10 +148,25 @@ struct ContentView: View {
     /// 아직 안 뜬 페인. **자동 기동을 하지 않는다** — 브리핑을 넣을 틈이 있어야 하기 때문이다.
     private func waitingToStart(_ repo: Repo) -> some View {
         VStack(spacing: 10) {
-            Text("시작 대기")
-                .font(.callout)
-                .foregroundStyle(.secondary)
+            if repo.folderExists {
+                Text("시작 대기")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            } else {
+                // 이슈 #10 — 왜 못 띄우는지와 어떻게 하면 되는지를 같이 준다.
+                Text("레포 폴더를 찾을 수 없습니다")
+                    .font(.callout)
+                    .foregroundStyle(.red)
+                Text(repo.path)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                Text("폴더를 되돌리거나, 사이드바에서 이 레포를 제거하고 다시 추가하세요.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
             Button("이 페인만 시작") { store.start(repo) }
+                .disabled(!repo.folderExists)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(nsColor: .textBackgroundColor))
@@ -160,6 +178,7 @@ struct ContentView: View {
         HStack(spacing: 8) {
             Text(repo.displayName).font(.caption).bold()
             StateChip(state: store.state(forRepo: repo.id))
+            if !repo.folderExists { MissingFolderChip() }
             GitChip(status: store.git[repo.id])
             Spacer()
             if let model = repo.model {
@@ -186,6 +205,18 @@ struct ContentView: View {
                 store.addRepo(path: url.path, to: wsID)
             }
         }
+    }
+}
+
+/// 이슈 #10 — 등록 뒤 옮겨지거나 지워진 레포 폴더. 이 레포는 시작할 수 없다.
+struct MissingFolderChip: View {
+    var body: some View {
+        Text("폴더 없음")
+            .font(.caption2)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 1)
+            .background(Color.red.opacity(0.18), in: Capsule())
+            .foregroundStyle(.red)
     }
 }
 

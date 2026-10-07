@@ -23,13 +23,16 @@ enum Spawn {
                        model: String?,
                        kind: AgentKind = .claude,
                        initialPrompt: String? = nil) -> String {
-        var parts = [
+        let exports = [
             "export DURE_SESSION=\(quoted(sessionID))",
-            "export DURE_AGENT_KIND=\(quoted(kind.rawValue))",
-            "cd \(quoted(repoPath))"
+            "export DURE_AGENT_KIND=\(quoted(kind.rawValue))"
         ]
-        parts.append("exec " + agentCommand(kind: kind, model: model, initialPrompt: initialPrompt))
-        return parts.joined(separator: "; ")
+        // ⚠️ `cd` 와 `exec` 는 반드시 `&&` 로 잇는다 (이슈 #10).
+        // `;` 면 폴더가 없어 `cd` 가 실패해도 에이전트가 앱 프로세스의 cwd 인 `/` 에서 뜬다.
+        // 화면상으로는 정상 기동과 구별되지 않는다. `&&` 면 zsh 가 에러를 찍고 끝나 페인이 `종료` 가 된다.
+        let launch = "cd \(quoted(repoPath)) && exec "
+            + agentCommand(kind: kind, model: model, initialPrompt: initialPrompt)
+        return (exports + [launch]).joined(separator: "; ")
     }
 
     /// 에이전트별 실행 명령. D-3 — Codex 는 자리만 열어두고 1차에서는 쓰지 않는다.

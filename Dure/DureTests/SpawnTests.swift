@@ -115,3 +115,85 @@ struct SpawnQuotingThroughShellTests {
         #expect(try Self.echoThroughZsh(prompt) == prompt)
     }
 }
+
+/// 이슈 #10 — 레포 폴더가 없으면 `cd` 가 실패해도 claude 가 앱 프로세스의 cwd(`/`)에서 떴다.
+/// 스크립트가 `;` 로 이어져 있어 `cd` 실패가 다음 명령을 막지 못했다.
+///
+/// **진짜 zsh 로 돌린다.** 문자열에 `&&` 가 있는지만 보면 인용·순서가 틀려도 통과한다.
+/// 단 PATH 를 가짜 `claude` 하나뿐인 폴더로 묶는다 — 회귀하면 진짜 claude 가 `/` 에서
+/// 뜨는 테스트가 되기 때문이다. `-ilc` 가 아니라 `-c` 인 이유도 같다(`.zshrc` 가 PATH 를 되살린다).
+struct SpawnCdGuardTests {
+
+    struct Run { let status: Int32; let launchedIn: String? }
+
+    static func run(repoPath: String) throws -> Run {
+        let fm = FileManager.default
+        let bin = fm.temporaryDirectory.appendingPathComponent("dure-fake-bin-\(UUID().uuidString)")
+        try fm.createDirectory(at: bin, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: bin) }
+        let fake = bin.appendingPathComponent("claude")
+        // 떴다면 어디서 떴는지 남긴다. 그것이 이 버그의 증상이다.
+        try "#!/bin/sh\necho \"LAUNCHED:$(pwd)\"\n".write(to: fake, atomically: true, encoding: .utf8)
+        try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: fake.path)
+
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: Spawn.shell)
+        p.arguments = ["-c", Spawn.script(repoPath: repoPath, sessionID: "pane-1", model: nil)]
+        p.environment = ["PATH": "\(bin.path):/usr/bin:/bin", "HOME": NSHomeDirectory()]
+        p.currentDirectoryURL = URL(fileURLWithPath: "/")
+        let out = Pipe()
+        p.standardOutput = out
+        p.standardError = Pipe()
+        try p.run()
+        let data = out.fileHandleForReading.readDataToEndOfFile()
+        p.waitUntilExit()
+        let text = String(decoding: data, as: UTF8.self)
+        let launched = text.split(separator: "\n")
+            .first { $0.hasPrefix("LAUNCHED:") }
+            .map { String($0.dropFirst("LAUNCHED:".count)) }
+        return Run(status: p.terminationStatus, launchedIn: launched)
+    }
+
+    @Test func 폴더가_없으면_claude_를_띄우지_않는다() throws {
+        let r = try Self.run(repoPath: "/nonexistent-dure-\(UUID().uuidString)")
+        #expect(r.launchedIn == nil)
+        #expect(r.status != 0)
+    }
+
+    /// 가드가 정상 경로까지 막으면 안 된다.
+    @Test func 폴더가_있으면_그_폴더에서_띄운다() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("dure repo '\(UUID().uuidString)'")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let r = try Self.run(repoPath: dir.path)
+        // macOS 임시 폴더는 /var → /private/var 심볼릭 링크라 pwd 가 다르게 나올 수 있다.
+        #expect(r.launchedIn.map { URL(fileURLWithPath: $0).resolvingSymlinksInPath().path }
+                == dir.resolvingSymlinksInPath().path)
+    }
+}
+
+/// 이슈 #10 — 사이드바 "폴더 없음" 표시와 시작 버튼 잠금의 근거.
+struct RepoFolderExistsTests {
+
+    static func repo(_ path: String) -> Repo { Repo(workspaceId: "w", path: path) }
+
+    @Test func 있는_폴더는_있다() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        #expect(Self.repo(dir.path).folderExists)
+    }
+
+    @Test func 없는_폴더는_없다() {
+        #expect(!Self.repo("/nonexistent-dure-\(UUID().uuidString)").folderExists)
+    }
+
+    /// 같은 경로에 폴더 대신 파일이 있으면 `cd` 는 역시 실패한다.
+    @Test func 파일은_폴더가_아니다() throws {
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try Data().write(to: file)
+        defer { try? FileManager.default.removeItem(at: file) }
+        #expect(!Self.repo(file.path).folderExists)
+    }
+}
