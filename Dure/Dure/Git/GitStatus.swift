@@ -8,6 +8,8 @@ nonisolated struct GitStatus: Equatable, Sendable {
     var dirtyCount: Int
     /// `rev-parse --abbrev-ref` 가 "HEAD" 를 준 경우. 브랜치 위가 아니다.
     var isDetached: Bool
+    /// `git log --oneline -5`. 조율자가 "남이 뭘 바꿨나" 를 읽는 값이다 (설계문서 4절).
+    var recentCommits: [String] = []
 
     var isClean: Bool { dirtyCount == 0 }
 }
@@ -17,11 +19,13 @@ nonisolated struct GitStatus: Equatable, Sendable {
 /// (`TranscriptParser` 와 같은 이유).
 nonisolated enum GitStatusParser {
 
-    static func parse(branch: String, porcelain: String) -> GitStatus {
+    static func parse(branch: String, porcelain: String, log: String = "") -> GitStatus {
         let name = branch.trimmingCharacters(in: .whitespacesAndNewlines)
         // `split` 은 기본적으로 빈 조각을 버린다. 줄 끝 개행이 한 줄로 세어지지 않는다.
         let count = porcelain.split(separator: "\n").count
-        return GitStatus(branch: name, dirtyCount: count, isDetached: name == "HEAD")
+        let commits = log.split(separator: "\n").map(String.init)
+        return GitStatus(branch: name, dirtyCount: count,
+                         isDetached: name == "HEAD", recentCommits: commits)
     }
 }
 

@@ -19,12 +19,43 @@ final class DureStore {
     private(set) var usageByAgent: [String: UsageTotals] = [:]
     /// 레포별 git 상태. F8. 읽기 실패는 값을 지우지 않는다 (D-13).
     private(set) var git = GitStatusCache()
+    /// `context.md` 의 내용. 대시보드가 편집한다.
+    var contextText: String = ""
+    /// `contextText` 를 읽어온 워크스페이스. 다른 워크스페이스의 글을 엉뚱한 곳에 쓰지 않기 위한 표식이다.
+    @ObservationIgnored private var contextLoadedFor: String?
+    /// 읽어온(또는 마지막으로 저장한) 시점의 글. 이것과 달라야 "편집됨" 이다.
+    /// **관측 대상이다** — 대시보드의 "저장 안 됨" 표시가 이 값으로 바뀐다 (최종 리뷰 F3).
+    private var contextAsLoaded: String = ""
+    /// 편집을 시작할 때 디스크에서 읽은 결과. 저장할 때 디스크가 **이것과 같아야만** 쓴다 (F2).
+    @ObservationIgnored private var contextBase: WorkspaceFolder.ContextRead = .missing
+
+    /// 저장을 막은 이유. 대시보드가 띄운다.
+    enum ContextProblem: Equatable {
+        /// 읽어온 뒤 앱 밖(Finder 로 연 편집기 등)에서 바뀌었다 (F2).
+        case changedOutside
+        /// 파일은 있는데 읽지 못했다 (F6). 빈 글로 덮어쓰면 문서가 사라진다.
+        case unreadable
+    }
+    private(set) var contextProblem: ContextProblem?
+
+    /// 저장 안 된 편집이 있는가.
+    var contextIsDirty: Bool { contextText != contextAsLoaded }
     /// F10a — 출발할 때 모든 페인이 함께 받을 브리핑. 비어 있어도 된다.
     var broadcastPrompt: String = ""
     /// 이미 출발한 레포. **자동 기동을 하지 않으므로** 여기 없는 페인은 아직 안 떴다.
     private(set) var startedRepos: Set<String> = []
     var selectedWorkspaceID: String? {
-        didSet { refreshAllGit() }
+        willSet {
+            // 저장을 안 누르고 워크스페이스를 바꾸면 openWorkspaceFolder 가 contextText 를
+            // 덮어써 편집이 사라진다. 나가는 쪽 워크스페이스에 먼저 저장한다.
+            // 폴더가 없으면(deleteWorkspace 가 폴더를 지운 뒤 선택을 nil 로 바꾼다) 쓰지 않는다 —
+            // 쓰면 지운 워크스페이스 폴더가 되살아난다. 충돌 검사(F2)도 같은 경로를 탄다.
+            saveContextBeforeLeaving()
+        }
+        didSet {
+            refreshAllGit()
+            openWorkspaceFolder()
+        }
     }
 
     /// 페인 하나당 UUID 하나 (ADR-14 의 `DURE_SESSION`).
@@ -45,7 +76,20 @@ final class DureStore {
     /// 현재 워크스페이스의 레포들. 터미널 페인은 이 순서대로 세로로 쌓인다 (ADR-13).
     var visibleRepos: [Repo] {
         guard let id = selectedWorkspaceID else { return [] }
-        return repos.filter { $0.workspaceId == id }
+        return repos(in: id)
+    }
+
+    /// 한 워크스페이스의 레포들. 숨긴 층(D-27)도 보이는 층과 같은 순서로 그린다.
+    func repos(in workspaceID: String) -> [Repo] {
+        repos.filter { $0.workspaceId == workspaceID }
+    }
+
+    /// D-27 — 뷰 트리에 남길 워크스페이스 층.
+    var paneLayers: [PaneLayout.Layer] {
+        let started = Set(repos.filter { startedRepos.contains($0.id) }.map(\.workspaceId))
+        return PaneLayout.layers(workspaceIDs: workspaces.map(\.id),
+                                 selected: selectedWorkspaceID,
+                                 startedWorkspaceIDs: started)
     }
 
     func load() {
@@ -66,11 +110,13 @@ final class DureStore {
     }
 
     @discardableResult
-    func addWorkspace(name: String) -> Workspace? {
-        let w = Workspace(name: name)
+    func addWorkspace(name: String, defaultAgentKind: AgentKind = .claude) -> Workspace? {
         do {
-            try AppDatabase.queue.write { try w.insert($0) }
+            let w = try AppDatabase.queue.write {
+                try WorkspaceOps.create(name: name, defaultAgentKind: defaultAgentKind, in: $0)
+            }
             load()
+            // didSet 의 openWorkspaceFolder 가 폴더와 context.md 를 만든다 (Task 5).
             selectedWorkspaceID = w.id
             return w
         } catch {
@@ -79,8 +125,63 @@ final class DureStore {
         }
     }
 
+    func renameWorkspace(_ workspaceID: String, to name: String) {
+        do {
+            try AppDatabase.queue.write { try WorkspaceOps.rename(workspaceID, to: name, in: $0) }
+            load()
+            // workspace.md 제목이 워크스페이스 이름이다.
+            refreshWorkspaceDoc()
+        } catch {
+            NSLog("[Dure] renameWorkspace 실패: \(error)")
+        }
+    }
+
+    /// 지금 claude 가 살아 있는 레포. 워크스페이스 삭제를 막는 근거다 (D-26).
+    /// 상태가 아직 nil 인 것(막 띄워 훅이 안 온 것)도 살아 있는 것으로 친다.
+    var runningRepoIDs: Set<String> {
+        Set(startedRepos.filter { state(forRepo: $0) != .dead })
+    }
+
+    func deletionImpact(of workspaceID: String) -> WorkspaceOps.Impact? {
+        try? AppDatabase.queue.read { try WorkspaceOps.impact(of: workspaceID, in: $0) }
+    }
+
+    /// 확인창을 띄우기 **전에** 막을 이유가 있는지. nil 이면 지울 수 있다.
+    func deletionRefusal(for workspaceID: String) -> WorkspaceOps.Refusal? {
+        do {
+            try AppDatabase.queue.read {
+                try WorkspaceOps.checkDeletable(workspaceID, runningRepoIDs: runningRepoIDs, in: $0)
+            }
+            return nil
+        } catch let refusal as WorkspaceOps.Refusal {
+            return refusal
+        } catch {
+            NSLog("[Dure] 삭제 가능 여부 확인 실패: \(error)")
+            return nil
+        }
+    }
+
+    func deleteWorkspace(_ workspaceID: String) throws {
+        let repoIDs = repos(in: workspaceID).map(\.id)
+        try AppDatabase.queue.write {
+            try WorkspaceOps.delete(workspaceID, runningRepoIDs: runningRepoIDs, in: $0)
+        }
+        // DB 가 지워진 **뒤에만** 폴더를 옮긴다. 순서가 반대면 DB 실패 시 문서만 사라진다 (D-26).
+        do { try WorkspaceFolder.trash(workspaceID) }
+        catch { NSLog("[Dure] 워크스페이스 폴더 휴지통 이동 실패: \(error)") }
+        // 이미 죽은 페인들의 흔적. 층(D-27)도 이것으로 정리된다.
+        for id in repoIDs {
+            startedRepos.remove(id)
+            sessionIDs[id] = nil
+            promptByRepo[id] = nil
+        }
+        if selectedWorkspaceID == workspaceID { selectedWorkspaceID = nil }
+        // 선택이 비었으면 load 가 첫 워크스페이스를 고른다.
+        load()
+    }
+
     func addRepo(path: String, to workspaceID: String) {
-        let r = Repo(workspaceId: workspaceID, path: path, label: nil, model: nil)
+        let r = Repo(workspaceId: workspaceID, path: path, label: nil, model: nil, role: nil)
         do {
             try AppDatabase.queue.write { try r.insert($0) }
             load()
@@ -116,7 +217,8 @@ final class DureStore {
                           repoId: repo.id,
                           agentKind: kind.rawValue,
                           state: .started,
-                          model: repo.model,
+                          // 앱이 모델을 정하지 않는다. 실제 모델은 SessionStart 훅이 cc_session 에 남긴다.
+                          model: nil,
                           startedAt: Int(Date().timeIntervalSince1970),
                           endedAt: nil)
         do {
@@ -139,10 +241,16 @@ final class DureStore {
 
         switch reaction.alert {
         case .waiting(let message):
-            Notifier.post(title: "\(repoName(for: event.dureSession)) — 답을 기다립니다",
+            Notifier.post(title: WorkspaceSummary.alertTitle(
+                              workspace: workspaceName(for: event.dureSession),
+                              repo: repoName(for: event.dureSession),
+                              suffix: "답을 기다립니다"),
                           body: message, dureSession: event.dureSession)
         case .done:
-            Notifier.post(title: "\(repoName(for: event.dureSession)) — 작업 완료",
+            Notifier.post(title: WorkspaceSummary.alertTitle(
+                              workspace: workspaceName(for: event.dureSession),
+                              repo: repoName(for: event.dureSession),
+                              suffix: "작업 완료"),
                           body: "응답이 끝났습니다.", dureSession: event.dureSession)
         case nil:
             break
@@ -177,8 +285,28 @@ final class DureStore {
         return agents.first { $0.dureSession == session }?.state
     }
 
+    /// 그 페인을 실제로 띄운 CLI. agent 행에서 읽는다.
+    private func agentKind(forRepo repoID: String) -> AgentKind? {
+        guard let session = sessionIDs[repoID],
+              let agent = agents.first(where: { $0.dureSession == session }) else { return nil }
+        return AgentKind(rawValue: agent.agentKind)
+    }
+
     func repoName(for dureSession: String) -> String {
         repo(for: dureSession)?.displayName ?? "에이전트"
+    }
+
+    /// 사이드바 워크스페이스 목록에 실을 숫자 (D-27).
+    func summary(for workspaceID: String) -> WorkspaceSummary.Counts {
+        let states = repos(in: workspaceID)
+            .filter { startedRepos.contains($0.id) }
+            .map { state(forRepo: $0.id) }
+        return WorkspaceSummary.counts(states)
+    }
+
+    private func workspaceName(for dureSession: String) -> String? {
+        guard let repo = repo(for: dureSession) else { return nil }
+        return workspaces.first { $0.id == repo.workspaceId }?.name
     }
 
     private func repo(for dureSession: String) -> Repo? {
@@ -269,6 +397,11 @@ final class DureStore {
         let prompt = broadcastPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
         if !prompt.isEmpty { promptByRepo[repo.id] = prompt }
         startedRepos.insert(repo.id)
+        // agent 행을 여기서 만든다. workspace.md 의 "열려 있음 (X)" 는 이 행의 agentKind 를
+        // 읽는다 (최종 리뷰 F4). 스폰보다 먼저이므로 훅 외래키 조건(ADR-17)도 그대로 지켜진다.
+        _ = sessionID(for: repo)
+        // "지금 페인이 열려 있음" 이 지도에 반영돼야 한다.
+        refreshWorkspaceDoc()
     }
 
     /// F10a 의 본체 — 지금 보이는 페인 전부를 **같은 브리핑으로** 출발시킨다.
@@ -282,6 +415,109 @@ final class DureStore {
         visibleRepos.contains { !startedRepos.contains($0.id) && $0.folderExists }
     }
 
+    // MARK: - 워크스페이스 문서 (조율자 단계 1)
+
+    /// 폴더를 만들고 `context.md` 를 읽어온다. 워크스페이스를 열 때 한 번.
+    func openWorkspaceFolder() {
+        guard let id = selectedWorkspaceID else { return }
+        do { try WorkspaceFolder.ensure(id) }
+        catch { NSLog("[Dure] 워크스페이스 폴더 준비 실패: \(error)") }
+        // ensure 가 실패해도 읽는다. 안 읽으면 편집창에 **이전 워크스페이스의 글**이 남는다.
+        loadContext(id)
+        refreshWorkspaceDoc()
+    }
+
+    /// 디스크에서 다시 읽는다. **편집 중인 글은 버려진다** — 사람이 [다시 불러오기] 를
+    /// 눌렀을 때와 편집이 없을 때만 부른다.
+    func reloadContext() {
+        guard let id = selectedWorkspaceID else { return }
+        loadContext(id)
+    }
+
+    /// 대시보드를 열 때 부른다. 편집이 없으면 앱 밖에서 고친 글을 가져온다 (F2).
+    func refreshContextIfUnedited() {
+        guard !contextIsDirty else { return }
+        reloadContext()
+    }
+
+    private func loadContext(_ id: String) {
+        let read = WorkspaceFolder.readContext(id)
+        contextBase = read
+        switch read {
+        case .text(let text):
+            contextText = text
+            contextProblem = nil
+        case .missing:
+            contextText = ""
+            contextProblem = nil
+        case .unreadable:
+            // 빈 편집창을 보여주되 저장은 막는다. 빈 글로 덮어쓰면 문서가 사라진다 (F6).
+            contextText = ""
+            contextProblem = .unreadable
+        }
+        contextAsLoaded = contextText
+        contextLoadedFor = id
+    }
+
+    /// 저장했으면 true. 충돌이거나 못 읽은 파일이면 **쓰지 않고** false (F2 · F6).
+    @discardableResult
+    func saveContext() -> Bool {
+        guard let id = selectedWorkspaceID, contextLoadedFor == id,
+              contextProblem == nil else { return false }
+        do {
+            try WorkspaceFolder.writeContext(id, contextText, expecting: contextBase)
+            contextBase = .text(contextText)
+            contextAsLoaded = contextText
+            return true
+        } catch WorkspaceFolder.ContextConflict.changedOutside {
+            contextProblem = .changedOutside
+            return false
+        } catch {
+            NSLog("[Dure] context.md 저장 실패: \(error)")
+            return false
+        }
+    }
+
+    /// 워크스페이스를 바꾸거나 앱을 끄기 직전에 부른다 (F3).
+    ///
+    /// 저장할 수 없으면(충돌·읽기 실패) 편집 버퍼를 `context.md` 옆 파일로 남긴다.
+    /// 이 뒤에 버퍼가 사라지므로, 원본도 버퍼도 잃지 않는 유일한 길이다.
+    func saveContextBeforeLeaving() {
+        guard let id = selectedWorkspaceID, contextLoadedFor == id, contextIsDirty,
+              FileManager.default.fileExists(atPath: WorkspaceFolder.url(for: id).path)
+        else { return }
+        if saveContext() { return }
+        do {
+            let copy = try WorkspaceFolder.writeUnsavedCopy(id, contextText)
+            NSLog("[Dure] context.md 에 저장하지 못해 편집 내용을 따로 남겼다: \(copy.path)")
+        } catch {
+            NSLog("[Dure] 저장 못 한 context.md 편집 내용 보존 실패: \(error)")
+        }
+    }
+
+    /// `workspace.md` 를 다시 쓴다.
+    ///
+    /// **git 이 갱신될 때마다 함께 부른다.** 조율자가 읽는 지도가 낡으면
+    /// "백엔드에 뭐가 바뀌었나" 를 틀리게 답한다.
+    func refreshWorkspaceDoc() {
+        guard let workspace = selectedWorkspace else { return }
+        let lines = visibleRepos.map { repo in
+            WorkspaceDoc.RepoLine(
+                name: repo.displayName,
+                path: repo.path,
+                role: repo.role,
+                git: git[repo.id],
+                // 최종 리뷰 F4 — 워크스페이스 기본값이 아니라 **실제로 띄운** CLI 를 적는다.
+                // 기본 CLI 를 codex 로 바꿔도 페인은 아직 claude 로만 뜬다. 지도가 거짓말을 하면
+                // 조율자가 엉뚱한 CLI 를 가정한다.
+                openedWith: startedRepos.contains(repo.id) ? agentKind(forRepo: repo.id) : nil
+            )
+        }
+        let md = WorkspaceDoc.render(name: workspace.name, repos: lines)
+        do { try WorkspaceFolder.writeMap(workspace.id, md) }
+        catch { NSLog("[Dure] workspace.md 쓰기 실패: \(error)") }
+    }
+
     // MARK: - F8 git 상태 (Step 7)
 
     /// 한 레포의 git 상태를 다시 읽는다.
@@ -292,7 +528,11 @@ final class DureStore {
         let (id, path) = (repo.id, repo.path)
         Task.detached(priority: .utility) {
             let fresh = GitReader.read(at: path)
-            await MainActor.run { self.git.update(id, with: fresh) }
+            await MainActor.run {
+                self.git.update(id, with: fresh)
+                // 지도가 낡으면 조율자가 틀린 답을 한다.
+                self.refreshWorkspaceDoc()
+            }
         }
     }
 
@@ -314,14 +554,25 @@ final class DureStore {
         }
     }
 
-    func setModel(_ model: String?, for repo: Repo) {
+    /// 조율자가 읽는 한 줄 설명. `workspace.md` 에 실린다.
+    func setRole(_ role: String?, for repo: Repo) {
         var r = repo
-        r.model = model
+        r.role = (role?.isEmpty ?? true) ? nil : role
         do {
             try AppDatabase.queue.write { try r.update($0) }
             load()
-        } catch {
-            NSLog("[Dure] setModel 실패: \(error)")
-        }
+            refreshWorkspaceDoc()
+        } catch { NSLog("[Dure] setRole 실패: \(error)") }
+    }
+
+    /// 워크스페이스 기본 CLI. 페인은 시작할 때 이 값을 미리 골라둔다 (설계문서 8절).
+    /// **단계 1 에서는 저장만 한다.** 스폰은 아직 claude 고정이라 workspace.md 도 이 값을 쓰지 않는다 (F4).
+    func setDefaultAgentKind(_ kind: AgentKind) {
+        guard var w = selectedWorkspace else { return }
+        w.defaultAgentKind = kind.rawValue
+        do {
+            try AppDatabase.queue.write { try w.update($0) }
+            load()
+        } catch { NSLog("[Dure] setDefaultAgentKind 실패: \(error)") }
     }
 }
