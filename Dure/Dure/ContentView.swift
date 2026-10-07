@@ -168,7 +168,7 @@ struct ContentView: View {
 
     private var terminalStack: some View {
         VStack(spacing: 0) {
-            if !store.visibleRepos.isEmpty { briefingBar }
+            if !store.visibleRepos.isEmpty { startBar }
             ZStack {
                 // D-27 — 시작한 페인이 있는 워크스페이스는 안 보여도 트리에 남긴다.
                 // 트리에서 빠지면 SwiftTerm 이 PTY 를 닫아 claude 가 끊긴다.
@@ -205,7 +205,6 @@ struct ContentView: View {
                         // agent 행이 있어야 하므로 스폰 직전인 여기가 맞다 (ADR-17).
                         let sessionID = store.sessionID(for: repo)
                         TerminalPane(repo: repo, sessionID: sessionID,
-                                     initialPrompt: store.prompt(for: repo.id),
                                      isActive: isActive && !showingDashboard,
                                      onExit: { _ in store.markDead(sessionID) })
                     } else {
@@ -234,15 +233,10 @@ struct ContentView: View {
         .background(.bar)
     }
 
-    /// F10a — 여기 넣은 문구를 **모든 페인이 같이 받고 출발한다.**
-    /// 비워두고 시작해도 된다. 그러면 그냥 `claude` 만 뜬다.
-    private var briefingBar: some View {
+    /// D-30 — 브리핑 칸은 뺐다. 할 일은 조율자에게 말한다. 한 번에 띄우는 버튼만 남긴다.
+    private var startBar: some View {
         HStack(spacing: 8) {
-            TextField("브리핑 (비워도 됩니다) — 모든 터미널이 이 문장으로 출발합니다",
-                      text: $store.broadcastPrompt, axis: .vertical)
-                .textFieldStyle(.roundedBorder)
-                .lineLimit(1...4)
-                .font(.callout)
+            Spacer()
             Button("전체 시작") { store.startAll() }
                 .keyboardShortcut(.return, modifiers: .command)
                 // 최종 리뷰 F1 — 대시보드가 덮고 있어도 이 버튼은 트리에 있어 ⌘↩ 가 먹는다.
@@ -254,7 +248,7 @@ struct ContentView: View {
         .background(.bar)
     }
 
-    /// 아직 안 뜬 페인. **자동 기동을 하지 않는다** — 브리핑을 넣을 틈이 있어야 하기 때문이다.
+    /// 아직 안 뜬 페인. **자동 기동을 하지 않는다** — 어떤 페인을 언제 띄울지는 사람이 정한다 (D-30).
     private func waitingToStart(_ repo: Repo) -> some View {
         VStack(spacing: 10) {
             if repo.folderExists {
