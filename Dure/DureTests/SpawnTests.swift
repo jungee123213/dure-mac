@@ -11,7 +11,7 @@ import Testing
 struct SpawnTests {
 
     static func script(_ prompt: String?) -> String {
-        Spawn.script(repoPath: "/repo", sessionID: "pane-1", model: nil, initialPrompt: prompt)
+        Spawn.script(repoPath: "/repo", sessionID: "pane-1", initialPrompt: prompt)
     }
 
     // MARK: - 붙이는가
@@ -64,12 +64,11 @@ struct SpawnTests {
 
     // MARK: - 기존 조립을 깨지 않는다
 
-    @Test func 모델과_함께_써도_순서가_맞다() {
-        let s = Spawn.script(repoPath: "/repo", sessionID: "pane-1",
-                             model: "opus", initialPrompt: "시작해라")
-        let modelAt = try! #require(s.range(of: "--model"))
-        let promptAt = try! #require(s.range(of: "'시작해라'"))
-        #expect(modelAt.upperBound < promptAt.lowerBound)
+    /// 모델은 앱이 정하지 않는다. 사람이 터미널에서 `/model` 이나 레포 설정으로 고른다.
+    /// 앱이 `--model` 을 넘기면 그 설정을 덮어쓴다.
+    @Test func 모델을_넘기지_않는다() {
+        #expect(!Self.script("시작해라").contains("--model"))
+        #expect(!Self.script(nil).contains("--model"))
     }
 
     @Test func 게이트_변수와_cd_는_그대로다() {
@@ -138,7 +137,7 @@ struct SpawnCdGuardTests {
 
         let p = Process()
         p.executableURL = URL(fileURLWithPath: Spawn.shell)
-        p.arguments = ["-c", Spawn.script(repoPath: repoPath, sessionID: "pane-1", model: nil)]
+        p.arguments = ["-c", Spawn.script(repoPath: repoPath, sessionID: "pane-1")]
         p.environment = ["PATH": "\(bin.path):/usr/bin:/bin", "HOME": NSHomeDirectory()]
         p.currentDirectoryURL = URL(fileURLWithPath: "/")
         let out = Pipe()

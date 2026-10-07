@@ -21,7 +21,8 @@ struct Repo: Codable, Identifiable, Hashable, FetchableRecord, PersistableRecord
     var workspaceId: String
     var path: String
     var label: String?
-    /// `claude --model` 에 넘길 별칭. nil 이면 기본 모델.
+    /// 예전에 `claude --model` 로 넘기던 값. **이제 쓰지 않는다** — 모델은 사람이 터미널에서
+    /// `/model` 이나 레포 설정으로 고른다. 기존 DB 컬럼이 있어 마이그레이션 없이 자리만 남겨둔다.
     var model: String?
     /// 조율자가 읽는 한 줄 설명("API 서버", "안드로이드 클라이언트").
     /// `workspace.md` 에 실린다 (설계문서 4절).

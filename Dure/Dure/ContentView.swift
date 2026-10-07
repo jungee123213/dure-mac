@@ -127,15 +127,6 @@ struct ContentView: View {
                                 .lineLimit(1)
                                 .truncationMode(.head)
                         }
-                        Picker("모델", selection: modelBinding(for: repo)) {
-                            Text("기본").tag("")
-                            Text("opus").tag("opus")
-                            Text("sonnet").tag("sonnet")
-                            Text("fable").tag("fable")
-                        }
-                        .labelsHidden()
-                        .pickerStyle(.menu)
-                        .font(.caption)
                     }
                     .contextMenu {
                         Button("제거", role: .destructive) { store.removeRepo(repo) }
@@ -171,13 +162,6 @@ struct ContentView: View {
         } message: {
             Text(deleteRefusal ?? "")
         }
-    }
-
-    private func modelBinding(for repo: Repo) -> Binding<String> {
-        Binding(
-            get: { repo.model ?? "" },
-            set: { store.setModel($0.isEmpty ? nil : $0, for: repo) }
-        )
     }
 
     // MARK: - 터미널 (F16, ADR-13 세로 스택 N-페인)
@@ -306,9 +290,6 @@ struct ContentView: View {
             if !repo.folderExists { MissingFolderChip() }
             GitChip(status: store.git[repo.id])
             Spacer()
-            if let model = repo.model {
-                Text(model).font(.caption2).foregroundStyle(.secondary)
-            }
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 4)

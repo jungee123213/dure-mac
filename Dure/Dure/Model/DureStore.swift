@@ -217,7 +217,8 @@ final class DureStore {
                           repoId: repo.id,
                           agentKind: kind.rawValue,
                           state: .started,
-                          model: repo.model,
+                          // 앱이 모델을 정하지 않는다. 실제 모델은 SessionStart 훅이 cc_session 에 남긴다.
+                          model: nil,
                           startedAt: Int(Date().timeIntervalSince1970),
                           endedAt: nil)
         do {
@@ -573,16 +574,5 @@ final class DureStore {
             try AppDatabase.queue.write { try w.update($0) }
             load()
         } catch { NSLog("[Dure] setDefaultAgentKind 실패: \(error)") }
-    }
-
-    func setModel(_ model: String?, for repo: Repo) {
-        var r = repo
-        r.model = model
-        do {
-            try AppDatabase.queue.write { try r.update($0) }
-            load()
-        } catch {
-            NSLog("[Dure] setModel 실패: \(error)")
-        }
     }
 }

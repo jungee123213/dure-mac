@@ -44,7 +44,7 @@ struct TerminalPane: NSViewRepresentable {
             executable: Spawn.shell,
             args: Spawn.shellArgs + [
                 Spawn.script(repoPath: repo.path, sessionID: sessionID,
-                             model: repo.model, initialPrompt: initialPrompt)
+                             initialPrompt: initialPrompt)
             ]
         )
         return view
