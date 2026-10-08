@@ -64,7 +64,7 @@ struct WorkspaceOpsTests {
     @Test func 삭제_영향을_센다() throws {
         let q = try Self.makeDB()
         let impact = try q.read { try WorkspaceOps.impact(of: "w1", in: $0) }
-        #expect(impact == .init(repos: 1, sessions: 1))
+        #expect(impact == .init(repos: 1, sessions: 1, dispatches: 0))
     }
 
     @Test func 삭제하면_레포와_기록이_함께_지워진다() throws {
@@ -120,6 +120,6 @@ struct WorkspaceOpsTests {
             try Agent(dureSession: "orch", workspaceId: "w1", repoId: nil, agentKind: "claude",
                       state: .dead, model: nil, startedAt: 0, endedAt: nil).insert(db)
         }
-        #expect(try q.read { try WorkspaceOps.impact(of: "w1", in: $0) } == .init(repos: 1, sessions: 2))
+        #expect(try q.read { try WorkspaceOps.impact(of: "w1", in: $0) } == .init(repos: 1, sessions: 2, dispatches: 0))
     }
 }

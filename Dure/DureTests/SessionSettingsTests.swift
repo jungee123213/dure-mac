@@ -39,6 +39,7 @@ struct SessionSettingsTests {
             "Bash(git -C /a/back diff *)", "Bash(git -C /a/back show *)",
             "Bash(git -C /a/ios log *)", "Bash(git -C /a/ios status *)",
             "Bash(git -C /a/ios diff *)", "Bash(git -C /a/ios show *)",
+            SessionSettings.mcpAllowRule,
         ])
     }
 
@@ -49,17 +50,33 @@ struct SessionSettingsTests {
         #expect(rules.allSatisfy { $0.hasPrefix("Bash(git -C /a/b ") })
     }
 
-    @Test func 조율자는_메시지를_막지_않는다() throws {
-        let o = try Self.object(try SessionSettings.orchestratorJSON(repoPaths: []))
+    /// 단계 4 · D-32 — 배분 통로가 생겼으니 조율자도 맥 전체 세션에 보낼 이유가 없다. 범위는 소켓으로 강제된다.
+    @Test func 조율자도_세션_간_메시지를_막는다() throws {
+        let o = try Self.object(try SessionSettings.orchestratorJSON(repoPaths: ["/a/b"]))
         let deny = (o["permissions"] as? [String: Any])?["deny"] as? [String] ?? []
-        #expect(!deny.contains("SendMessage") && !deny.contains("ListAgents"))
+        #expect(deny.contains("SendMessage") && deny.contains("ListAgents"))
+        #expect(deny.contains("Bash(git -C /a/b *--output*)"))
+    }
+
+    /// 두레 툴 호출에 승인이 뜨면 배분마다 사람이 눌러야 한다(실측: allow 없으면 거부).
+    @Test func 양쪽_다_두레_MCP_툴을_허용한다() throws {
+        let repo = try Self.object(try SessionSettings.repoPaneJSON())
+        let orch = try Self.object(try SessionSettings.orchestratorJSON(repoPaths: ["/a/b"]))
+        for o in [repo, orch] {
+            let allow = (o["permissions"] as? [String: Any])?["allow"] as? [String] ?? []
+            #expect(allow.contains("mcp__dure__*"))
+        }
+        // git 허용은 그대로 앞에 있다
+        let allow = (orch["permissions"] as? [String: Any])?["allow"] as? [String] ?? []
+        #expect(allow.first == "Bash(git -C /a/b log *)")
     }
 
     /// D-31 후속 — diff·show·log 의 `--output=<파일>` 은 git 이 파일을 쓴다 (ADR-4).
     @Test func 조율자는_레포마다_output_옵션을_막는다() throws {
         let o = try Self.object(try SessionSettings.orchestratorJSON(repoPaths: ["/a/back", "/a/ios"]))
         let deny = (o["permissions"] as? [String: Any])?["deny"] as? [String]
-        #expect(deny == ["Bash(git -C /a/back *--output*)", "Bash(git -C /a/ios *--output*)"])
+        #expect(deny == ["Bash(git -C /a/back *--output*)", "Bash(git -C /a/ios *--output*)",
+                         "SendMessage", "ListAgents"])
     }
 
     @Test func output_차단_규칙도_허용_규칙과_같은_경로_토큰을_쓴다() {

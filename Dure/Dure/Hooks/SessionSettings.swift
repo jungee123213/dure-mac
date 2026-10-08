@@ -3,9 +3,9 @@ import Foundation
 /// 이슈 #16 · D-31 — 페인 종류별 `claude --settings` 파일.
 ///
 /// `--settings` 는 파일 하나만 받는다. 그래서 훅(F3)과 권한을 한 파일에 합친다.
-/// - 레포 페인: 훅 + `SendMessage`·`ListAgents` 거부. D-29 처럼 레포 에이전트가 맥 전체 세션에
+/// - 레포 페인: 훅 + 두레 MCP 허용 + `SendMessage`·`ListAgents` 거부. D-29 처럼 레포 에이전트가 맥 전체 세션에
 ///   메시지를 뿌리는 것을 막는다.
-/// - 조율자: 훅 + 레포 절대경로별 git **읽기** 허용. 조율자 cwd 는 워크스페이스 폴더라 레포 git 은
+/// - 조율자: 훅 + 레포 절대경로별 git **읽기** 허용 + 두레 MCP 허용 + 메시지 차단(D-32). 조율자 cwd 는 워크스페이스 폴더라 레포 git 은
 ///   `git -C <경로> …` 로 읽는다. `git -C:*` 는 commit·push 까지 열고(ADR-4), `git -C * log *` 는
 ///   `-c` 옵션 끼워 넣기에 열린다(Claude Code 자체 경고). 경로를 박은 규칙만 쓴다.
 ///
@@ -27,19 +27,24 @@ enum SessionSettings {
         dir(root: root).appendingPathComponent("orchestrator-\(workspaceID).json")
     }
 
+    /// 단계 4 — 두레 MCP 툴. 없으면 `dispatch` 마다 승인이 뜬다(실측).
+    static let mcpAllowRule = "mcp__\(DureTools.serverName)__*"
+
     static func repoPaneJSON() throws -> Data {
         try encode([
             "hooks": HookBridge.hooksObject(),
-            "permissions": ["deny": ["SendMessage", "ListAgents"]],
+            "permissions": ["allow": [mcpAllowRule],
+                            "deny": ["SendMessage", "ListAgents"]],
         ])
     }
 
+    /// D-32 — 조율자도 `SendMessage` · `ListAgents` 를 막는다. 배분은 두레 툴로만 간다(범위가 소켓으로 강제된다).
     static func orchestratorJSON(repoPaths: [String]) throws -> Data {
         try encode([
             "hooks": HookBridge.hooksObject(),
             "permissions": [
-                "allow": repoPaths.flatMap { gitReadRules(repoPath: $0) },
-                "deny": repoPaths.flatMap { gitWriteDenyRules(repoPath: $0) },
+                "allow": repoPaths.flatMap { gitReadRules(repoPath: $0) } + [mcpAllowRule],
+                "deny": repoPaths.flatMap { gitWriteDenyRules(repoPath: $0) } + ["SendMessage", "ListAgents"],
             ],
         ])
     }

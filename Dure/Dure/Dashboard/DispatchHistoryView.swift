@@ -1,0 +1,120 @@
+import SwiftUI
+
+/// 설계문서 7절 ④ — 조율자가 언제 누구에게 뭘 시켰고 어떻게 됐나. 얇은 타임라인.
+/// 취소는 `queued` 에만 — 전달된 것은 페인이 이미 일한다.
+struct DispatchHistoryView: View {
+    @Bindable var store: DureStore
+    @State private var expanded: Set<String> = []
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text("작업 이력").font(.headline)
+                    Text("배분 · 보고").font(.caption).foregroundStyle(.secondary)
+                }
+                // 한 번만 읽는다 — 카드마다 relayHistory() 를 부르면 배분 수만큼 DB 를 읽는다.
+                let rows = store.dispatchHistory()
+                let grouped = DispatchPresentation.group(relays: store.relayHistory(), dispatchIDs: Set(rows.map(\.id)))
+                let timeline = Self.timeline(rows, orphans: grouped.orphans)
+                if timeline.isEmpty {
+                    Text("아직 배분이 없습니다. 조율자에게 할 일을 말하면 여기에 쌓입니다.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                ForEach(timeline) { item in
+                    switch item {
+                    case .dispatch(let d): card(d, relays: grouped.byDispatch[d.id] ?? [])
+                    case .orphan(let r): orphanRow(r)
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(12)
+        }
+    }
+
+    /// 배분 카드와 고아 relay 를 한 목록에. 둘 다 최신이 위.
+    private enum Item: Identifiable {
+        case dispatch(Dispatch), orphan(Relay)
+        var id: String {
+            switch self {
+            case .dispatch(let d): "d:\(d.id)"
+            case .orphan(let r): "r:\(r.id)"
+            }
+        }
+        var createdAt: Int {
+            switch self {
+            case .dispatch(let d): d.createdAt
+            case .orphan(let r): r.createdAt
+            }
+        }
+    }
+
+    private static func timeline(_ rows: [Dispatch], orphans: [Relay]) -> [Item] {
+        // 정렬의 안정성은 문서로 보장되지 않으므로 같은 초면 원래 순서(배분 번호 내림차순 · relay 최신순)를 지키게 색인을 같이 비교한다.
+        let items = rows.map(Item.dispatch) + orphans.map(Item.orphan)
+        return items.enumerated().sorted { a, b in
+            a.element.createdAt != b.element.createdAt ? a.element.createdAt > b.element.createdAt : a.offset < b.offset
+        }.map(\.element)
+    }
+
+    /// 배분에 묶이지 않은 보고 · 질문 한 줄 — 라벨 · 레포 · 본문 첫 줄.
+    private func orphanRow(_ r: Relay) -> some View {
+        let repoName = r.repoId.flatMap { id in store.repos.first { $0.id == id }?.displayName } ?? "?"
+        let first = r.body.split(separator: "\n").first.map(String.init) ?? ""
+        return HStack(alignment: .top, spacing: 6) {
+            Text("\(DispatchPresentation.relayLabel(r)) · \(repoName)").font(.caption).bold().foregroundStyle(.secondary)
+            Text(first).font(.caption).lineLimit(1)
+            Spacer(minLength: 0)
+            Text(DispatchRules.clock(r.createdAt)).font(.caption2).foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 10).padding(.vertical, 6)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func card(_ d: Dispatch, relays: [Relay]) -> some View {
+        let repoName = store.repos.first { $0.id == d.repoId }?.displayName ?? "?"
+        return VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 6) {
+                Text(DispatchPresentation.line(d, repoName: repoName)).font(.caption).bold()
+                    .foregroundStyle(color(d.state))
+                Spacer(minLength: 0)
+                if d.state == .queued {
+                    Button("취소") { store.cancelDispatch(d.id) }.font(.caption).buttonStyle(.borderless)
+                }
+                Button(expanded.contains(d.id) ? "접기" : "펼치기") {
+                    if expanded.contains(d.id) { expanded.remove(d.id) } else { expanded.insert(d.id) }
+                }
+                .font(.caption).buttonStyle(.borderless)
+            }
+            Text(DispatchPresentation.headline(d)).font(.caption).lineLimit(1)
+            if expanded.contains(d.id) {
+                Text(d.instruction).font(.caption2).foregroundStyle(.secondary).textSelection(.enabled)
+                if let r = d.result, !r.isEmpty {
+                    Divider()
+                    Text(r).font(.caption2).textSelection(.enabled)
+                }
+            }
+            ForEach(relays) { r in
+                HStack(alignment: .top, spacing: 4) {
+                    Text("↳ \(DispatchPresentation.relayLabel(r))").font(.caption2).foregroundStyle(.secondary)
+                    Text(r.body).font(.caption2).lineLimit(expanded.contains(d.id) ? nil : 1)
+                }
+                .padding(.leading, 8)
+            }
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
+    }
+
+    private func color(_ s: DispatchState) -> Color {
+        switch s {
+        case .queued: .orange
+        case .delivered: .blue
+        case .done: .green
+        case .failed: .red
+        case .cancelled: .secondary
+        }
+    }
+}

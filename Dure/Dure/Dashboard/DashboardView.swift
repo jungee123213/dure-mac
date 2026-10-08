@@ -13,6 +13,8 @@ struct DashboardView: View {
                 .frame(minWidth: 320)
             mapPane
                 .frame(minWidth: 260)
+            DispatchHistoryView(store: store)
+                .frame(minWidth: 260)
         }
     }
 

@@ -45,6 +45,28 @@ final class DureStore {
     /// 페인을 시작하지 못한 이유(페인 키 → 문장). 조율자 준비(설정·지시문 쓰기) 실패가 여기 온다.
     /// 권한이나 지시문이 빠진 채로 뜨면 git 읽기마다 승인이 뜨거나 메시지 범위 규칙이 없다 — 그래서 아예 안 띄운다.
     private(set) var paneProblems: [String: String] = [:]
+    /// 단계 4 — 배분 흐름. 스토어 상태는 클로저로 넘긴다(테스트 가능성).
+    @ObservationIgnored private(set) lazy var dispatcher = Dispatcher(
+        db: AppDatabase.queue, inbox: LiveInbox(),
+        lookups: .init(
+            // 레포 **id** 를 받는다. 모르는 id 면 "안 뜬 페인" 으로 답해 큐에 남긴다.
+            repoPane: { [unowned self] id in
+                guard let r = self.repos.first(where: { $0.id == id }) else {
+                    return .init(started: false, state: nil, claudeSessionID: nil)
+                }
+                return self.paneView(.repo(r))
+            },
+            orchestratorPane: { [unowned self] in self.paneView(.orchestrator(workspaceID: $0)) },
+            repoName: { [unowned self] id in self.repos.first { $0.id == id }?.displayName ?? "?" }))
+    /// 페인별 MCP 소켓 서버. 페인이 살아 있는 동안만.
+    @ObservationIgnored private var mcpServers: [String: MCPServer] = [:]
+    /// 스폰 스크립트 캐시. `initialPrompt` 는 큐 항목을 `delivered` 로 찍는 쓰기라 뷰가 그릴 때마다 부르지 않는다 — 페인당 한 번.
+    @ObservationIgnored private var launchScripts: [String: String] = [:]
+    /// 유닛 테스트 호스트로 떠 있나. 테스트 호스트는 실제 앱을 띄우고 실제 DB 를 연다 — 그때 돌면 안 되는 일
+    /// (앱 시작 복구처럼 실행 중인 진짜 두레의 기록을 바꾸는 것)을 거른다.
+    static var isTestHost: Bool { ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil }
+    /// 배분 기록이 바뀔 때 올린다. 대시보드 ④ · 페인 배지가 이걸 본다 (DB 를 관측할 수 없어서).
+    private(set) var dispatchVersion = 0
     var selectedWorkspaceID: String? {
         willSet {
             // 저장을 안 누르고 워크스페이스를 바꾸면 openWorkspaceFolder 가 contextText 를
@@ -252,6 +274,29 @@ final class DureStore {
 
         if reaction.bridgeSession { bridgeSession(event) }
         if let next = reaction.next { setState(next, for: event.dureSession) }
+        // 단계 4 — 배분 흐름에 훅을 알린다. 판단은 Dispatcher 안의 DispatchRules.
+        // setState **뒤에** 부른다 — Dispatcher 가 읽는 페인 상태가 이미 done/started 여야 큐가 흐른다.
+        // 옛 세션(다시 시작하기 전의 죽은 세션)의 늦은 훅은 거른다 — 새 세션에 간 배분을 옛 Stop 이 닫으면 안 된다.
+        // `current` 는 이벤트 **전** 상태다. dead 는 setState 가 되살리지 않으므로 전후가 같다.
+        if let target = paneTarget(forSession: event.dureSession),
+           DispatchRules.acceptsHook(current: current, sessionOfPane: sessionIDs[target.key],
+                                     eventSession: event.dureSession) {
+            var touchedDispatch = true
+            switch (event.ev, target) {
+            case ("Stop", .repo(let r)):
+                dispatcher.didStop(repoID: r.id, lastMessage: event.lastAssistantMessage)
+            case ("Stop", .orchestrator(let ws)):
+                dispatcher.didStopOrchestrator(workspaceID: ws)
+            case ("SessionStart", .repo(let r)):
+                dispatcher.didStart(repoID: r.id)
+            case ("SessionStart", .orchestrator(let ws)):
+                dispatcher.didStartOrchestrator(workspaceID: ws)
+            default: touchedDispatch = false
+            }
+            // SessionStart 로 흘러간 배분도 대시보드 ④ · 페인 배지에 바로 보이게. 배분과 무관한 훅(툴 사용 등)은
+            // 화면을 다시 그리게 하지 않는다.
+            if touchedDispatch { dispatchVersion += 1 }
+        }
         if reaction.ingestTranscript { ingestTranscripts(for: event.dureSession) }
         if reaction.refreshGit, let repo = repo(for: event.dureSession) { refreshGit(for: repo) }
 
@@ -336,6 +381,13 @@ final class DureStore {
         return repos.first { $0.id == repoId }
     }
 
+    /// 훅의 세션 → 페인. 상태와 무관하게 agent 행만 본다 — 조율자는 repo_id 가 nil 이다.
+    private func paneTarget(forSession dureSession: String) -> PaneTarget? {
+        guard let agent = agents.first(where: { $0.dureSession == dureSession }) else { return nil }
+        if let repoId = agent.repoId { return repos.first { $0.id == repoId }.map(PaneTarget.repo) }
+        return .orchestrator(workspaceID: agent.workspaceId)
+    }
+
     /// **`dead` 는 훅이 아니라 PTY 종료로 들어온다** (ADR-13 — 앱이 PTY 를 소유한다).
     /// `SessionEnd` 훅을 쓰지 않는 이유는 1차 훅 목록에 없고, 프로세스 종료가 더 확실해서다.
     func markDead(_ dureSession: String) {
@@ -347,6 +399,16 @@ final class DureStore {
         // 다시 시작하면 `sessionID(for:)` 가 새 DURE_SESSION 과 새 agent 행을 만든다.
         guard let key = PaneReset.paneToReset(exitedSession: dureSession,
                                               sessionIDs: sessionIDs) else { return }
+        // 단계 4 — 죽은 페인의 소켓을 닫고, 열려 있던 배분은 실패로 닫는다. 다시 시작하면 새 스크립트를 만든다.
+        closeMCP(for: key)
+        launchScripts[key] = nil
+        if let r = repo(for: dureSession) {
+            dispatcher.didDie(repoID: r.id)
+        } else if case .orchestrator(let w)? = paneTarget(forSession: dureSession) {
+            // 전달 뒤 Stop 을 기다리던 표식을 지운다 — 남겨두면 다시 시작한 조율자에게 아무것도 안 간다.
+            dispatcher.didDieOrchestrator(workspaceID: w)
+        }
+        dispatchVersion += 1
         startedPanes.remove(key)
         sessionIDs[key] = nil
         // "지금 페인이 열려 있음" 이 지도에서 빠져야 한다.
@@ -412,6 +474,100 @@ final class DureStore {
         ccSessions.filter { $0.dureSession == dureSession }.max { $0.startedAt < $1.startedAt }
     }
 
+    // MARK: - 단계 4 배분
+
+    private func paneView(_ target: PaneTarget) -> Dispatcher.PaneView {
+        let session = sessionIDs[target.key]
+        return .init(started: hasStarted(target), state: state(for: target),
+                     claudeSessionID: session.flatMap { currentSession(for: $0)?.ccSessionId })
+    }
+
+    func queueCount(for target: PaneTarget) -> Int {
+        _ = dispatchVersion
+        guard let r = target.repo else { return 0 }
+        return dispatcher.queueCount(repoID: r.id)
+    }
+
+    func dispatchHistory() -> [Dispatch] {
+        _ = dispatchVersion
+        guard let ws = selectedWorkspaceID else { return [] }
+        return dispatcher.history(workspaceID: ws)
+    }
+
+    func relayHistory() -> [Relay] {
+        _ = dispatchVersion
+        guard let ws = selectedWorkspaceID else { return [] }
+        return dispatcher.relays(workspaceID: ws)
+    }
+
+    func cancelDispatch(_ id: String) {
+        guard let ws = selectedWorkspaceID else { return }
+        _ = try? dispatcher.cancel(.id(id), workspaceID: ws)
+        dispatchVersion += 1
+    }
+
+    /// 페인의 MCP 소켓을 연다. 스폰보다 **먼저** — `nc` 가 기동하자마자 붙는다.
+    private func openMCP(for target: PaneTarget, sessionID: String) throws {
+        guard MCPSocketPath.ncExists() else { throw MCPSocketPath.Problem.ncMissing }
+        var path = MCPSocketPath.path(forSession: sessionID)
+        if mcpServers.values.contains(where: { $0.path == path }) {
+            // 앞 8자가 겹치는 드문 경우 — 전체 UUID 로.
+            path = MCPSocketPath.dir().appendingPathComponent("\(sessionID.lowercased()).sock").path
+        }
+        try MCPSocketPath.check(path)
+        try FileManager.default.createDirectory(at: MCPSocketPath.dir(), withIntermediateDirectories: true,
+                                                attributes: [.posixPermissions: 0o700])
+        let side: DureTools.Side = target.repo == nil ? .orchestrator : .repo
+        let tools = DureTools.definitions(for: side)
+        let key = target.key
+        let server = MCPServer(path: path) { [weak self] line, reply in
+            // 소켓 큐 → 메인. 툴의 뜻은 스토어 상태를 읽어야 한다.
+            // 바깥 클로저의 weak var 를 그대로 쓰면 동시 실행 코드에서 가변 캡처가 된다 — 캡처 목록으로 복사한다.
+            Task { @MainActor [weak self] in
+                guard let self else { reply(nil); return }
+                let out = MCPHandler.respond(toLine: line, tools: tools, serverName: DureTools.serverName) { call in
+                    self.handleTool(call, side: side, paneKey: key)
+                }
+                reply(out)
+            }
+        }
+        try server.start()
+        mcpServers[key] = server
+    }
+
+    private func handleTool(_ call: MCPToolCall, side: DureTools.Side, paneKey: String) -> MCPToolResult {
+        guard let target = panesByKey[paneKey] else { return .init(text: "페인을 찾을 수 없다.", isError: true) }
+        let ws = target.workspaceID
+        let ctx = DureToolHost.Context(
+            workspaceID: ws, repos: repos(in: ws), repoID: target.repo?.id,
+            workspaceMarkdown: { [weak self] in
+                guard let self else { return "" }
+                return (try? String(contentsOf: WorkspaceFolder.mapURL(for: ws), encoding: .utf8)) ?? self.workspaceName(id: ws)
+            },
+            // canStart 는 기본값(폴더가 있나)을 쓴다.
+            paneState: { [weak self] id in
+                guard let self, let r = self.repos.first(where: { $0.id == id }) else { return nil }
+                return self.state(for: .repo(r))?.label
+            })
+        let r = DureToolHost.call(call, side: side, context: ctx, dispatcher: dispatcher)
+        dispatchVersion += 1
+        return r
+    }
+
+    /// 키 → 페인. 소켓 콜백이 키만 들고 온다.
+    private var panesByKey: [String: PaneTarget] {
+        var m: [String: PaneTarget] = [:]
+        for w in workspaces { for p in panes(in: w.id) { m[p.key] = p } }
+        return m
+    }
+
+    private func mcpSocketPath(for target: PaneTarget) -> String? { mcpServers[target.key]?.path }
+
+    private func closeMCP(for key: String) {
+        mcpServers[key]?.stop()
+        mcpServers[key] = nil
+    }
+
     // MARK: - 페인 시작
 
     /// **앱을 켜도 `claude` 는 저절로 뜨지 않는다.** 원래 이유(브리핑을 넣을 틈)는 D-30 으로
@@ -442,10 +598,19 @@ final class DureStore {
                 return
             }
         }
+        // agent 행을 먼저 만든다(ADR-17) — 소켓 이름도 이 세션 id 에서 나온다.
+        // workspace.md 의 "열려 있음 (X)" 도 이 행의 agentKind 를 읽는다 (최종 리뷰 F4).
+        let sessionID = sessionID(for: target)
+        do {
+            try openMCP(for: target, sessionID: sessionID)
+            paneProblems[target.key] = nil
+        } catch {
+            paneProblems[target.key] = "MCP 소켓을 열지 못했습니다: \((error as? MCPSocketPath.Problem)?.message ?? error.localizedDescription)"
+            return
+        }
+        // 지난 기동의 스크립트가 남아 있으면 새 소켓·기동 프롬프트가 빠진 채 뜬다.
+        launchScripts[target.key] = nil
         startedPanes.insert(target.key)
-        // agent 행을 여기서 만든다. workspace.md 의 "열려 있음 (X)" 는 이 행의 agentKind 를
-        // 읽는다 (최종 리뷰 F4). 스폰보다 먼저이므로 훅 외래키 조건(ADR-17)도 그대로 지켜진다.
-        _ = sessionID(for: target)
         // "지금 페인이 열려 있음" 이 지도에 반영돼야 한다.
         refreshWorkspaceDoc(for: target.workspaceID)
     }
@@ -468,20 +633,35 @@ final class DureStore {
 
     /// 페인이 실행할 셸 스크립트. 레포 페인과 조율자의 차이(cwd · 설정 · 이름 · `--add-dir`)는 여기서만 갈린다.
     func launchScript(for target: PaneTarget, sessionID: String) -> String {
+        // 뷰가 그릴 때마다 불린다. 기동 프롬프트는 큐에서 꺼내는 일이라 페인당 한 번만 만든다.
+        if let cached = launchScripts[target.key] { return cached }
         let wsName = workspaceName(id: target.workspaceID)
+        let script: String
+        let prompt: String?
         switch target {
         case .repo(let r):
-            return Spawn.script(cwd: r.path, sessionID: sessionID,
-                                settingsPath: SessionSettings.repoPaneURL().path,
-                                sessionName: SessionName.repo(workspaceName: wsName,
-                                                              workspaceID: r.workspaceId,
-                                                              repoName: r.displayName))
+            prompt = dispatcher.initialPrompt(forRepo: r.id)
+            script = Spawn.script(cwd: r.path, sessionID: sessionID,
+                                  settingsPath: SessionSettings.repoPaneURL().path,
+                                  sessionName: SessionName.repo(workspaceName: wsName, workspaceID: r.workspaceId,
+                                                                repoName: r.displayName),
+                                  initialPrompt: prompt,
+                                  mcpSocket: mcpSocketPath(for: target))
         case .orchestrator(let ws):
-            return Spawn.script(cwd: WorkspaceFolder.url(for: ws).path, sessionID: sessionID,
-                                settingsPath: SessionSettings.orchestratorURL(ws).path,
-                                sessionName: SessionName.orchestrator(workspaceName: wsName, workspaceID: ws),
-                                addDirs: LaunchPlan.repoPaths(repos(in: ws)))
+            prompt = dispatcher.initialPrompt(forOrchestrator: ws)
+            script = Spawn.script(cwd: WorkspaceFolder.url(for: ws).path, sessionID: sessionID,
+                                  settingsPath: SessionSettings.orchestratorURL(ws).path,
+                                  sessionName: SessionName.orchestrator(workspaceName: wsName, workspaceID: ws),
+                                  addDirs: LaunchPlan.repoPaths(repos(in: ws)),
+                                  initialPrompt: prompt,
+                                  mcpSocket: mcpSocketPath(for: target))
         }
+        launchScripts[target.key] = script
+        // 기동 프롬프트가 큐를 꺼냈으면(`delivered` 로 찍었으면) 대시보드 ④ · 배지가 따라와야 한다. 그런데 이 함수는
+        // 뷰의 body 안에서 불린다 — 거기서 관측값을 바꾸면 SwiftUI 가 "그리는 중 상태 변경" 으로 경고하고 다시 그리기를
+        // 되풀이할 수 있다(RoleField 와 같은 이유). 다음 런루프로 미룬다. 캐시가 있어 페인당 한 번뿐이다.
+        if prompt != nil { DispatchQueue.main.async { [weak self] in self?.dispatchVersion += 1 } }
+        return script
     }
 
     /// 지금 보이는 워크스페이스의 페인(조율자 포함)을 한 번에 띄운다 (`전체 시작`, ⌘↩).
@@ -652,6 +832,9 @@ final class DureStore {
                 try? await Task.sleep(for: .seconds(seconds))
                 guard let self else { return }
                 self.refreshAllGit()
+                // 단계 4 — 소켓 쓰기 실패는 훅이 다시 오지 않는다. 이 30초 틱이 유일한 재시도 계기다.
+                self.dispatcher.retryPending()
+                self.dispatchVersion += 1
             }
         }
     }

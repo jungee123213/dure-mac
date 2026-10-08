@@ -1,0 +1,102 @@
+import Foundation
+
+/// 단계 4 — 툴 호출의 뜻. `MCPHandler` 가 이름·인자를 넘기면 여기서 `Dispatcher` 를 움직이고 **모델이 읽을 글**을 돌려준다.
+/// 스토어가 아니라 `Context` 를 받는 이유는 메모리 DB 로 테스트하기 위해서다.
+enum DureToolHost {
+
+    struct Context {
+        var workspaceID: String
+        var repos: [Repo]
+        /// 레포 페인이면 그 레포. 조율자면 nil.
+        var repoID: String?
+        var workspaceMarkdown: () -> String
+        /// 그 레포에 페인을 띄울 수 있나. 폴더가 없는 레포에 배분하면 아무도 시작할 수 없어 큐에 영영 남는다.
+        var canStart: (Repo) -> Bool = { $0.folderExists }
+        /// 레포 id → 페인 상태 라벨. 안 떴으면 nil. `workspace` 툴의 큐 줄에 붙인다.
+        var paneState: (String) -> String? = { _ in nil }
+    }
+
+    /// `tasks` 가 한 번에 돌려주는 최대 줄 수. 이력은 계속 쌓이므로 모델 컨텍스트를 이력으로 채우지 않게 자른다.
+    static let tasksLimit = 30
+
+    static func call(_ call: MCPToolCall, side: DureTools.Side, context ctx: Context,
+                     dispatcher d: Dispatcher) -> MCPToolResult {
+        // 소켓별 툴 집합이라 일어날 수 없지만, 방어적으로 — 레포 소켓에서 dispatch 가 오면 거부.
+        guard DureTools.names(for: side).contains(call.name) else {
+            return .init(text: "이 페인에서는 쓸 수 없는 툴이다: \(call.name)", isError: true)
+        }
+        do {
+            switch call.name {
+            case "dispatch":
+                guard let repo = DureTools.resolveRepo(call.arguments["repo"] ?? "", in: ctx.repos) else {
+                    return .init(text: "그런 레포가 없다: \(call.arguments["repo"] ?? ""). 이 워크스페이스의 레포: \(DureTools.repoCandidates(ctx.repos))", isError: true)
+                }
+                // 기록하지 않는다 — 큐에 넣으면 아무도 꺼내지 못한다.
+                guard ctx.canStart(repo) else {
+                    return .init(text: "레포 폴더가 없어 페인을 띄울 수 없다: \(repo.path). 사람에게 알려라.", isError: true)
+                }
+                let instruction = (call.arguments["instruction"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !instruction.isEmpty else { return .init(text: "instruction 이 비었다.", isError: true) }
+                let title = call.arguments["title"].flatMap { $0.isEmpty ? nil : $0 }
+                let out = try d.enqueue(workspaceID: ctx.workspaceID, repo: repo, title: title,
+                                        instruction: instruction, toolUseId: call.toolUseId)
+                switch out {
+                case .delivered(let n):
+                    return .init(text: "#\(n) · \(repo.displayName) · 전달됨. 끝나면 '[두레] ‹\(repo.displayName)› 배분 #\(n) 끝남' 이 온다.")
+                case .queuedBusy(let n):
+                    return .init(text: "#\(n) · \(repo.displayName) · 큐 대기 — 페인이 일하는 중이라 끝난 뒤 전달된다.")
+                case .queuedNotStarted(let n):
+                    return .init(text: "#\(n) · \(repo.displayName) · 큐 대기 — 페인이 안 떠 있다. 사람이 그 페인을 시작하면 첫 프롬프트로 실린다. 사람에게 알려라.")
+                case .deliveryFailed(let n, let attempts):
+                    // 페인은 놀고 있는데 소켓 쓰기만 실패했다. 큐 대기라고 하면 조율자가 오지 않을 Stop 을 기다린다.
+                    return .init(text: "#\(n) · \(repo.displayName) · 전달 실패(\(attempts)회) — 페인 소켓에 쓰지 못했다. 두레가 30초 안에 다시 시도한다. 3회 실패하면 실패로 닫고 알린다.")
+                }
+            case "workspace":
+                var md = ctx.workspaceMarkdown()
+                md += "\n## 배분 큐\n"
+                for r in ctx.repos {
+                    let n = d.queueCount(repoID: r.id)
+                    md += "- \(r.displayName): 대기 \(n) · 상태 \(ctx.paneState(r.id) ?? "시작 대기")\n"
+                }
+                return .init(text: md)
+            case "tasks":
+                var rows = d.history(workspaceID: ctx.workspaceID)
+                if let raw = call.arguments["state"], !raw.isEmpty {
+                    guard let s = DispatchState(rawValue: raw) else {
+                        return .init(text: "state 는 queued | delivered | done | failed | cancelled 중 하나다.", isError: true)
+                    }
+                    rows = rows.filter { $0.state == s }
+                }
+                guard !rows.isEmpty else { return .init(text: "배분 기록이 없다.") }
+                let names = Dictionary(uniqueKeysWithValues: ctx.repos.map { ($0.id, $0.displayName) })
+                // 이력은 최신순이다. 앞의 것만 보여주고 나머지는 개수로 알린다.
+                let extra = max(0, rows.count - tasksLimit)
+                var lines = rows.prefix(tasksLimit).map { r -> String in
+                    let first = (r.result ?? "").split(separator: "\n").first.map(String.init) ?? ""
+                    let head = r.title ?? r.instruction.split(separator: "\n").first.map(String.init) ?? ""
+                    return "- #\(r.seq) · \(names[r.repoId] ?? "?") · \(r.state.rawValue) · \(head)" + (first.isEmpty ? "" : " → \(first)")
+                }
+                if extra > 0 { lines.append("(… 외 \(extra)건 — state 로 거르거나 대시보드에서)") }
+                return .init(text: lines.joined(separator: "\n"))
+            case "cancel":
+                let ok = try d.cancel(DispatchRules.cancelRef(call.arguments["id"] ?? ""), workspaceID: ctx.workspaceID)
+                return ok ? .init(text: "취소했다.") : .init(text: "큐에 있는 배분이 아니다(이미 전달됐거나 없다).", isError: true)
+            case "report", "ask_orchestrator":
+                let key = call.name == "report" ? "summary" : "question"
+                let body = (call.arguments[key] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !body.isEmpty else { return .init(text: "\(key) 가 비었다.", isError: true) }
+                // 지금 하고 있는 배분에 묶는다 — 조율자가 "배분 #N" 으로 알아보고, 대시보드 ④ 가 그 카드 밑에 그린다.
+                try d.relay(workspaceID: ctx.workspaceID,
+                            dispatchID: ctx.repoID.flatMap { d.outstandingDispatchID(repoID: $0) }, repoID: ctx.repoID,
+                            kind: call.name == "report" ? .report : .question, body: body)
+                return .init(text: call.name == "report"
+                             ? "조율자에게 전달했다."
+                             : "조율자에게 전달했다. 답은 이 터미널로 온다 — 그때까지 사람이 답할 수 있는 것은 사람에게 물어라.")
+            default:
+                return .init(text: "모르는 툴: \(call.name)", isError: true)
+            }
+        } catch {
+            return .init(text: "두레 오류: \(error.localizedDescription)", isError: true)
+        }
+    }
+}

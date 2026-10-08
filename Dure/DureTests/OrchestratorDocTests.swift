@@ -35,8 +35,45 @@ struct OrchestratorDocTests {
         #expect(Self.md.contains("--output"))
     }
 
-    @Test func 메시지는_접두사로_시작하는_세션에만() {
-        #expect(Self.md.contains("dure-모바일-7f3a-"))
+    // MARK: - 배분 프로토콜 (단계 4 · D-32)
+
+    @Test func 배분_툴과_순서를_적는다() {
+        #expect(Self.md.contains("dispatch"))
+        #expect(Self.md.contains("workspace"))
+        #expect(Self.md.contains("tasks"))
+        #expect(Self.md.contains("cancel"))
+    }
+
+    /// 사용자 결정 ① — 승인은 대화에서만. 이 문장이 유일한 울타리다.
+    @Test func 사람의_진행_전에는_dispatch_를_부르지_않는다() {
+        #expect(Self.md.contains("**사람이 \"진행\" 이라고 하기 전에는 `dispatch` 를 부르지 않는다.**"))
+    }
+
+    /// 최종 리뷰 T10 — 질문에 대한 답도 배분이다. 규칙 5 가 규칙 2 의 예외로 읽히면 안 된다.
+    @Test func 질문의_답도_사람_승인_뒤에_보낸다() {
+        #expect(Self.md.contains("이때도 규칙 2 를 지킨다 — 답을 `dispatch` 로 보내기 전에 사람에게 보여주고 '진행' 을 받는다."))
+    }
+
+    @Test func 큐와_폴더_없는_레포를_적는다() {
+        #expect(Self.md.contains("큐 대기 중인 배분도 여기 보인다"))
+        #expect(Self.md.contains("폴더가 없는 레포에는 보낼 수 없다"))
+    }
+
+    @Test func 임의_판단_금지와_선택지() {
+        #expect(Self.md.contains("임의"))
+        #expect(Self.md.contains("선택지"))
+    }
+
+    @Test func 완료와_질문을_사람에게_전한다() {
+        #expect(Self.md.contains("끝남"))
+        #expect(Self.md.contains("질문"))
+        #expect(Self.md.contains("다음 배분을 시작하지 않는다"))
+    }
+
+    /// 세션 간 메시지는 이제 막혀 있다 — 지시문이 "보내라" 고 하면 거부만 쌓인다.
+    @Test func 세션_간_메시지_절이_없다() {
+        #expect(!Self.md.contains("SendMessage"))
+        #expect(!Self.md.contains("다른 세션에 메시지"))
     }
 
     @Test func 레포가_없어도_만든다() {
