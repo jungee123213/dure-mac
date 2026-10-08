@@ -30,6 +30,9 @@ struct ContentView: View {
         }
         .onAppear {
             store.load()
+            // 단계 4 — 지난번 앱이 꺼질 때 전달 중이던 배분은 Stop 을 영영 못 본다. 실패로 닫고 조율자에게 알린다.
+            // 유닛 테스트 호스트도 이 앱을 띄운다 — 그때 돌면 **지금 실행 중인 진짜 두레**의 배분(같은 DB)을 실패로 닫는다.
+            if !DureStore.isTestHost { store.dispatcher.recoverOnLaunch() }
             if store.workspaces.isEmpty {
                 store.addWorkspace(name: "기본 워크스페이스")
             }
@@ -263,6 +266,12 @@ struct ContentView: View {
                     Text("시작 대기")
                         .font(.callout)
                         .foregroundStyle(.secondary)
+                    // dispatchHistory() 는 최신이 먼저라 큐의 첫 항목은 last.
+                    if let hint = DispatchPresentation.waitingHint(
+                        queueCount: store.queueCount(for: target),
+                        firstSeq: store.dispatchHistory().last { $0.repoId == repo.id && $0.state == .queued }?.seq) {
+                        Text(hint).font(.caption).foregroundStyle(.orange)
+                    }
                 } else {
                     // 이슈 #10 — 왜 못 띄우는지와 어떻게 하면 되는지를 같이 준다.
                     Text("레포 폴더를 찾을 수 없습니다")
@@ -303,6 +312,13 @@ struct ContentView: View {
                 StateChip(state: store.state(for: target))
                 if !repo.folderExists { MissingFolderChip() }
                 GitChip(status: store.git[repo.id])
+                // 조율자가 넘긴 일이 큐에 있다는 표시. 큐가 비면 보이지 않는다.
+                if store.queueCount(for: target) > 0 {
+                    Text("대기 \(store.queueCount(for: target))")
+                        .font(.caption2).padding(.horizontal, 6).padding(.vertical, 1)
+                        .background(Color.orange.opacity(0.18), in: Capsule()).foregroundStyle(.orange)
+                        .help("조율자가 넘긴 일이 큐에 있습니다. 페인이 놀 때 전달됩니다.")
+                }
             }
             Spacer()
         }
@@ -338,8 +354,9 @@ struct ContentView: View {
         let impact = store.deletionImpact(of: w.id)
         let repos = impact?.repos ?? 0
         let sessions = impact?.sessions ?? 0
+        let dispatches = impact?.dispatches ?? 0
         return """
-        ‘\(w.name)’ 의 레포 등록 \(repos)개와 에이전트 기록 \(sessions)건(토큰·툴 사용량 포함)이 Dure 에서 삭제됩니다.
+        ‘\(w.name)’ 의 레포 등록 \(repos)개와 에이전트 기록 \(sessions)건(토큰·툴 사용량 포함), 배분 기록 \(dispatches)건이 Dure 에서 삭제됩니다.
         레포 폴더와 코드는 삭제되지 않습니다.
         워크스페이스 폴더(context.md 포함)는 휴지통으로 이동합니다.
         """

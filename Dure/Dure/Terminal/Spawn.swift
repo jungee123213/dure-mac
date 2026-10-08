@@ -20,6 +20,7 @@ enum Spawn {
     /// - `sessionName` — `claude --name`. 조율자가 메시지 대상을 고르는 근거 (`SessionName`).
     /// - `addDirs` — 조율자가 읽을 레포들. **가변 인자 옵션이라 프롬프트는 `--` 뒤에 둔다**
     ///   (`--` 없으면 프롬프트를 디렉토리로 삼킨다, 2026-10-07 실측).
+    /// - `mcpSocket` — 있으면 두레 MCP 서버를 이 세션에만 붙인다 (`mcpConfig`).
     /// - `initialPrompt` — 첫 프롬프트. D-30 이후 비어 있고 단계 4 에서 쓴다. PTY 에 타이핑하지 않는
     ///   이유는 "언제 다 떴는지" 판단이 곧 화면 파싱이라 ADR-3 에 걸리기 때문이다.
     ///
@@ -30,7 +31,8 @@ enum Spawn {
                        sessionName: String,
                        addDirs: [String] = [],
                        kind: AgentKind = .claude,
-                       initialPrompt: String? = nil) -> String {
+                       initialPrompt: String? = nil,
+                       mcpSocket: String? = nil) -> String {
         let exports = [
             "export DURE_SESSION=\(quoted(sessionID))",
             "export DURE_AGENT_KIND=\(quoted(kind.rawValue))"
@@ -40,16 +42,26 @@ enum Spawn {
         // 화면상으로는 정상 기동과 구별되지 않는다. `&&` 면 zsh 가 에러를 찍고 끝나 페인이 `종료` 가 된다.
         let launch = "cd \(quoted(cwd)) && exec "
             + agentCommand(kind: kind, settingsPath: settingsPath, sessionName: sessionName,
-                           addDirs: addDirs, initialPrompt: initialPrompt)
+                           addDirs: addDirs, initialPrompt: initialPrompt, mcpSocket: mcpSocket)
         return (exports + [launch]).joined(separator: "; ")
+    }
+
+    /// 단계 4 — `--mcp-config` 인라인 JSON. 세션에만 붙고 승인 프롬프트가 없다(실측). `nc -U` 가 stdio 를 소켓에 잇는다.
+    /// `--strict-mcp-config` 는 쓰지 않는다 — 레포 페인은 사용자의 프로젝트 MCP 를 그대로 써야 한다.
+    static func mcpConfig(socket: String) -> String {
+        let o: [String: Any] = ["mcpServers": [DureTools.serverName: [
+            "command": MCPSocketPath.ncPath, "args": ["-U", socket]]]]
+        let data = try! JSONSerialization.data(withJSONObject: o, options: [.withoutEscapingSlashes, .sortedKeys])
+        return String(decoding: data, as: UTF8.self)
     }
 
     /// 에이전트별 실행 명령. D-3 — Codex 는 자리만 열어두고 1차에서는 쓰지 않는다.
     private static func agentCommand(kind: AgentKind, settingsPath: String, sessionName: String,
-                                     addDirs: [String], initialPrompt: String?) -> String {
+                                     addDirs: [String], initialPrompt: String?, mcpSocket: String?) -> String {
         switch kind {
         case .claude:
             var cmd = "claude --settings \(quoted(settingsPath)) --name \(quoted(sessionName))"
+            if let mcpSocket { cmd += " --mcp-config \(quoted(mcpConfig(socket: mcpSocket)))" }
             for dir in addDirs { cmd += " --add-dir \(quoted(dir))" }
             // 공백뿐인 프롬프트는 없는 것과 같다. 빈 인자를 넘기면 claude 가 빈 프롬프트를 제출한 것으로 받는다.
             if let prompt = initialPrompt?.trimmingCharacters(in: .whitespacesAndNewlines),

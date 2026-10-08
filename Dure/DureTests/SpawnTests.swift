@@ -15,6 +15,29 @@ struct SpawnTests {
                      sessionName: "dure-ws-abcd-repo", addDirs: addDirs, initialPrompt: prompt)
     }
 
+    // MARK: - MCP (단계 4)
+
+    @Test func mcp_소켓이_있으면_mcp_config_를_붙인다() {
+        let s = Spawn.script(cwd: "/repo", sessionID: "p", settingsPath: "/s.json", sessionName: "n",
+                             mcpSocket: "/Users/me/.dure/mcp/abcd1234.sock")
+        #expect(s.contains("--mcp-config '"))
+        #expect(s.contains(#""command":"/usr/bin/nc""#))
+        #expect(s.contains(#""args":["-U","/Users/me/.dure/mcp/abcd1234.sock"]"#))
+        #expect(!s.contains("--strict-mcp-config"))   // 레포의 프로젝트 MCP 를 살린다
+    }
+
+    @Test func mcp_소켓이_없으면_붙이지_않는다() {
+        #expect(!Self.script(nil).contains("--mcp-config"))
+    }
+
+    @Test func mcp_config_는_서버_이름이_dure_다() throws {
+        let json = Spawn.mcpConfig(socket: "/x/y.sock")
+        let o = try #require(try JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any])
+        let servers = try #require(o["mcpServers"] as? [String: Any])
+        #expect(servers.keys.sorted() == ["dure"])
+        #expect(!json.contains("\n"))
+    }
+
     // MARK: - 붙이는가
 
     @Test func 프롬프트를_claude_인자로_붙인다() {
@@ -175,7 +198,7 @@ struct SpawnCdGuardTests {
     }
 
     /// 가짜 claude 가 받은 인자를 한 줄에 하나씩 찍는다. 인용이 셸을 통과해 그대로 도착하는지 본다.
-    static func argv(addDirs: [String], prompt: String?) throws -> [String] {
+    static func argv(addDirs: [String], prompt: String?, mcpSocket: String? = nil) throws -> [String] {
         let fm = FileManager.default
         let bin = fm.temporaryDirectory.appendingPathComponent("dure-argv-\(UUID().uuidString)")
         try fm.createDirectory(at: bin, withIntermediateDirectories: true)
@@ -189,7 +212,7 @@ struct SpawnCdGuardTests {
         p.executableURL = URL(fileURLWithPath: Spawn.shell)
         p.arguments = ["-c", Spawn.script(cwd: "/", sessionID: "s", settingsPath: "/set tings.json",
                                           sessionName: "dure-앱-abcd-조율자", addDirs: addDirs,
-                                          initialPrompt: prompt)]
+                                          initialPrompt: prompt, mcpSocket: mcpSocket)]
         p.environment = ["PATH": "\(bin.path):/usr/bin:/bin", "HOME": NSHomeDirectory()]
         let out = Pipe()
         p.standardOutput = out
@@ -204,6 +227,14 @@ struct SpawnCdGuardTests {
         let args = try Self.argv(addDirs: ["/a/back", "/a/it's 한글"], prompt: "할 일")
         #expect(args == ["--settings", "/set tings.json", "--name", "dure-앱-abcd-조율자",
                          "--add-dir", "/a/back", "--add-dir", "/a/it's 한글", "--", "할 일"])
+    }
+
+    /// JSON 안의 따옴표가 셸을 통과해 그대로 claude 에 닿아야 한다.
+    @Test func mcp_config_인자가_셸을_통과해도_그대로다() throws {
+        let args = try Self.argv(addDirs: [], prompt: "할 일", mcpSocket: "/t/it's.sock")
+        let i = try #require(args.firstIndex(of: "--mcp-config"))
+        #expect(args[i + 1] == Spawn.mcpConfig(socket: "/t/it's.sock"))
+        #expect(args.suffix(2) == ["--", "할 일"])
     }
 
     @Test func 폴더가_없으면_claude_를_띄우지_않는다() throws {

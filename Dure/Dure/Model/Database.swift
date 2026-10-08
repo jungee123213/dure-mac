@@ -6,6 +6,7 @@ import GRDB
 /// — v3: read_cursor · token_usage · tool_use (Step 5)
 /// — v4: workspace.default_agent_kind · repo.role (조율자 단계 1)
 /// — v5: agent.workspace_id · agent.repo_id nullable (조율자 단계 3).
+/// v6 (단계 4): dispatch · relay — 배분 큐이자 이력.
 enum AppDatabase {
 
     /// 부록 A5 — GRDB 는 `DatabaseQueue` 하나로 직렬화한다.
@@ -150,6 +151,47 @@ enum AppDatabase {
             try db.rename(table: "agent_v5", to: "agent")
             try db.create(index: "idx_agent_repo", on: "agent", columns: ["repo_id"])
             try db.create(index: "idx_agent_workspace", on: "agent", columns: ["workspace_id"])
+        }
+
+        m.registerMigration("v6_dispatch_relay") { db in
+            // 단계 4 — 배분 기록. 큐 상태도 여기 산다(앱을 껐다 켜도 큐가 남아야 한다).
+            try db.create(table: "dispatch") { t in
+                t.primaryKey("id", .text)
+                t.column("workspace_id", .text).notNull()
+                    .references("workspace", onDelete: .cascade)
+                t.column("seq", .integer).notNull()
+                t.column("repo_id", .text).notNull()
+                    .references("repo", onDelete: .cascade)
+                t.column("title", .text)
+                t.column("instruction", .text).notNull()
+                t.column("state", .text).notNull()
+                t.column("tool_use_id", .text)
+                t.column("delivered_session", .text)
+                t.column("result", .text)
+                t.column("failure", .text)
+                t.column("attempts", .integer).notNull().defaults(to: 0)
+                t.column("created_at", .integer).notNull()
+                t.column("delivered_at", .integer)
+                t.column("done_at", .integer)
+                t.uniqueKey(["workspace_id", "seq"])
+            }
+            try db.create(index: "idx_dispatch_repo_state", on: "dispatch", columns: ["repo_id", "state"])
+            // 조율자행 메시지. 배분·레포가 지워져도 "그런 보고가 있었다" 는 남긴다(SET NULL).
+            try db.create(table: "relay") { t in
+                t.primaryKey("id", .text)
+                t.column("workspace_id", .text).notNull()
+                    .references("workspace", onDelete: .cascade)
+                t.column("dispatch_id", .text)
+                    .references("dispatch", onDelete: .setNull)
+                t.column("repo_id", .text)
+                    .references("repo", onDelete: .setNull)
+                t.column("kind", .text).notNull()
+                t.column("body", .text).notNull()
+                t.column("state", .text).notNull()
+                t.column("created_at", .integer).notNull()
+                t.column("delivered_at", .integer)
+            }
+            try db.create(index: "idx_relay_workspace_state", on: "relay", columns: ["workspace_id", "state"])
         }
 
         return m

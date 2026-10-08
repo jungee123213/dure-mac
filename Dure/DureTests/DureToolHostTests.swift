@@ -1,0 +1,137 @@
+import Foundation
+import GRDB
+import Testing
+@testable import Dure
+
+/// 단계 4 — 툴 호출이 스토어 없이 Dispatcher 와 컨텍스트만으로 답하는지. 스토어는 실제 DB 라 여기서 못 쓴다.
+@MainActor
+struct DureToolHostTests {
+
+    /// World 를 테스트 인스턴스가 쥔다. Dispatcher 의 lookups 가 World 를 `unowned` 로 잡으므로,
+    /// 튜플에서 `_` 로 버리면 World 가 해제돼 첫 조회에서 프로세스가 죽는다(테스트 호스트째로).
+    private let held: DispatcherTests.World
+
+    init() throws { held = try DispatcherTests.World() }
+
+    func world() -> (Dispatcher, DureToolHost.Context, DispatcherTests.World) {
+        let w = held
+        w.idle("r1", session: "cc-a"); w.orchIdle()
+        let ctx = DureToolHost.Context(workspaceID: "w1", repos: [w.repoA, w.repoB], repoID: nil,
+                                       workspaceMarkdown: { "# 지도\n" }, canStart: { _ in true })
+        return (w.d, ctx, w)
+    }
+
+    @Test func dispatch_는_레포를_찾아_넘기고_결과를_말한다() throws {
+        let (d, ctx, w) = world()
+        let r = DureToolHost.call(.init(name: "dispatch", arguments: ["repo": "Android", "instruction": "파랑"], toolUseId: "tu"),
+                                  side: .orchestrator, context: ctx, dispatcher: d)
+        #expect(!r.isError && r.text.contains("#1") && r.text.contains("android") && r.text.contains("전달"))
+        #expect(w.inbox.sent.count == 1)
+    }
+
+    @Test func dispatch_는_안_뜬_페인이면_그렇게_말한다() throws {
+        let (d, ctx, _) = world()
+        let r = DureToolHost.call(.init(name: "dispatch", arguments: ["repo": "ios", "instruction": "x"], toolUseId: nil),
+                                  side: .orchestrator, context: ctx, dispatcher: d)
+        #expect(!r.isError && r.text.contains("안 떠") && r.text.contains("시작"))
+    }
+
+    /// Review Focus 4.
+    @Test func 모르는_레포면_후보를_준다() throws {
+        let (d, ctx, w) = world()
+        let r = DureToolHost.call(.init(name: "dispatch", arguments: ["repo": "backend", "instruction": "x"], toolUseId: nil),
+                                  side: .orchestrator, context: ctx, dispatcher: d)
+        #expect(r.isError && r.text.contains("android (/a/android)"))
+        #expect(w.d.queueCount(repoID: "r1") == 0 && w.d.history(workspaceID: "w1").isEmpty)
+    }
+
+    @Test func 빈_지시문은_거부한다() throws {
+        let (d, ctx, _) = world()
+        let r = DureToolHost.call(.init(name: "dispatch", arguments: ["repo": "android", "instruction": "  "], toolUseId: nil),
+                                  side: .orchestrator, context: ctx, dispatcher: d)
+        #expect(r.isError)
+    }
+
+    @Test func workspace_는_지도에_큐와_상태를_붙인다() throws {
+        let (d, ctx, _) = world()
+        _ = DureToolHost.call(.init(name: "dispatch", arguments: ["repo": "ios", "instruction": "x"], toolUseId: nil),
+                              side: .orchestrator, context: ctx, dispatcher: d)
+        let r = DureToolHost.call(.init(name: "workspace", arguments: [:], toolUseId: nil), side: .orchestrator, context: ctx, dispatcher: d)
+        #expect(r.text.hasPrefix("# 지도\n") && r.text.contains("## 배분 큐") && r.text.contains("ios") && r.text.contains("1"))
+        #expect(r.text.contains("- ios: 대기 1 · 상태 시작 대기"))
+        var ctx2 = ctx; ctx2.paneState = { $0 == "r1" ? "실행중" : nil }
+        let r2 = DureToolHost.call(.init(name: "workspace", arguments: [:], toolUseId: nil), side: .orchestrator, context: ctx2, dispatcher: d)
+        #expect(r2.text.contains("- android: 대기 0 · 상태 실행중"))
+    }
+
+    /// 최종 리뷰 I-4 — 폴더가 없는 레포는 아무도 시작할 수 없다. 큐에 넣지 않고 바로 알린다.
+    @Test func 폴더가_없는_레포에는_배분하지_않는다() throws {
+        let (d, ctx0, w) = world()
+        var ctx = ctx0; ctx.canStart = { _ in false }
+        let r = DureToolHost.call(.init(name: "dispatch", arguments: ["repo": "ios", "instruction": "x"], toolUseId: nil),
+                                  side: .orchestrator, context: ctx, dispatcher: d)
+        #expect(r.isError && r.text.contains("폴더가 없어") && r.text.contains("/a/ios"))
+        #expect(w.d.history(workspaceID: "w1").isEmpty)
+    }
+
+    @Test func tasks_는_최신_30개만_주고_나머지는_개수로() throws {
+        let (d, ctx, _) = world()
+        for i in 1...31 {
+            _ = DureToolHost.call(.init(name: "dispatch", arguments: ["repo": "ios", "instruction": "일 \(i)"], toolUseId: nil),
+                                  side: .orchestrator, context: ctx, dispatcher: d)
+        }
+        let lines = DureToolHost.call(.init(name: "tasks", arguments: [:], toolUseId: nil), side: .orchestrator, context: ctx, dispatcher: d)
+            .text.split(separator: "\n").map(String.init)
+        #expect(lines.count == 31)
+        #expect(lines.first?.hasPrefix("- #31 ") == true && lines[29].hasPrefix("- #2 "))
+        #expect(lines.last == "(… 외 1건 — state 로 거르거나 대시보드에서)")
+    }
+
+    /// 최종 리뷰 I-3 — 배분을 하던 중의 보고 · 질문은 그 배분 번호를 달고 간다.
+    @Test func 보고와_질문은_하던_배분에_묶인다() throws {
+        let (d, ctx0, w) = world()
+        _ = DureToolHost.call(.init(name: "dispatch", arguments: ["repo": "android", "instruction": "파랑"], toolUseId: nil),
+                              side: .orchestrator, context: ctx0, dispatcher: d)
+        let id = try #require(w.d.outstandingDispatchID(repoID: "r1"))
+        var ctx = ctx0; ctx.repoID = "r1"
+        _ = DureToolHost.call(.init(name: "ask_orchestrator", arguments: ["question": "어느 API?"], toolUseId: nil),
+                              side: .repo, context: ctx, dispatcher: d)
+        #expect(try w.db.read { try Relay.fetchOne($0) }?.dispatchId == id)
+        #expect(w.inbox.sent.last?.session == "cc-orch" && w.inbox.sent.last?.content.contains("‹android› 질문 (배분 #1, ") == true)
+    }
+
+    @Test func tasks_는_이력을_상태로_거른다() throws {
+        let (d, ctx, _) = world()
+        _ = DureToolHost.call(.init(name: "dispatch", arguments: ["repo": "android", "instruction": "a"], toolUseId: nil), side: .orchestrator, context: ctx, dispatcher: d)
+        _ = DureToolHost.call(.init(name: "dispatch", arguments: ["repo": "ios", "instruction": "b"], toolUseId: nil), side: .orchestrator, context: ctx, dispatcher: d)
+        let all = DureToolHost.call(.init(name: "tasks", arguments: [:], toolUseId: nil), side: .orchestrator, context: ctx, dispatcher: d)
+        #expect(all.text.contains("#1") && all.text.contains("#2"))
+        let queued = DureToolHost.call(.init(name: "tasks", arguments: ["state": "queued"], toolUseId: nil), side: .orchestrator, context: ctx, dispatcher: d)
+        #expect(queued.text.contains("#2") && !queued.text.contains("#1"))
+        #expect(DureToolHost.call(.init(name: "tasks", arguments: ["state": "weird"], toolUseId: nil), side: .orchestrator, context: ctx, dispatcher: d).isError)
+    }
+
+    @Test func cancel_은_번호로() throws {
+        let (d, ctx, _) = world()
+        _ = DureToolHost.call(.init(name: "dispatch", arguments: ["repo": "ios", "instruction": "b"], toolUseId: nil), side: .orchestrator, context: ctx, dispatcher: d)
+        #expect(!DureToolHost.call(.init(name: "cancel", arguments: ["id": "#1"], toolUseId: nil), side: .orchestrator, context: ctx, dispatcher: d).isError)
+        #expect(DureToolHost.call(.init(name: "cancel", arguments: ["id": "#1"], toolUseId: nil), side: .orchestrator, context: ctx, dispatcher: d).isError)
+    }
+
+    @Test func 레포_페인은_보고와_질문만_되고_조율자_툴은_안_된다() throws {
+        let (d, ctx0, w) = world()
+        var ctx = ctx0; ctx.repoID = "r1"
+        let r = DureToolHost.call(.init(name: "ask_orchestrator", arguments: ["question": "어느 API?"], toolUseId: nil), side: .repo, context: ctx, dispatcher: d)
+        #expect(!r.isError && r.text.contains("전달"))
+        #expect(w.inbox.sent.last?.session == "cc-orch" && w.inbox.sent.last?.content.contains("‹android› 질문") == true)
+        d.didStopOrchestrator(workspaceID: "w1")   // 조율자가 질문을 읽은 턴이 끝나야 다음 것이 간다(I-2)
+        _ = DureToolHost.call(.init(name: "report", arguments: ["summary": "절반"], toolUseId: nil), side: .repo, context: ctx, dispatcher: d)
+        #expect(w.inbox.sent.last?.content.contains("‹android› 보고") == true)
+        #expect(DureToolHost.call(.init(name: "dispatch", arguments: ["repo": "ios", "instruction": "x"], toolUseId: nil), side: .repo, context: ctx, dispatcher: d).isError)
+    }
+
+    @Test func 모르는_툴은_에러() throws {
+        let (d, ctx, _) = world()
+        #expect(DureToolHost.call(.init(name: "nope", arguments: [:], toolUseId: nil), side: .orchestrator, context: ctx, dispatcher: d).isError)
+    }
+}

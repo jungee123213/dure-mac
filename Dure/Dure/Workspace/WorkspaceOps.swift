@@ -29,6 +29,8 @@ enum WorkspaceOps {
         var repos: Int
         /// 에이전트 기록 수. 토큰·툴 사용량이 여기 딸려 있다.
         var sessions: Int
+        /// 배분 기록 수 (단계 4).
+        var dispatches: Int
     }
 
     static func create(name: String, defaultAgentKind: AgentKind = .claude,
@@ -50,7 +52,10 @@ enum WorkspaceOps {
         let sessions = try Int.fetchOne(db, sql: """
             SELECT COUNT(*) FROM agent WHERE workspace_id = ?
             """, arguments: [workspaceID]) ?? 0
-        return Impact(repos: repos.count, sessions: sessions)
+        let dispatches = try Int.fetchOne(db, sql: """
+            SELECT COUNT(*) FROM dispatch WHERE workspace_id = ?
+            """, arguments: [workspaceID]) ?? 0
+        return Impact(repos: repos.count, sessions: sessions, dispatches: dispatches)
     }
 
     /// 지울 수 있는지만 본다. 확인창을 띄우기 **전에** 막기 위해 따로 둔다.

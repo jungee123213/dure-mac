@@ -47,4 +47,7 @@ struct HookEvent {
 
     /// SessionStart 가 **실제 적용된** 모델을 준다. 사용자가 고른 값(repo.model)과는 별개다.
     var model: String? { payload?["model"] as? String }
+
+    /// 단계 4 — `Stop` 이 싣고 오는 마지막 답. 배분의 결과이자 조율자에게 올라가는 요약이다 (실측 2026-10-08).
+    var lastAssistantMessage: String? { payload?["last_assistant_message"] as? String }
 }
