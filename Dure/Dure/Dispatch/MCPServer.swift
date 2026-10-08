@@ -163,7 +163,8 @@ nonisolated final class MCPServer {
                             while off < data.count {
                                 let left = deadline.timeIntervalSinceNow
                                 if left <= 0 { return false }
-                                var tv = timeval(tv_sec: Int(left), tv_usec: Int32((left - left.rounded(.down)) * 1_000_000))
+                                // {0,0} 은 무제한이라 직접 만들지 않고 최소 1µs 를 보장하는 helper 를 쓴다.
+                                var tv = Inbox.timeoutValue(remaining: left)
                                 setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
                                 let w = write(fd, p.baseAddress! + off, data.count - off)
                                 if w < 0 && errno == EINTR { continue }

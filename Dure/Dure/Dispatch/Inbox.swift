@@ -37,6 +37,14 @@ nonisolated enum Inbox {
     /// 메시지 하나를 쓰는 데 쓰는 최대 시간(초). 아래 `send` 참고.
     static let sendTimeout: TimeInterval = 2
 
+    /// 남은 시간(초) → `SO_SNDTIMEO` 값. **절대 {0, 0} 을 돌려주지 않는다** — Darwin 에서 {0,0} 은 "무제한" 이라
+    /// 1µs 미만이 남았을 때 그대로 넣으면 막지 않으려던 무한 블로킹이 다시 열린다. 최소 1µs 로 올린다.
+    static func timeoutValue(remaining left: TimeInterval) -> timeval {
+        let sec = max(0, Int(left))
+        let usec = Int32((left - left.rounded(.down)) * 1_000_000)
+        return timeval(tv_sec: sec, tv_usec: sec == 0 ? max(1, usec) : max(0, usec))
+    }
+
     static func send(_ content: String, toSocket path: String) throws {
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else { throw Problem.connect(errno) }
@@ -75,7 +83,7 @@ nonisolated enum Inbox {
             while off < data.count {
                 let left = deadline.timeIntervalSinceNow
                 guard left > 0 else { throw Problem.write(EAGAIN) }
-                var tv = timeval(tv_sec: Int(left), tv_usec: Int32((left - left.rounded(.down)) * 1_000_000))
+                var tv = timeoutValue(remaining: left)
                 setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
                 let w = write(fd, p.baseAddress! + off, data.count - off)
                 if w < 0 && errno == EINTR { continue }

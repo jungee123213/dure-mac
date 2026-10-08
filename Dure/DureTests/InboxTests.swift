@@ -87,6 +87,14 @@ struct InboxTests {
         #expect(elapsed < 3)
     }
 
+    /// Darwin 의 `SO_SNDTIMEO` {0,0} 은 무제한이다 — 1µs 미만이 남아도 0 이 아닌 값이어야 한다.
+    @Test func 쓰기_제한_값은_0_이_되지_않는다() {
+        let tiny = Inbox.timeoutValue(remaining: 1e-9)
+        #expect(tiny.tv_sec == 0 && tiny.tv_usec == 1)
+        let normal = Inbox.timeoutValue(remaining: 1.5)
+        #expect(normal.tv_sec == 1 && normal.tv_usec == 500_000)
+    }
+
     @Test func 소켓이_없으면_던진다() {
         #expect(throws: Inbox.Problem.self) { try Inbox.send("x", toSocket: "/tmp/dure-none-\(UUID().uuidString).sock") }
     }
