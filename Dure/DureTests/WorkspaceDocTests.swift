@@ -84,4 +84,32 @@ struct WorkspaceDocTests {
     @Test func 레포가_없으면_없다고_적는다() {
         #expect(WorkspaceDoc.render(name: "ws", repos: []).contains("등록된 레포가 없습니다"))
     }
+
+    // MARK: - #16 조율자
+
+    @Test func 레포_지시문_경로를_적는다() {
+        var l = Self.line("back")
+        l.instructionsPath = "/repos/back/CLAUDE.md"
+        #expect(WorkspaceDoc.render(name: "ws", repos: [l]).contains("/repos/back/CLAUDE.md"))
+    }
+
+    @Test func 세션_이름을_적는다() {
+        var l = Self.line("back")
+        l.sessionName = "dure-ws-abcd-back"
+        #expect(WorkspaceDoc.render(name: "ws", repos: [l]).contains("dure-ws-abcd-back"))
+    }
+
+    @Test func 폴더가_없는_레포를_적는다() {
+        var l = Self.line("back")
+        l.folderMissing = true
+        #expect(WorkspaceDoc.render(name: "ws", repos: [l]).contains("폴더 없음"))
+    }
+
+    @Test func 조율자_줄을_적는다() {
+        let md = WorkspaceDoc.render(name: "ws", repos: [],
+                                     orchestrator: .init(sessionName: "dure-ws-abcd-조율자", openedWith: .claude))
+        #expect(md.contains("## 조율자"))
+        #expect(md.contains("dure-ws-abcd-조율자"))
+        #expect(md.contains("열려 있음"))
+    }
 }

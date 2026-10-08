@@ -91,7 +91,7 @@ struct TranscriptTests {
         try q.write { db in
             try Workspace(id: "w1", name: "ws").insert(db)
             try Repo(id: "r1", workspaceId: "w1", path: "/repo", label: nil, model: nil, role: nil).insert(db)
-            try Agent(dureSession: "pane", repoId: "r1", agentKind: "claude",
+            try Agent(dureSession: "pane", workspaceId: "w1", repoId: "r1", agentKind: "claude",
                       state: .started, model: nil, startedAt: 0, endedAt: nil).insert(db)
         }
         return q

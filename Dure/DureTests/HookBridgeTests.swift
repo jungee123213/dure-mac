@@ -71,21 +71,20 @@ struct HookBridgeTests {
     @Test func 전역_설정_경로를_참조하지_않는다() throws {
         let json = String(decoding: try HookBridge.settingsJSON(), as: UTF8.self)
         #expect(!json.contains(".claude/settings.json"))
-        #expect(HookBridge.settingsURL.path.hasSuffix("/.dure/hooks.json"))
     }
 
     /// D-3 — 이벤트 줄에 에이전트 종류가 들어간다. 포맷을 나중에 바꾸면 쌓인 줄과 섞인다.
     @Test func 스폰_명령이_세션_훅과_종류를_주입한다() {
-        let s = Spawn.script(repoPath: "/tmp/repo", sessionID: "uuid-1")
+        let s = Spawn.script(cwd: "/tmp/repo", sessionID: "uuid-1", settingsPath: SessionSettings.repoPaneURL().path, sessionName: "n")
         #expect(s.contains("export DURE_SESSION='uuid-1'"))
         #expect(s.contains("export DURE_AGENT_KIND='claude'"))
-        #expect(s.contains("--settings '\(HookBridge.settingsURL.path)'"))
+        #expect(s.contains("--settings '\(SessionSettings.repoPaneURL().path)'"))
         #expect(s.contains("exec claude"))
     }
 
     /// 레포 경로에 작은따옴표가 있어도 셸이 깨지지 않아야 한다.
     @Test func 경로_인용이_안전하다() {
-        let s = Spawn.script(repoPath: "/tmp/it's here", sessionID: "u")
+        let s = Spawn.script(cwd: "/tmp/it's here", sessionID: "u", settingsPath: SessionSettings.repoPaneURL().path, sessionName: "n")
         #expect(s.contains(#"cd '/tmp/it'\''s here'"#))
     }
 }

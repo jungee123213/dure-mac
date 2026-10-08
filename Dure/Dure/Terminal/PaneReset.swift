@@ -8,8 +8,8 @@ import Foundation
 /// 살아 있는 claude 의 페인이 시작 대기로 바뀌고, 그 claude 는 화면 없이 남는다.
 enum PaneReset {
 
-    /// 종료된 세션이 **지금 그 레포에 걸린 세션일 때만** 레포 id 를 돌려준다.
-    static func repoToReset(exitedSession: String, sessionIDs: [String: String]) -> String? {
+    /// 종료된 세션이 **지금 그 페인에 걸린 세션일 때만** 페인 키를 돌려준다 (레포 · 조율자 공통).
+    static func paneToReset(exitedSession: String, sessionIDs: [String: String]) -> String? {
         sessionIDs.first { $0.value == exitedSession }?.key
     }
 }

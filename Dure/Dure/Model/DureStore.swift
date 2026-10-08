@@ -40,8 +40,11 @@ final class DureStore {
 
     /// 저장 안 된 편집이 있는가.
     var contextIsDirty: Bool { contextText != contextAsLoaded }
-    /// 이미 출발한 레포. **자동 기동을 하지 않으므로** 여기 없는 페인은 아직 안 떴다.
-    private(set) var startedRepos: Set<String> = []
+    /// 이미 출발한 페인의 키(`PaneTarget.key`). **자동 기동을 하지 않으므로** 여기 없는 페인은 아직 안 떴다.
+    private(set) var startedPanes: Set<String> = []
+    /// 페인을 시작하지 못한 이유(페인 키 → 문장). 조율자 준비(설정·지시문 쓰기) 실패가 여기 온다.
+    /// 권한이나 지시문이 빠진 채로 뜨면 git 읽기마다 승인이 뜨거나 메시지 범위 규칙이 없다 — 그래서 아예 안 띄운다.
+    private(set) var paneProblems: [String: String] = [:]
     var selectedWorkspaceID: String? {
         willSet {
             // 저장을 안 누르고 워크스페이스를 바꾸면 openWorkspaceFolder 가 contextText 를
@@ -56,7 +59,7 @@ final class DureStore {
         }
     }
 
-    /// 페인 하나당 UUID 하나 (ADR-14 의 `DURE_SESSION`).
+    /// 페인 키 → `DURE_SESSION` (ADR-14). 페인 하나당 UUID 하나.
     /// 뷰가 다시 그려져도 같은 값이어야 훅이 보내는 값과 앱의 매핑이 어긋나지 않는다.
     /// **뷰 갱신을 유발하면 안 되므로** 관측 대상에서 뺀다.
     @ObservationIgnored private var sessionIDs: [String: String] = [:]
@@ -79,9 +82,21 @@ final class DureStore {
         repos.filter { $0.workspaceId == workspaceID }
     }
 
+    /// 한 워크스페이스의 페인. **조율자가 맨 위**이고 레포가 그 아래로 쌓인다 (스펙 6절).
+    func panes(in workspaceID: String) -> [PaneTarget] {
+        [.orchestrator(workspaceID: workspaceID)] + repos(in: workspaceID).map(PaneTarget.repo)
+    }
+
+    var visiblePanes: [PaneTarget] {
+        guard let id = selectedWorkspaceID else { return [] }
+        return panes(in: id)
+    }
+
     /// D-27 — 뷰 트리에 남길 워크스페이스 층.
     var paneLayers: [PaneLayout.Layer] {
-        let started = Set(repos.filter { startedRepos.contains($0.id) }.map(\.workspaceId))
+        let started = Set(workspaces.map(\.id).filter { ws in
+            panes(in: ws).contains { startedPanes.contains($0.key) }
+        })
         return PaneLayout.layers(workspaceIDs: workspaces.map(\.id),
                                  selected: selectedWorkspaceID,
                                  startedWorkspaceIDs: started)
@@ -125,16 +140,18 @@ final class DureStore {
             try AppDatabase.queue.write { try WorkspaceOps.rename(workspaceID, to: name, in: $0) }
             load()
             // workspace.md 제목이 워크스페이스 이름이다.
-            refreshWorkspaceDoc()
+            refreshWorkspaceDoc(for: workspaceID)
         } catch {
             NSLog("[Dure] renameWorkspace 실패: \(error)")
         }
     }
 
-    /// 지금 claude 가 살아 있는 레포. 워크스페이스 삭제를 막는 근거다 (D-26).
+    /// 지금 claude 가 살아 있는 페인이 속한 워크스페이스. 삭제를 막는 근거다 (D-26).
     /// 상태가 아직 nil 인 것(막 띄워 훅이 안 온 것)도 살아 있는 것으로 친다.
-    var runningRepoIDs: Set<String> {
-        Set(startedRepos.filter { state(forRepo: $0) != .dead })
+    var runningWorkspaceIDs: Set<String> {
+        Set(workspaces.map(\.id).filter { ws in
+            panes(in: ws).contains { startedPanes.contains($0.key) && state(for: $0) != .dead }
+        })
     }
 
     func deletionImpact(of workspaceID: String) -> WorkspaceOps.Impact? {
@@ -145,7 +162,7 @@ final class DureStore {
     func deletionRefusal(for workspaceID: String) -> WorkspaceOps.Refusal? {
         do {
             try AppDatabase.queue.read {
-                try WorkspaceOps.checkDeletable(workspaceID, runningRepoIDs: runningRepoIDs, in: $0)
+                try WorkspaceOps.checkDeletable(workspaceID, runningWorkspaceIDs: runningWorkspaceIDs, in: $0)
             }
             return nil
         } catch let refusal as WorkspaceOps.Refusal {
@@ -157,17 +174,17 @@ final class DureStore {
     }
 
     func deleteWorkspace(_ workspaceID: String) throws {
-        let repoIDs = repos(in: workspaceID).map(\.id)
+        let keys = panes(in: workspaceID).map(\.key)
         try AppDatabase.queue.write {
-            try WorkspaceOps.delete(workspaceID, runningRepoIDs: runningRepoIDs, in: $0)
+            try WorkspaceOps.delete(workspaceID, runningWorkspaceIDs: runningWorkspaceIDs, in: $0)
         }
         // DB 가 지워진 **뒤에만** 폴더를 옮긴다. 순서가 반대면 DB 실패 시 문서만 사라진다 (D-26).
         do { try WorkspaceFolder.trash(workspaceID) }
         catch { NSLog("[Dure] 워크스페이스 폴더 휴지통 이동 실패: \(error)") }
         // 이미 죽은 페인들의 흔적. 층(D-27)도 이것으로 정리된다.
-        for id in repoIDs {
-            startedRepos.remove(id)
-            sessionIDs[id] = nil
+        for key in keys {
+            startedPanes.remove(key)
+            sessionIDs[key] = nil
         }
         if selectedWorkspaceID == workspaceID { selectedWorkspaceID = nil }
         // 선택이 비었으면 load 가 첫 워크스페이스를 고른다.
@@ -179,6 +196,8 @@ final class DureStore {
         do {
             try AppDatabase.queue.write { try r.insert($0) }
             load()
+            // git 을 읽기 전에도 레포 줄이 지도에 있어야 한다. git 이 끝나면 refreshGit 이 한 번 더 쓴다.
+            refreshWorkspaceDoc(for: workspaceID)
             refreshGit(for: r)
         } catch {
             // path 가 UNIQUE 라 이미 등록된 폴더면 여기로 온다.
@@ -190,6 +209,8 @@ final class DureStore {
         do {
             _ = try AppDatabase.queue.write { try repo.delete($0) }
             load()
+            // 지운 레포가 지도에 남으면 조율자가 없는 레포를 찾는다.
+            refreshWorkspaceDoc(for: repo.workspaceId)
         } catch {
             NSLog("[Dure] removeRepo 실패: \(error)")
         }
@@ -202,13 +223,14 @@ final class DureStore {
     /// **훅이 발화하기 전에 행이 있어야 한다.** `cc_session` 이 `agent` 를 참조하므로,
     /// 스폰보다 늦게 등록하면 첫 `SessionStart` 가 외래키에서 튕긴다.
     /// 그래서 뷰가 세션ID를 묻는 시점(스폰 직전)에 같이 만든다.
-    func sessionID(for repo: Repo, kind: AgentKind = .claude) -> String {
-        if let existing = sessionIDs[repo.id] { return existing }
+    func sessionID(for target: PaneTarget, kind: AgentKind = .claude) -> String {
+        if let existing = sessionIDs[target.key] { return existing }
 
         let uuid = UUID().uuidString
-        sessionIDs[repo.id] = uuid
+        sessionIDs[target.key] = uuid
         let agent = Agent(dureSession: uuid,
-                          repoId: repo.id,
+                          workspaceId: target.workspaceID,
+                          repoId: target.repo?.id,
                           agentKind: kind.rawValue,
                           state: .started,
                           // 앱이 모델을 정하지 않는다. 실제 모델은 SessionStart 훅이 cc_session 에 남긴다.
@@ -237,13 +259,13 @@ final class DureStore {
         case .waiting(let message):
             Notifier.post(title: WorkspaceSummary.alertTitle(
                               workspace: workspaceName(for: event.dureSession),
-                              repo: repoName(for: event.dureSession),
+                              repo: paneName(forSession: event.dureSession),
                               suffix: "답을 기다립니다"),
                           body: message, dureSession: event.dureSession)
         case .done:
             Notifier.post(title: WorkspaceSummary.alertTitle(
                               workspace: workspaceName(for: event.dureSession),
-                              repo: repoName(for: event.dureSession),
+                              repo: paneName(forSession: event.dureSession),
                               suffix: "작업 완료"),
                           body: "응답이 끝났습니다.", dureSession: event.dureSession)
         case nil:
@@ -274,53 +296,61 @@ final class DureStore {
     // MARK: - F4 상태 (Step 6)
 
     /// 페인의 현재 상태. 사이드바·페인 헤더가 읽는다.
-    func state(forRepo repoID: String) -> AgentState? {
-        guard let session = sessionIDs[repoID] else { return nil }
+    func state(for target: PaneTarget) -> AgentState? {
+        guard let session = sessionIDs[target.key] else { return nil }
         return agents.first { $0.dureSession == session }?.state
     }
 
     /// 그 페인을 실제로 띄운 CLI. agent 행에서 읽는다.
-    private func agentKind(forRepo repoID: String) -> AgentKind? {
-        guard let session = sessionIDs[repoID],
+    private func agentKind(for target: PaneTarget) -> AgentKind? {
+        guard let session = sessionIDs[target.key],
               let agent = agents.first(where: { $0.dureSession == session }) else { return nil }
         return AgentKind(rawValue: agent.agentKind)
     }
 
-    func repoName(for dureSession: String) -> String {
-        repo(for: dureSession)?.displayName ?? "에이전트"
+    /// 알림 제목에 쓸 페인 이름. 조율자는 "조율자".
+    /// repo_id 가 nil 인 agent 행은 조율자뿐이라(Task 1 v5) 그것으로 가른다.
+    func paneName(forSession dureSession: String) -> String {
+        guard let agent = agents.first(where: { $0.dureSession == dureSession }) else { return "에이전트" }
+        guard let repoId = agent.repoId else { return "조율자" }
+        return repos.first { $0.id == repoId }?.displayName ?? "에이전트"
     }
 
-    /// 사이드바 워크스페이스 목록에 실을 숫자 (D-27).
+    /// 사이드바 워크스페이스 목록에 실을 숫자 (D-27). 조율자 페인도 센다.
     func summary(for workspaceID: String) -> WorkspaceSummary.Counts {
-        let states = repos(in: workspaceID)
-            .filter { startedRepos.contains($0.id) }
-            .map { state(forRepo: $0.id) }
+        let states = panes(in: workspaceID)
+            .filter { startedPanes.contains($0.key) }
+            .map { state(for: $0) }
         return WorkspaceSummary.counts(states)
     }
 
+    /// agent 행의 workspace_id 로 찾는다 — 조율자는 레포를 거쳐 찾을 수 없다.
     private func workspaceName(for dureSession: String) -> String? {
-        guard let repo = repo(for: dureSession) else { return nil }
-        return workspaces.first { $0.id == repo.workspaceId }?.name
+        guard let agent = agents.first(where: { $0.dureSession == dureSession }) else { return nil }
+        return workspaces.first { $0.id == agent.workspaceId }?.name
     }
 
     private func repo(for dureSession: String) -> Repo? {
-        guard let agent = agents.first(where: { $0.dureSession == dureSession }) else { return nil }
-        return repos.first { $0.id == agent.repoId }
+        guard let agent = agents.first(where: { $0.dureSession == dureSession }),
+              let repoId = agent.repoId else { return nil }
+        return repos.first { $0.id == repoId }
     }
 
     /// **`dead` 는 훅이 아니라 PTY 종료로 들어온다** (ADR-13 — 앱이 PTY 를 소유한다).
     /// `SessionEnd` 훅을 쓰지 않는 이유는 1차 훅 목록에 없고, 프로세스 종료가 더 확실해서다.
     func markDead(_ dureSession: String) {
+        // 아래에서 sessionIDs 를 지우면 키로는 워크스페이스를 찾을 수 없어 agent 행에서 먼저 잡는다.
+        let ws = agents.first { $0.dureSession == dureSession }?.workspaceId
         setState(.dead, for: dureSession, endedNow: true)
-        // 이슈 #14 — 끝난 페인은 시작 대기로 되돌린다. 남겨두면 죽은 터미널에 묶여
+        // 이슈 #14 — 끝난 페인은 시작 대기로 되돌린다 (레포 · 조율자 공통, #16). 남겨두면 죽은 터미널에 묶여
         // `이 페인만 시작` 도 무시되고 앱을 껐다 켜야 했다. 기록(agent 행·토큰)은 DB 에 남는다.
         // 다시 시작하면 `sessionID(for:)` 가 새 DURE_SESSION 과 새 agent 행을 만든다.
-        guard let repoID = PaneReset.repoToReset(exitedSession: dureSession,
-                                                 sessionIDs: sessionIDs) else { return }
-        startedRepos.remove(repoID)
-        sessionIDs[repoID] = nil
+        guard let key = PaneReset.paneToReset(exitedSession: dureSession,
+                                              sessionIDs: sessionIDs) else { return }
+        startedPanes.remove(key)
+        sessionIDs[key] = nil
         // "지금 페인이 열려 있음" 이 지도에서 빠져야 한다.
-        refreshWorkspaceDoc()
+        if let ws { refreshWorkspaceDoc(for: ws) }
     }
 
     private func setState(_ next: AgentState, for dureSession: String, endedNow: Bool = false) {
@@ -386,31 +416,83 @@ final class DureStore {
 
     /// **앱을 켜도 `claude` 는 저절로 뜨지 않는다.** 원래 이유(브리핑을 넣을 틈)는 D-30 으로
     /// 사라졌지만, 어떤 페인을 언제 띄울지는 사람이 정한다.
-    func hasStarted(_ repoID: String) -> Bool { startedRepos.contains(repoID) }
+    func hasStarted(_ target: PaneTarget) -> Bool { startedPanes.contains(target.key) }
+
+    /// 지금 띄울 수 있는가. 레포는 폴더가 있어야 한다 — 없으면 띄워봐야 `cd` 에서 끝난다(이슈 #10).
+    /// 조율자는 항상 true — 준비 실패는 `start(_:)` 에서 잡아 `paneProblems` 에 남긴다(다시 누르면 다시 시도).
+    func canStart(_ target: PaneTarget) -> Bool {
+        switch target {
+        case .repo(let r): r.folderExists
+        case .orchestrator: true
+        }
+    }
 
     /// 페인 하나를 출발시킨다. 이미 떠 있으면 아무것도 하지 않는다 —
     /// 진행 중인 작업을 재시작으로 날리지 않기 위해서다.
-    func start(_ repo: Repo) {
-        guard !startedRepos.contains(repo.id) else { return }
-        // 폴더가 없으면 띄워봐야 `cd` 에서 끝난다 (이슈 #10). 버튼을 잠그지만 여기서도 막는다.
-        guard repo.folderExists else { return }
-        startedRepos.insert(repo.id)
+    func start(_ target: PaneTarget) {
+        // 버튼을 잠그지만 여기서도 막는다 (이슈 #10).
+        guard !startedPanes.contains(target.key), canStart(target) else { return }
+        // 준비 실패를 canStart 로 막지 않는다 — 실패는 시작을 눌렀을 때 생기고, 다시 누르면 다시 시도해야 한다.
+        if case .orchestrator(let ws) = target {
+            do {
+                try prepareOrchestrator(ws)
+                paneProblems[target.key] = nil
+            } catch {
+                paneProblems[target.key] = "조율자를 준비하지 못했습니다: \(error.localizedDescription)"
+                return
+            }
+        }
+        startedPanes.insert(target.key)
         // agent 행을 여기서 만든다. workspace.md 의 "열려 있음 (X)" 는 이 행의 agentKind 를
         // 읽는다 (최종 리뷰 F4). 스폰보다 먼저이므로 훅 외래키 조건(ADR-17)도 그대로 지켜진다.
-        _ = sessionID(for: repo)
+        _ = sessionID(for: target)
         // "지금 페인이 열려 있음" 이 지도에 반영돼야 한다.
-        refreshWorkspaceDoc()
+        refreshWorkspaceDoc(for: target.workspaceID)
     }
 
-    /// 지금 보이는 워크스페이스의 페인을 한 번에 띄운다 (`전체 시작`, ⌘↩).
+    /// 조율자를 띄우기 직전에 폴더·지시문·권한 설정을 쓴다. 레포가 추가·삭제됐을 수 있어 매번 쓴다.
+    private func prepareOrchestrator(_ workspaceID: String) throws {
+        guard let ws = workspaces.first(where: { $0.id == workspaceID }) else { return }
+        try WorkspaceFolder.ensure(workspaceID)
+        let members = repos(in: workspaceID).filter(\.folderExists)
+        try WorkspaceFolder.writeInstructions(workspaceID, OrchestratorDoc.render(
+            workspaceName: ws.name,
+            sessionPrefix: SessionName.prefix(workspaceName: ws.name, workspaceID: ws.id),
+            repos: members.map { .init(name: $0.displayName, path: $0.path) }))
+        try SessionSettings.writeOrchestrator(workspaceID, repoPaths: LaunchPlan.repoPaths(members))
+    }
+
+    private func workspaceName(id: String) -> String {
+        workspaces.first { $0.id == id }?.name ?? ""
+    }
+
+    /// 페인이 실행할 셸 스크립트. 레포 페인과 조율자의 차이(cwd · 설정 · 이름 · `--add-dir`)는 여기서만 갈린다.
+    func launchScript(for target: PaneTarget, sessionID: String) -> String {
+        let wsName = workspaceName(id: target.workspaceID)
+        switch target {
+        case .repo(let r):
+            return Spawn.script(cwd: r.path, sessionID: sessionID,
+                                settingsPath: SessionSettings.repoPaneURL().path,
+                                sessionName: SessionName.repo(workspaceName: wsName,
+                                                              workspaceID: r.workspaceId,
+                                                              repoName: r.displayName))
+        case .orchestrator(let ws):
+            return Spawn.script(cwd: WorkspaceFolder.url(for: ws).path, sessionID: sessionID,
+                                settingsPath: SessionSettings.orchestratorURL(ws).path,
+                                sessionName: SessionName.orchestrator(workspaceName: wsName, workspaceID: ws),
+                                addDirs: LaunchPlan.repoPaths(repos(in: ws)))
+        }
+    }
+
+    /// 지금 보이는 워크스페이스의 페인(조율자 포함)을 한 번에 띄운다 (`전체 시작`, ⌘↩).
     func startAll() {
-        for repo in visibleRepos { start(repo) }
+        for target in visiblePanes { start(target) }
     }
 
     /// 아직 안 뜬 페인이 하나라도 있는가. 버튼을 잠그는 데 쓴다.
     var hasUnstartedPanes: Bool {
-        // 폴더 없는 레포는 셈에서 뺀다. 안 그러면 그것 하나 때문에 `전체 시작` 이 영영 켜져 있다.
-        visibleRepos.contains { !startedRepos.contains($0.id) && $0.folderExists }
+        // 띄울 수 없는 페인(폴더 없는 레포)은 셈에서 뺀다. 안 그러면 그것 하나 때문에 `전체 시작` 이 영영 켜져 있다.
+        visiblePanes.contains { !startedPanes.contains($0.key) && canStart($0) }
     }
 
     // MARK: - 워크스페이스 문서 (조율자 단계 1)
@@ -422,7 +504,7 @@ final class DureStore {
         catch { NSLog("[Dure] 워크스페이스 폴더 준비 실패: \(error)") }
         // ensure 가 실패해도 읽는다. 안 읽으면 편집창에 **이전 워크스페이스의 글**이 남는다.
         loadContext(id)
-        refreshWorkspaceDoc()
+        refreshWorkspaceDoc(for: id)
     }
 
     /// 디스크에서 다시 읽는다. **편집 중인 글은 버려진다** — 사람이 [다시 불러오기] 를
@@ -493,13 +575,13 @@ final class DureStore {
         }
     }
 
-    /// `workspace.md` 를 다시 쓴다.
+    /// `workspace.md` 를 다시 쓴다. **선택 여부와 상관없이** — 조율자는 숨겨진 워크스페이스에서도 돈다 (D-27, #16).
     ///
     /// **git 이 갱신될 때마다 함께 부른다.** 조율자가 읽는 지도가 낡으면
     /// "백엔드에 뭐가 바뀌었나" 를 틀리게 답한다.
-    func refreshWorkspaceDoc() {
-        guard let workspace = selectedWorkspace else { return }
-        let lines = visibleRepos.map { repo in
+    func refreshWorkspaceDoc(for workspaceID: String) {
+        guard let workspace = workspaces.first(where: { $0.id == workspaceID }) else { return }
+        let lines = repos(in: workspaceID).map { repo in
             WorkspaceDoc.RepoLine(
                 name: repo.displayName,
                 path: repo.path,
@@ -508,12 +590,34 @@ final class DureStore {
                 // 최종 리뷰 F4 — 워크스페이스 기본값이 아니라 **실제로 띄운** CLI 를 적는다.
                 // 기본 CLI 를 codex 로 바꿔도 페인은 아직 claude 로만 뜬다. 지도가 거짓말을 하면
                 // 조율자가 엉뚱한 CLI 를 가정한다.
-                openedWith: startedRepos.contains(repo.id) ? agentKind(forRepo: repo.id) : nil
+                openedWith: hasStarted(.repo(repo)) ? agentKind(for: .repo(repo)) : nil,
+                instructionsPath: LaunchPlan.instructionsPath(for: repo),
+                sessionName: SessionName.repo(workspaceName: workspace.name, workspaceID: workspace.id,
+                                              repoName: repo.displayName),
+                folderMissing: !repo.folderExists
             )
         }
-        let md = WorkspaceDoc.render(name: workspace.name, repos: lines)
+        let orch = PaneTarget.orchestrator(workspaceID: workspaceID)
+        let md = WorkspaceDoc.render(
+            name: workspace.name, repos: lines,
+            orchestrator: .init(sessionName: SessionName.orchestrator(workspaceName: workspace.name,
+                                                                      workspaceID: workspace.id),
+                                openedWith: hasStarted(orch) ? agentKind(for: orch) : nil))
         do { try WorkspaceFolder.writeMap(workspace.id, md) }
         catch { NSLog("[Dure] workspace.md 쓰기 실패: \(error)") }
+    }
+
+    func refreshAllWorkspaceDocs() {
+        for w in workspaces { refreshWorkspaceDoc(for: w.id) }
+    }
+
+    /// 앱 시작 때. 숨겨진 워크스페이스의 조율자도 낡지 않은 지도를 읽어야 한다.
+    func prepareAllWorkspaceFolders() {
+        for w in workspaces {
+            do { try WorkspaceFolder.ensure(w.id) }
+            catch { NSLog("[Dure] 워크스페이스 폴더 준비 실패(\(w.name)): \(error)") }
+        }
+        refreshAllWorkspaceDocs()
     }
 
     // MARK: - F8 git 상태 (Step 7)
@@ -523,20 +627,20 @@ final class DureStore {
     /// **메인액터에서 `git` 을 부르지 않는다.** MCP 가 많은 큰 레포는 `status` 가
     /// 수백 ms 걸릴 수 있고, 페인 수만큼 곱해지면 30초마다 UI 가 끊긴다.
     func refreshGit(for repo: Repo) {
-        let (id, path) = (repo.id, repo.path)
+        let (id, path, ws) = (repo.id, repo.path, repo.workspaceId)
         Task.detached(priority: .utility) {
             let fresh = GitReader.read(at: path)
             await MainActor.run {
                 self.git.update(id, with: fresh)
                 // 지도가 낡으면 조율자가 틀린 답을 한다.
-                self.refreshWorkspaceDoc()
+                self.refreshWorkspaceDoc(for: ws)
             }
         }
     }
 
-    /// 지금 페인이 떠 있는 레포들만 읽는다.
+    /// 모든 레포 — 숨겨진 워크스페이스의 조율자도 최신 지도를 읽는다 (#16).
     func refreshAllGit() {
-        for repo in visibleRepos { refreshGit(for: repo) }
+        for repo in repos { refreshGit(for: repo) }
     }
 
     /// D-13 — 훅만으로는 **사람이 앱 밖에서 한 커밋·체크아웃**을 놓친다.
@@ -559,7 +663,7 @@ final class DureStore {
         do {
             try AppDatabase.queue.write { try r.update($0) }
             load()
-            refreshWorkspaceDoc()
+            refreshWorkspaceDoc(for: repo.workspaceId)
         } catch { NSLog("[Dure] setRole 실패: \(error)") }
     }
 
@@ -572,5 +676,21 @@ final class DureStore {
             try AppDatabase.queue.write { try w.update($0) }
             load()
         } catch { NSLog("[Dure] setDefaultAgentKind 실패: \(error)") }
+    }
+}
+
+/// 이슈 #16 — 페인을 띄울 때 넘길 것의 순수한 부분. 스토어는 실제 DB·홈을 써서 테스트하기 어렵다.
+enum LaunchPlan {
+
+    /// 조율자의 `--add-dir`·git 허용 대상. 폴더가 없는 레포는 뺀다(이슈 #10) —
+    /// 넣으면 claude 가 기동에서 실패하거나 없는 경로를 허용한다.
+    static func repoPaths(_ repos: [Repo]) -> [String] {
+        repos.filter(\.folderExists).map(\.path)
+    }
+
+    /// 레포 지시문 경로. 조율자는 자동으로 싣지 않고(D-31 ②) `workspace.md` 의 이 경로를 보고 읽는다.
+    static func instructionsPath(for repo: Repo) -> String? {
+        let p = URL(fileURLWithPath: repo.path).appendingPathComponent("CLAUDE.md").path
+        return FileManager.default.fileExists(atPath: p) ? p : nil
     }
 }

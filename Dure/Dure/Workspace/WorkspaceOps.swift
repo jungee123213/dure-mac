@@ -48,26 +48,24 @@ enum WorkspaceOps {
     static func impact(of workspaceID: String, in db: Database) throws -> Impact {
         let repos = try repoIDs(in: workspaceID, db)
         let sessions = try Int.fetchOne(db, sql: """
-            SELECT COUNT(*) FROM agent
-            WHERE repo_id IN (SELECT id FROM repo WHERE workspace_id = ?)
+            SELECT COUNT(*) FROM agent WHERE workspace_id = ?
             """, arguments: [workspaceID]) ?? 0
         return Impact(repos: repos.count, sessions: sessions)
     }
 
     /// 지울 수 있는지만 본다. 확인창을 띄우기 **전에** 막기 위해 따로 둔다.
-    /// - Parameter runningRepoIDs: 지금 claude 가 살아 있는 레포. 앱 메모리에만 있는 값이라 인자로 받는다.
-    static func checkDeletable(_ workspaceID: String, runningRepoIDs: Set<String>,
+    /// - Parameter runningWorkspaceIDs: 지금 claude 가 살아 있는 페인(레포 · 조율자)이 속한 워크스페이스.
+    ///   앱 메모리에만 있는 값이라 인자로 받는다.
+    static func checkDeletable(_ workspaceID: String, runningWorkspaceIDs: Set<String>,
                                in db: Database) throws {
         guard try Workspace.fetchCount(db) > 1 else { throw Refusal.lastWorkspace }
-        guard runningRepoIDs.isDisjoint(with: try repoIDs(in: workspaceID, db)) else {
-            throw Refusal.hasRunningPanes
-        }
+        guard !runningWorkspaceIDs.contains(workspaceID) else { throw Refusal.hasRunningPanes }
     }
 
-    static func delete(_ workspaceID: String, runningRepoIDs: Set<String>,
+    static func delete(_ workspaceID: String, runningWorkspaceIDs: Set<String>,
                        in db: Database) throws {
-        try checkDeletable(workspaceID, runningRepoIDs: runningRepoIDs, in: db)
-        // repo → agent → cc_session → token_usage · tool_use 가 연쇄로 지워진다 (v1~v3 외래키).
+        try checkDeletable(workspaceID, runningWorkspaceIDs: runningWorkspaceIDs, in: db)
+        // workspace → (repo →) agent → cc_session → token_usage · tool_use 가 연쇄로 지워진다 (v1~v5 외래키).
         // 레포 폴더와 코드는 건드리지 않는다 — Dure 의 등록 정보만 지운다.
         _ = try Workspace.deleteOne(db, key: workspaceID)
     }

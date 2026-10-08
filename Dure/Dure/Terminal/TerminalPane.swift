@@ -4,12 +4,8 @@ import SwiftTerm
 /// ADR-13 — 터미널은 앱 안에 내장한다. 앱이 PTY 와 자식 프로세스를 소유한다.
 /// 1차는 세로 스택 N-페인. 탭·스플리터·재배치 없음.
 struct TerminalPane: NSViewRepresentable {
-    let repo: Repo
-    /// ADR-14 의 게이트 값. 페인 하나당 하나이며 앱이 만든다.
-    let sessionID: String
-    /// 출발할 때 넘길 첫 프롬프트. `claude "<prompt>"` 인자가 된다.
-    /// D-30 으로 브리핑 칸을 빼서 지금은 늘 nil 이다. 단계 4 에서 조율자가 할 일을 넘길 때 쓴다.
-    var initialPrompt: String? = nil
+    /// `Spawn.script(…)` 가 만든 셸 스크립트. 레포 페인인지 조율자인지는 스토어가 정한다 (#16).
+    let script: String
     /// D-27 — 숨긴 층의 페인인가. 숨긴 터미널이 first responder 로 남아 있으면
     /// **타이핑이 안 보이는 페인으로 들어간다.**
     var isActive: Bool = true
@@ -43,10 +39,7 @@ struct TerminalPane: NSViewRepresentable {
 
         view.startProcess(
             executable: Spawn.shell,
-            args: Spawn.shellArgs + [
-                Spawn.script(repoPath: repo.path, sessionID: sessionID,
-                             initialPrompt: initialPrompt)
-            ]
+            args: Spawn.shellArgs + [script]
         )
         return view
     }

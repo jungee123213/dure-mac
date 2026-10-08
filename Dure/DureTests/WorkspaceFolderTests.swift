@@ -180,4 +180,14 @@ struct WorkspaceFolderTests {
 
         #expect(!called)
     }
+
+    @Test func 지시문은_워크스페이스_폴더의_CLAUDE_md_다() throws {
+        let root = try Self.tempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try WorkspaceFolder.ensure("w1", root: root)
+        try WorkspaceFolder.writeInstructions("w1", "# 지시", root: root)
+        let url = WorkspaceFolder.instructionsURL(for: "w1", root: root)
+        #expect(url.lastPathComponent == "CLAUDE.md")
+        #expect(try String(contentsOf: url, encoding: .utf8) == "# 지시")
+    }
 }

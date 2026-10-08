@@ -78,6 +78,21 @@ struct DashboardView: View {
                     Text("워크스페이스 지도").font(.headline)
                     Text("workspace.md").font(.caption).foregroundStyle(.secondary)
                 }
+                // 조율자는 레포가 없어도 있다 — 지도 맨 위에 상태를 보인다.
+                if let ws = store.selectedWorkspaceID {
+                    let orch = PaneTarget.orchestrator(workspaceID: ws)
+                    HStack(spacing: 6) {
+                        Label("조율자", systemImage: "person.3").font(.body).bold()
+                        StateChip(state: store.state(for: orch))
+                        Spacer(minLength: 0)
+                        if store.hasStarted(orch) {
+                            Text("열림").font(.caption2).foregroundStyle(.green)
+                        }
+                    }
+                    .padding(10)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
+                }
                 if store.visibleRepos.isEmpty {
                     Text("등록된 레포가 없습니다.")
                         .font(.caption).foregroundStyle(.secondary)
@@ -97,7 +112,7 @@ struct DashboardView: View {
                 Text(repo.displayName).font(.body).bold()
                 GitChip(status: store.git[repo.id])
                 Spacer(minLength: 0)
-                if store.hasStarted(repo.id) {
+                if store.hasStarted(.repo(repo)) {
                     Text("열림").font(.caption2).foregroundStyle(.green)
                 }
             }

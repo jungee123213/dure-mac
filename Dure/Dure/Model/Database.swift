@@ -4,7 +4,8 @@ import GRDB
 /// 부록 A4 스키마.
 /// v1: workspace · repo (Step 2) — v2: agent · cc_session (Step 4)
 /// — v3: read_cursor · token_usage · tool_use (Step 5)
-/// — v4: workspace.default_agent_kind · repo.role (조율자 단계 1).
+/// — v4: workspace.default_agent_kind · repo.role (조율자 단계 1)
+/// — v5: agent.workspace_id · agent.repo_id nullable (조율자 단계 3).
 enum AppDatabase {
 
     /// 부록 A5 — GRDB 는 `DatabaseQueue` 하나로 직렬화한다.
@@ -119,6 +120,36 @@ enum AppDatabase {
             try db.alter(table: "repo") { t in
                 t.add(column: "role", .text)
             }
+        }
+
+        m.registerMigration("v5_agent_workspace") { db in
+            // 이슈 #16 — 조율자는 레포가 없다. SQLite 는 NOT NULL 을 풀 수 없어 테이블을 다시 만든다.
+            // 순서(새 테이블 → 복사 → 옛 테이블 drop → rename)는 SQLite 공식 절차다.
+            // GRDB 기본(foreignKeyChecks: .deferred)이 이 사이 외래키를 끄고 끝에서 무결성을 검사한다.
+            try db.create(table: "agent_v5") { t in
+                t.primaryKey("dure_session", .text)
+                t.column("workspace_id", .text).notNull()
+                    .references("workspace", onDelete: .cascade)
+                t.column("repo_id", .text)
+                    .references("repo", onDelete: .cascade)
+                t.column("agent_kind", .text).notNull()
+                t.column("state", .text).notNull()
+                t.column("model", .text)
+                t.column("started_at", .integer).notNull()
+                t.column("ended_at", .integer)
+            }
+            // JOIN 이라 레포가 이미 없는 행(원래 연쇄 삭제됐어야 할 고아)은 따라오지 않는다.
+            try db.execute(sql: """
+                INSERT INTO agent_v5 (dure_session, workspace_id, repo_id, agent_kind,
+                                      state, model, started_at, ended_at)
+                SELECT a.dure_session, r.workspace_id, a.repo_id, a.agent_kind,
+                       a.state, a.model, a.started_at, a.ended_at
+                FROM agent a JOIN repo r ON r.id = a.repo_id
+                """)
+            try db.drop(table: "agent")
+            try db.rename(table: "agent_v5", to: "agent")
+            try db.create(index: "idx_agent_repo", on: "agent", columns: ["repo_id"])
+            try db.create(index: "idx_agent_workspace", on: "agent", columns: ["workspace_id"])
         }
 
         return m

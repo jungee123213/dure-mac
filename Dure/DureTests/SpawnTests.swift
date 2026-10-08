@@ -10,20 +10,21 @@ import Testing
 /// 한 글자만 새도 명령이 쪼개지거나 셸이 엉뚱한 것을 실행한다.
 struct SpawnTests {
 
-    static func script(_ prompt: String?) -> String {
-        Spawn.script(repoPath: "/repo", sessionID: "pane-1", initialPrompt: prompt)
+    static func script(_ prompt: String?, addDirs: [String] = []) -> String {
+        Spawn.script(cwd: "/repo", sessionID: "pane-1", settingsPath: "/s/repo-pane.json",
+                     sessionName: "dure-ws-abcd-repo", addDirs: addDirs, initialPrompt: prompt)
     }
 
     // MARK: - 붙이는가
 
     @Test func 프롬프트를_claude_인자로_붙인다() {
-        #expect(Self.script("README 를 먼저 읽어라").hasSuffix("'README 를 먼저 읽어라'"))
+        #expect(Self.script("README 를 먼저 읽어라").hasSuffix("-- 'README 를 먼저 읽어라'"))
     }
 
     @Test func 프롬프트가_없으면_인자를_붙이지_않는다() {
         let bare = Self.script(nil)
-        #expect(bare.hasSuffix("hooks.json'") || bare.hasSuffix(".json'"))
-        #expect(!bare.contains("''"))
+        #expect(bare.hasSuffix("--name 'dure-ws-abcd-repo'"))
+        #expect(!bare.contains(" -- "))
     }
 
     /// 빈 칸으로 시작하는 날이 더 많다. nil 과 똑같이 굴어야 한다.
@@ -74,8 +75,28 @@ struct SpawnTests {
     @Test func 게이트_변수와_cd_는_그대로다() {
         let s = Self.script("브리핑")
         #expect(s.contains("export DURE_SESSION='pane-1'"))
-        #expect(s.contains("cd '/repo'"))
-        #expect(s.contains("exec claude"))
+        #expect(s.contains("cd '/repo' && exec claude"))
+    }
+
+    // MARK: - 조율자 (#16)
+
+    @Test func add_dir_를_레포마다_붙인다() {
+        let s = Self.script(nil, addDirs: ["/a/back", "/a/my ios"])
+        #expect(s.contains("--add-dir '/a/back' --add-dir '/a/my ios'"))
+    }
+
+    /// `--add-dir` 는 가변 인자라 뒤의 프롬프트를 삼킨다 (2026-10-07 실측). 프롬프트는 `--` 뒤.
+    @Test func 프롬프트는_add_dir_뒤의_구분자_다음에_온다() throws {
+        let s = Self.script("시작해라", addDirs: ["/a/back"])
+        let addAt = try #require(s.range(of: "--add-dir"))
+        let sepAt = try #require(s.range(of: " -- '시작해라'"))
+        #expect(addAt.upperBound < sepAt.lowerBound)
+    }
+
+    @Test func 세션_이름과_설정을_넘긴다() {
+        let s = Self.script(nil)
+        #expect(s.contains("--settings '/s/repo-pane.json'"))
+        #expect(s.contains("--name 'dure-ws-abcd-repo'"))
     }
 }
 
@@ -137,7 +158,7 @@ struct SpawnCdGuardTests {
 
         let p = Process()
         p.executableURL = URL(fileURLWithPath: Spawn.shell)
-        p.arguments = ["-c", Spawn.script(repoPath: repoPath, sessionID: "pane-1")]
+        p.arguments = ["-c", Spawn.script(cwd: repoPath, sessionID: "pane-1", settingsPath: "/s.json", sessionName: "n")]
         p.environment = ["PATH": "\(bin.path):/usr/bin:/bin", "HOME": NSHomeDirectory()]
         p.currentDirectoryURL = URL(fileURLWithPath: "/")
         let out = Pipe()
@@ -151,6 +172,38 @@ struct SpawnCdGuardTests {
             .first { $0.hasPrefix("LAUNCHED:") }
             .map { String($0.dropFirst("LAUNCHED:".count)) }
         return Run(status: p.terminationStatus, launchedIn: launched)
+    }
+
+    /// 가짜 claude 가 받은 인자를 한 줄에 하나씩 찍는다. 인용이 셸을 통과해 그대로 도착하는지 본다.
+    static func argv(addDirs: [String], prompt: String?) throws -> [String] {
+        let fm = FileManager.default
+        let bin = fm.temporaryDirectory.appendingPathComponent("dure-argv-\(UUID().uuidString)")
+        try fm.createDirectory(at: bin, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: bin) }
+        let fake = bin.appendingPathComponent("claude")
+        try "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\"; done\n"
+            .write(to: fake, atomically: true, encoding: .utf8)
+        try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: fake.path)
+
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: Spawn.shell)
+        p.arguments = ["-c", Spawn.script(cwd: "/", sessionID: "s", settingsPath: "/set tings.json",
+                                          sessionName: "dure-앱-abcd-조율자", addDirs: addDirs,
+                                          initialPrompt: prompt)]
+        p.environment = ["PATH": "\(bin.path):/usr/bin:/bin", "HOME": NSHomeDirectory()]
+        let out = Pipe()
+        p.standardOutput = out
+        p.standardError = Pipe()
+        try p.run()
+        let data = out.fileHandleForReading.readDataToEndOfFile()
+        p.waitUntilExit()
+        return String(decoding: data, as: UTF8.self).split(separator: "\n").map(String.init)
+    }
+
+    @Test func 조율자_인자가_셸을_통과해도_그대로다() throws {
+        let args = try Self.argv(addDirs: ["/a/back", "/a/it's 한글"], prompt: "할 일")
+        #expect(args == ["--settings", "/set tings.json", "--name", "dure-앱-abcd-조율자",
+                         "--add-dir", "/a/back", "--add-dir", "/a/it's 한글", "--", "할 일"])
     }
 
     @Test func 폴더가_없으면_claude_를_띄우지_않는다() throws {
