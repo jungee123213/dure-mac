@@ -12,6 +12,9 @@ struct ContentView: View {
     @State private var workspaceSheet: WorkspaceSheet.Mode?
     @State private var pendingDelete: Workspace?
     @State private var deleteRefusal: String?
+    /// 이슈 #20 — 페인이 펼쳐져 있을 때의 높이. 접힌 동안 터미널을 이 높이로 고정해 둔다.
+    /// 높이 0 을 주면 SwiftTerm 이 PTY 를 1행으로 리사이즈해 claude 에 SIGWINCH 가 가고, 일하던 화면이 흐트러진다.
+    @State private var paneHeights: [String: CGFloat] = [:]
 
     var body: some View {
         NavigationSplitView {
@@ -199,24 +202,55 @@ struct ContentView: View {
     private func paneStack(workspaceID: String, isActive: Bool) -> some View {
         VStack(spacing: 1) {
             ForEach(store.panes(in: workspaceID)) { target in
+                // 이슈 #20 — 접힌 페인은 헤더만 남고, 펼쳐진 페인끼리 남은 높이를 나눈다.
+                let collapsed = store.isCollapsed(target)
                 VStack(spacing: 0) {
                     paneHeader(for: target)
-                    if store.hasStarted(target) {
-                        // `sessionID` 는 출발할 때 처음 만들어진다. 훅이 발화하기 전에
-                        // agent 행이 있어야 하므로 스폰 직전인 여기가 맞다 (ADR-17).
-                        // 조율자는 `start(_:)` 가 설정·CLAUDE.md 를 쓴 뒤에만 이 가지에 온다.
-                        let sessionID = store.sessionID(for: target)
-                        TerminalPane(script: store.launchScript(for: target, sessionID: sessionID),
-                                     isActive: isActive && !showingDashboard,
-                                     onExit: { _ in store.markDead(sessionID) })
-                    } else {
-                        waitingToStart(target)
-                    }
+                    paneBody(target, isActive: isActive && !collapsed)
+                        // 펼쳐진 동안의 높이를 기억한다. 접힌 동안 아래 `frame(height:)` 가 이 값으로 터미널을
+                        // 고정하므로 SwiftTerm 은 리사이즈를 보지 않는다(PTY 행 수 그대로, SIGWINCH 없음).
+                        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { h in
+                            if !collapsed, h > 0 { paneHeights[target.key] = h }
+                        }
+                        .frame(height: collapsed ? (paneHeights[target.key] ?? 240) : nil)
+                        // 터미널을 트리에서 빼면 SwiftTerm 이 PTY 를 닫는다(D-27). 바깥 틀만 0 으로 하고
+                        // 위쪽을 남긴 채 잘라낸다. 키 입력은 `isActive` 가 꺼지면서 TerminalPane 이 놓는다.
+                        .frame(maxHeight: collapsed ? 0 : .infinity, alignment: .top)
+                        .clipped()
+                        // AppKit 뷰는 macOS 14 부터 기본이 clipsToBounds = false 라 clip 이 안 먹을 수 있다.
+                        // 숨긴 층(D-27)과 같은 방식으로 아예 그리지 않는다.
+                        .opacity(collapsed ? 0 : 1)
+                        .allowsHitTesting(!collapsed)
+                        .accessibilityHidden(collapsed)
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .frame(maxWidth: .infinity, maxHeight: collapsed ? nil : .infinity)
+            }
+            if store.allPanesCollapsed(in: workspaceID) {
+                // 전부 접히면 헤더 줄만 쌓이고 아래가 빈다. 깨진 게 아니라는 안내 한 줄.
+                Text("모두 접혀 있습니다 — 헤더를 누르면 펼칩니다")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(Color(nsColor: .textBackgroundColor))
             }
         }
         .background(Color(nsColor: .separatorColor))
+    }
+
+    /// 페인의 몸통 — 터미널 또는 시작 대기 화면. 접힘 처리는 호출부가 한다.
+    @ViewBuilder
+    private func paneBody(_ target: PaneTarget, isActive: Bool) -> some View {
+        if store.hasStarted(target) {
+            // `sessionID` 는 출발할 때 처음 만들어진다. 훅이 발화하기 전에
+            // agent 행이 있어야 하므로 스폰 직전인 여기가 맞다 (ADR-17).
+            // 조율자는 `start(_:)` 가 설정·CLAUDE.md 를 쓴 뒤에만 이 가지에 온다.
+            let sessionID = store.sessionID(for: target)
+            TerminalPane(script: store.launchScript(for: target, sessionID: sessionID),
+                         isActive: isActive && !showingDashboard,
+                         onExit: { _ in store.markDead(sessionID) })
+        } else {
+            waitingToStart(target)
+        }
     }
 
     private var modeToggle: some View {
@@ -238,6 +272,12 @@ struct ContentView: View {
     /// D-30 — 브리핑 칸은 뺐다. 할 일은 조율자에게 말한다. 한 번에 띄우는 버튼만 남긴다.
     private var startBar: some View {
         HStack(spacing: 8) {
+            // 이슈 #20 — 레포 페인만 일괄로 접고 편다. 조율자는 그대로(사람이 말을 거는 곳).
+            Button(store.allVisibleReposCollapsed ? "레포 전부 펼치기" : "레포 전부 접기") {
+                store.toggleAllReposCollapsed()
+            }
+            // 대시보드가 덮고 있으면 보이지 않는 채로 바뀐다 — `전체 시작` 과 같은 이유로 잠근다.
+            .disabled(store.visibleRepos.isEmpty || showingDashboard)
             Spacer()
             Button("전체 시작") { store.startAll() }
                 .keyboardShortcut(.return, modifiers: .command)
@@ -303,6 +343,10 @@ struct ContentView: View {
     /// 탭·스플리터를 두지 않는다는 결정(ADR-13)과 별개로, 이름표는 있어야 구분된다.
     private func paneHeader(for target: PaneTarget) -> some View {
         HStack(spacing: 8) {
+            // 이슈 #20 — 접힘 표시. 헤더 전체가 토글이라 버튼이 아니라 글자로 둔다.
+            Image(systemName: store.isCollapsed(target) ? "chevron.right" : "chevron.down")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
             switch target {
             case .orchestrator:
                 Label("조율자", systemImage: "person.3").font(.caption).bold()
@@ -325,6 +369,10 @@ struct ContentView: View {
         .padding(.horizontal, 10)
         .padding(.vertical, 4)
         .background(.bar)
+        // 빈 자리를 눌러도 접히게. 헤더 안의 칩들은 버튼이 아니라 탭이 그대로 올라온다.
+        .contentShape(Rectangle())
+        .onTapGesture { store.toggleCollapsed(target) }
+        .help(store.isCollapsed(target) ? "눌러서 펼치기" : "눌러서 접기 — 접어도 claude 는 계속 돕니다")
     }
 
     // MARK: - 워크스페이스 관리 (이슈 #12)

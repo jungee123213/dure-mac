@@ -42,6 +42,9 @@ final class DureStore {
     var contextIsDirty: Bool { contextText != contextAsLoaded }
     /// 이미 출발한 페인의 키(`PaneTarget.key`). **자동 기동을 하지 않으므로** 여기 없는 페인은 아직 안 떴다.
     private(set) var startedPanes: Set<String> = []
+    /// 이슈 #20 — 접힌 페인의 키. 메모리에만 둔다(앱을 다시 켜면 전부 펼침).
+    /// 접어도 터미널은 트리에 남는다 — 높이 0 · 히트테스트 끔 · 첫 응답자 놓기 (D-27 과 같은 처리).
+    private(set) var collapsedPanes: Set<String> = []
     /// 페인을 시작하지 못한 이유(페인 키 → 문장). 조율자 준비(설정·지시문 쓰기) 실패가 여기 온다.
     /// 권한이나 지시문이 빠진 채로 뜨면 git 읽기마다 승인이 뜨거나 메시지 범위 규칙이 없다 — 그래서 아예 안 띄운다.
     private(set) var paneProblems: [String: String] = [:]
@@ -411,6 +414,8 @@ final class DureStore {
         dispatchVersion += 1
         startedPanes.remove(key)
         sessionIDs[key] = nil
+        // 이슈 #20 — 접힌 채 끝나면 시작 버튼이 숨어 있다. 시작 대기 화면이 보이게 편다.
+        collapsedPanes.remove(key)
         // "지금 페인이 열려 있음" 이 지도에서 빠져야 한다.
         if let ws { refreshWorkspaceDoc(for: ws) }
     }
@@ -662,6 +667,32 @@ final class DureStore {
         // 되풀이할 수 있다(RoleField 와 같은 이유). 다음 런루프로 미룬다. 캐시가 있어 페인당 한 번뿐이다.
         if prompt != nil { DispatchQueue.main.async { [weak self] in self?.dispatchVersion += 1 } }
         return script
+    }
+
+    // MARK: - 이슈 #20 접기
+
+    func isCollapsed(_ target: PaneTarget) -> Bool { collapsedPanes.contains(target.key) }
+
+    func toggleCollapsed(_ target: PaneTarget) {
+        collapsedPanes = PaneLayout.toggled(target.key, in: collapsedPanes)
+    }
+
+    /// 보이는 워크스페이스의 레포 페인만 일괄로. 조율자는 그대로.
+    func toggleAllReposCollapsed() {
+        collapsedPanes = PaneLayout.toggledAllRepos(repoKeys: visibleRepoKeys, in: collapsedPanes)
+    }
+
+    var allVisibleReposCollapsed: Bool {
+        PaneLayout.allReposCollapsed(repoKeys: visibleRepoKeys, collapsed: collapsedPanes)
+    }
+
+    /// 조율자까지 전부 접혔다 — 빈 공간에 안내를 띄운다.
+    func allPanesCollapsed(in workspaceID: String) -> Bool {
+        PaneLayout.allCollapsed(keys: panes(in: workspaceID).map(\.key), collapsed: collapsedPanes)
+    }
+
+    private var visibleRepoKeys: [String] {
+        visiblePanes.compactMap { $0.repo == nil ? nil : $0.key }
     }
 
     /// 지금 보이는 워크스페이스의 페인(조율자 포함)을 한 번에 띄운다 (`전체 시작`, ⌘↩).

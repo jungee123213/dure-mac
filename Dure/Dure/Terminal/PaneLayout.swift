@@ -31,3 +31,38 @@ enum PaneLayout {
         }
     }
 }
+
+// MARK: - 이슈 #20 · 페인 접기
+
+/// 접힌 페인은 헤더 한 줄만 남고 펼쳐진 페인끼리 높이를 나눈다. **터미널은 트리에 남긴다** (D-27 과 같은 이유 —
+/// 빠지면 PTY 가 닫힌다). 여기는 "무엇이 접혀 있나" 의 전이만 다룬다. 뷰 수명은 실물 확인의 몫이다.
+extension PaneLayout {
+
+    static func toggled(_ key: String, in collapsed: Set<String>) -> Set<String> {
+        var next = collapsed
+        if next.contains(key) { next.remove(key) } else { next.insert(key) }
+        return next
+    }
+
+    /// "레포 전부 접기" ↔ "전부 펼치기". **조율자는 건드리지 않는다** — 사람이 말을 거는 곳이다.
+    /// 하나라도 펼쳐져 있으면 전부 접는다. 섞인 상태에서 일부만 펴면 무엇이 바뀌었는지 알 수 없다.
+    static func toggledAllRepos(repoKeys: [String], in collapsed: Set<String>) -> Set<String> {
+        var next = collapsed
+        if allReposCollapsed(repoKeys: repoKeys, collapsed: collapsed) {
+            next.subtract(repoKeys)
+        } else {
+            next.formUnion(repoKeys)
+        }
+        return next
+    }
+
+    /// 레포가 없으면 거짓 — 그래야 버튼이 "접기" 로 보인다(펼칠 것이 없는데 "펼치기" 면 이상하다).
+    static func allReposCollapsed(repoKeys: [String], collapsed: Set<String>) -> Bool {
+        !repoKeys.isEmpty && repoKeys.allSatisfy(collapsed.contains)
+    }
+
+    /// 조율자까지 전부 접혔다 — 빈 공간에 안내를 띄울 때.
+    static func allCollapsed(keys: [String], collapsed: Set<String>) -> Bool {
+        !keys.isEmpty && keys.allSatisfy(collapsed.contains)
+    }
+}
