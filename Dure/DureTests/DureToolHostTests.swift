@@ -130,6 +130,33 @@ struct DureToolHostTests {
         #expect(DureToolHost.call(.init(name: "dispatch", arguments: ["repo": "ios", "instruction": "x"], toolUseId: nil), side: .repo, context: ctx, dispatcher: d).isError)
     }
 
+    /// 이슈 #24 — 레포 페인이 complete 로 배분을 닫는다. 열린 배분이 없으면 에러.
+    @Test func complete_는_하던_배분을_닫는다() throws {
+        let (d, ctx0, w) = world()
+        _ = DureToolHost.call(.init(name: "dispatch", arguments: ["repo": "android", "instruction": "파랑"], toolUseId: nil),
+                              side: .orchestrator, context: ctx0, dispatcher: d)
+        var ctx = ctx0; ctx.repoID = "r1"
+        let r = DureToolHost.call(.init(name: "complete", arguments: ["summary": "파랑으로 바꿨다"], toolUseId: nil),
+                                  side: .repo, context: ctx, dispatcher: d)
+        #expect(!r.isError && r.text.contains("#1"))
+        #expect(try w.db.read { try Dispatch.fetchOne($0) }?.state == .done)
+        #expect(w.inbox.sent.last?.content.contains("‹android› 배분 #1 끝남") == true)
+        #expect(DureToolHost.call(.init(name: "complete", arguments: ["summary": "또"], toolUseId: nil),
+                                  side: .repo, context: ctx, dispatcher: d).isError)
+        #expect(DureToolHost.call(.init(name: "complete", arguments: ["summary": " "], toolUseId: nil),
+                                  side: .repo, context: ctx, dispatcher: d).isError)
+    }
+
+    @Test func tasks_는_응답_대기를_보여준다() throws {
+        let (d, ctx, _) = world()
+        _ = DureToolHost.call(.init(name: "dispatch", arguments: ["repo": "android", "instruction": "a"], toolUseId: nil),
+                              side: .orchestrator, context: ctx, dispatcher: d)
+        d.didStop(repoID: "r1", lastMessage: "A 로 할까요?")
+        let r = DureToolHost.call(.init(name: "tasks", arguments: ["state": "waiting"], toolUseId: nil),
+                                  side: .orchestrator, context: ctx, dispatcher: d)
+        #expect(r.text.contains("#1") && r.text.contains("응답 대기") && r.text.contains("A 로 할까요?"))
+    }
+
     @Test func 모르는_툴은_에러() throws {
         let (d, ctx, _) = world()
         #expect(DureToolHost.call(.init(name: "nope", arguments: [:], toolUseId: nil), side: .orchestrator, context: ctx, dispatcher: d).isError)

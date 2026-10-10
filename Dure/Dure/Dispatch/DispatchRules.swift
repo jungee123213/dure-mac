@@ -20,6 +20,18 @@ enum DispatchRules {
 
     static func givesUp(afterAttempts n: Int) -> Bool { n >= maxAttempts }
 
+    /// 이슈 #24 — 열린 배분이 있는 레포 페인에 `SessionStart` 가 왔을 때.
+    nonisolated enum SessionStartAction: Equatable { case adopt, keep, fail }
+
+    /// - adopt: 기동 프롬프트(argv)로 실은 배분 — 이 세션이 그 배분을 받은 세션이다.
+    /// - keep: 같은 세션의 압축 · 재개 — 하던 일이 이어진다.
+    /// - fail: `/clear` 나 다른 세션 — 그 배분의 대화가 끊겼다. `complete` 가 올 수 없으니 닫는다.
+    static func onSessionStart(deliveredSession: String?, newSession: String, source: String) -> SessionStartAction {
+        guard let delivered = deliveredSession, delivered != "argv" else { return .adopt }
+        if source == "clear" { return .fail }
+        return delivered == newSession ? .keep : .fail
+    }
+
     /// 이 훅을 배분 흐름에 넘겨도 되나. 같은 페인을 다시 시작하면 새 세션이 생기는데, 죽은 옛 세션의 늦은 `Stop` 이
     /// 오면 **새 세션에 간 배분**을 옛 세션의 마지막 말로 닫아 버린다. `AgentStateMachine` 이 죽은 세션의 이벤트를
     /// `.ignore` 로 거르는 것과 같은 불변식 — 지금 그 페인의 세션이 보낸 것만 받는다.

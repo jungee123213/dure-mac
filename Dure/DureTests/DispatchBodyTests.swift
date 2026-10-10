@@ -10,6 +10,7 @@ struct DispatchBodyTests {
         #expect(s.hasPrefix("[두레] 조율자 배분 #7 — android\n"))
         #expect(s.contains("\n로그인 버튼을 파랑으로\n"))
         #expect(s.contains("ask_orchestrator"))
+        #expect(s.contains("complete"))           // 이슈 #24 — 완료는 툴로 선언한다
         #expect(s.contains("커밋"))
         let tail = s.components(separatedBy: "\n---\n")
         #expect(tail.count == 2)

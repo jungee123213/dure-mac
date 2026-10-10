@@ -3,7 +3,9 @@ import GRDB
 
 /// 단계 4 — 배분의 흐름을 맡는 유일한 곳. 설계 3절.
 ///
-/// 들어오는 것: 조율자의 `dispatch`(enqueue) · 레포의 `report`/`ask`(relay) · 훅(didStart · didStop · didDie) · 앱 시작(recover).
+/// 들어오는 것: 조율자의 `dispatch`(enqueue) · 레포의 `complete`/`report`/`ask`(complete · relay) · 사람의 [완료로 닫기](closeByHuman)
+/// · 훅(didStart · didStop · didDie) · 앱 시작(recover).
+/// **완료는 레포 에이전트가 `complete` 로 선언한다**(이슈 #24). 턴이 끝난 것(Stop)은 완료가 아니다 — 사람에게 묻고 멈췄을 수 있다.
 /// 나가는 것: 인박스 소켓(`InboxSending`) 또는 기동 프롬프트(`initialPrompt`). 판단은 `DispatchRules`, 행은 `DispatchOps`.
 ///
 /// 스토어의 상태는 `Lookups` 클로저로 받는다 — 스토어는 실제 DB 를 쓰므로 여기서 직접 잡으면 테스트가 안 된다.
@@ -71,18 +73,58 @@ final class Dispatcher {
 
     // MARK: - 훅
 
-    func didStart(repoID: String) { pumpRepo(repoID) }
+    /// 레포 페인의 새 세션. 열린 배분이 있으면 `DispatchRules.onSessionStart` 로 이어받기 · 유지 · 실패를 정한다(이슈 #24).
+    func didStart(repoID: String, session: String?, source: String) {
+        do {
+            if let open = try db.read({ try DispatchOps.outstanding(repoID: repoID, in: $0) }), let session {
+                switch DispatchRules.onSessionStart(deliveredSession: open.deliveredSession, newSession: session, source: source) {
+                case .adopt:
+                    try db.write { try DispatchOps.adoptSession(open.id, session: session, in: $0) }
+                case .keep:
+                    break
+                case .fail:
+                    try db.write { try DispatchOps.markFailed(open.id, reason: "세션 재시작", now: now(), in: $0) }
+                    try relay(workspaceID: open.workspaceId, dispatchID: open.id, repoID: repoID, kind: .failure,
+                              body: "그 페인의 세션이 새로 시작됐다(/clear 또는 재시작). 배분의 대화가 끊겨 완료를 받을 수 없다. 사람에게 확인하라.")
+                }
+            }
+        } catch { NSLog("[Dure] 배분 세션 처리 실패: \(error)") }
+        pumpRepo(repoID)
+    }
 
-    /// 전달 뒤 **첫** Stop 이 닫는다. 배분이 아닌 턴(사람이 직접 친 것)의 Stop 은 큐만 흘린다.
+    /// 턴이 끝났다. 열린 배분이 있으면 **완료가 아니라 응답 대기**다 — 에이전트가 사람에게 묻고 멈췄을 수 있다(이슈 #24).
+    /// 조율자에게 "끝남" 을 보내지 않고, 그 페인에 다음 배분을 넣지 않는다. 마지막 답은 남겨 둔다.
+    /// 배분이 아닌 턴(사람이 직접 친 것)이나 이미 `complete` 한 배분의 Stop 은 큐만 흘린다.
     func didStop(repoID: String, lastMessage: String?) {
         do {
             if let open = try db.read({ try DispatchOps.outstanding(repoID: repoID, in: $0) }) {
-                try db.write { try DispatchOps.markDone(open.id, result: lastMessage, now: now(), in: $0) }
-                try relay(workspaceID: open.workspaceId, dispatchID: open.id, repoID: repoID,
-                          kind: .completion, body: lastMessage ?? "(답 없음)")
+                try db.write { try DispatchOps.markWaiting(open.id, lastMessage: lastMessage, in: $0) }
             }
-        } catch { NSLog("[Dure] 배분 완료 기록 실패: \(error)") }
+        } catch { NSLog("[Dure] 배분 응답 대기 기록 실패: \(error)") }
         pumpRepo(repoID)
+    }
+
+    /// 레포 에이전트의 `complete`. 하던 배분을 닫고 요약을 조율자에게 올린다. 열린 배분이 없으면 nil.
+    /// 다음 배분은 이 턴의 Stop 뒤에 흐른다 — 지금은 그 페인이 아직 이 턴을 돌고 있다.
+    func complete(repoID: String, summary: String) throws -> Int? {
+        guard let open = try db.read({ try DispatchOps.outstanding(repoID: repoID, in: $0) }) else { return nil }
+        try db.write { try DispatchOps.markDone(open.id, result: summary, now: now(), in: $0) }
+        try relay(workspaceID: open.workspaceId, dispatchID: open.id, repoID: repoID, kind: .completion, body: summary)
+        pumpRepo(repoID)
+        return open.seq
+    }
+
+    /// 대시보드 ④ [완료로 닫기] — 에이전트가 `complete` 를 잊었을 때. 마지막 답을 결과로 조율자에게 올린다.
+    /// 이 워크스페이스의 열린 배분만 닫는다.
+    func closeByHuman(_ id: String, workspaceID: String) throws -> Bool {
+        guard let open = try db.read({ try Dispatch.filter(Column("id") == id && Column("workspace_id") == workspaceID
+                                                           && DispatchOps.openStates.contains(Column("state"))).fetchOne($0) })
+        else { return false }
+        let result = open.result ?? "(요약 없음 — 사람이 완료로 닫았다)"
+        try db.write { try DispatchOps.markDone(open.id, result: result, now: now(), in: $0) }
+        try relay(workspaceID: workspaceID, dispatchID: open.id, repoID: open.repoId, kind: .completion, body: result)
+        pumpRepo(open.repoId)
+        return true
     }
 
     func didStopOrchestrator(workspaceID: String) {
@@ -236,7 +278,7 @@ final class Dispatcher {
         }
     }
 
-    /// 이 레포에 전달돼 Stop 을 기다리는 배분. 레포의 `report` · `ask_orchestrator` 가 어느 배분 얘기인지 붙인다.
+    /// 이 레포가 하고 있는 배분(전달됨 · 응답 대기). 레포의 `report` · `ask_orchestrator` 가 어느 배분 얘기인지 붙인다.
     func outstandingDispatchID(repoID: String) -> String? {
         (try? db.read { try DispatchOps.outstanding(repoID: repoID, in: $0) })?.id
     }

@@ -7,6 +7,7 @@ enum DispatchPresentation {
         switch s {
         case .queued: "큐 대기"
         case .delivered: "전달됨"
+        case .waiting: "응답 대기"
         case .done: "완료"
         case .failed: "실패"
         case .cancelled: "취소"
@@ -16,7 +17,7 @@ enum DispatchPresentation {
     static func line(_ d: Dispatch, repoName: String) -> String {
         var s = "#\(d.seq) \(repoName) · \(stateLabel(d.state))"
         switch d.state {
-        case .delivered: if let t = d.deliveredAt { s += " \(DispatchRules.clock(t))" }
+        case .delivered, .waiting: if let t = d.deliveredAt { s += " \(DispatchRules.clock(t))" }
         case .done:      if let t = d.doneAt { s += " \(DispatchRules.clock(t))" }
         case .failed:    if let f = d.failure { s += " (\(f))" }
         case .queued, .cancelled: break

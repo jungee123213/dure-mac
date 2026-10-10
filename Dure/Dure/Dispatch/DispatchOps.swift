@@ -24,10 +24,27 @@ enum DispatchOps {
             .order(Column("created_at"), Column("seq")).fetchAll(db)
     }
 
-    /// 전달했는데 아직 `Stop` 을 못 본 것. 레포마다 많아야 하나다.
+    /// 그 페인이 하고 있는 배분 — 전달됐고 아직 `complete` 되지 않은 것(응답 대기 포함, 이슈 #24). 레포마다 많아야 하나다.
+    static let openStates = [DispatchState.delivered.rawValue, DispatchState.waiting.rawValue]
+
     static func outstanding(repoID: String, in db: Database) throws -> Dispatch? {
-        try Dispatch.filter(Column("repo_id") == repoID && Column("state") == DispatchState.delivered.rawValue)
+        try Dispatch.filter(Column("repo_id") == repoID && openStates.contains(Column("state")))
             .order(Column("delivered_at"), Column("seq")).fetchOne(db)   // 같은 초에 전달됐으면 번호순
+    }
+
+    /// `complete` 없이 턴이 끝났다. 마지막 답만 남긴다 — 사람이 [완료로 닫기] 를 누르면 이것이 결과가 된다.
+    static func markWaiting(_ id: String, lastMessage: String?, in db: Database) throws {
+        guard var d = try Dispatch.fetchOne(db, key: id) else { return }
+        d.state = .waiting
+        if let lastMessage { d.result = lastMessage }
+        try d.update(db)
+    }
+
+    /// 기동 프롬프트(argv)로 실은 배분을 그 페인의 첫 세션에 묶는다.
+    static func adoptSession(_ id: String, session: String, in db: Database) throws {
+        guard var d = try Dispatch.fetchOne(db, key: id) else { return }
+        d.deliveredSession = session
+        try d.update(db)
     }
 
     static func markDelivered(_ id: String, session: String?, now: Int, in db: Database) throws {
@@ -64,9 +81,10 @@ enum DispatchOps {
         return d.attempts
     }
 
-    /// 앱 시작 때. `delivered` 인 채 남은 것은 `Stop` 을 영영 못 본다 — 닫아야 그 레포 큐가 다시 흐른다.
+    /// 앱 시작 때. 열린 채(전달됨 · 응답 대기) 남은 것은 영영 닫히지 않는다 — 앱이 꺼지면 페인(PTY)도 죽었다.
+    /// 닫아야 그 레포 큐가 다시 흐른다.
     static func failUndelivered(reason: String, now: Int, in db: Database) throws -> [Dispatch] {
-        let open = try Dispatch.filter(Column("state") == DispatchState.delivered.rawValue).fetchAll(db)
+        let open = try Dispatch.filter(openStates.contains(Column("state"))).fetchAll(db)
         for d in open { try markFailed(d.id, reason: reason, now: now, in: db) }
         return open
     }

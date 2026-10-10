@@ -50,6 +50,20 @@ struct DispatchOpsTests {
         #expect(try q.read { try DispatchOps.outstanding(repoID: "r1", in: $0) } == nil)
     }
 
+    /// 이슈 #24 — 응답 대기도 그 페인이 하고 있는 일이다.
+    @Test func 응답_대기도_열린_배분이다() throws {
+        let q = try Self.db()
+        let d = try q.write { try DispatchOps.enqueue(workspaceID: "w1", repoID: "r1", title: nil, instruction: "x", toolUseId: nil, now: 10, in: $0) }
+        try q.write { try DispatchOps.markDelivered(d.id, session: "cc-1", now: 20, in: $0) }
+        try q.write { try DispatchOps.markWaiting(d.id, lastMessage: "질문", in: $0) }
+        let open = try q.read { try DispatchOps.outstanding(repoID: "r1", in: $0) }
+        #expect(open?.state == .waiting && open?.result == "질문")
+        try q.write { try DispatchOps.adoptSession(d.id, session: "cc-2", in: $0) }
+        #expect(try q.read { try Dispatch.fetchOne($0, key: d.id) }?.deliveredSession == "cc-2")
+        let closed = try q.write { try DispatchOps.failUndelivered(reason: "앱 종료", now: 99, in: $0) }
+        #expect(closed.map(\.id) == [d.id])
+    }
+
     @Test func 취소는_큐에_있는_것만() throws {
         let q = try Self.db()
         let d = try q.write { try DispatchOps.enqueue(workspaceID: "w1", repoID: "r1", title: nil, instruction: "x", toolUseId: nil, now: 10, in: $0) }
