@@ -71,7 +71,8 @@ nonisolated enum ObsCollector {
         let cursor = try db.read { try ObsCursor.fetchOne($0, key: path) }
         if let cursor, cursor.mtime == mtime, cursor.size == size { return Report() }
 
-        let fingerprint = firstLineUUID(path)
+        let first = firstLine(path)
+        let fingerprint = first.uuid
         var offset = cursor?.byteOffset ?? 0, lineNo = cursor?.lineNo ?? 0
         if let old = cursor?.fingerprint, old != fingerprint { offset = 0; lineNo = 0 }   // 교체된 파일
         guard let batch = TranscriptReader.read(path: path, offset: offset, lineNo: lineNo) else { return Report() }
@@ -87,7 +88,7 @@ nonisolated enum ObsCollector {
 
         // 2. 짧은 트랜잭션
         var report = Report(filesRead: 1)
-        var state = FileState(path: path)
+        var state = FileState(path: path, firstTs: first.ts)
         var start = 0
         while start < parsed.count {
             let slice = parsed[start..<min(start + max(config.chunk, 1), parsed.count)]
@@ -130,6 +131,8 @@ nonisolated enum ObsCollector {
 
     private struct FileState {
         let path: String
+        /// 파일 첫 줄의 시각. 틱마다 새 FileState 가 만들어져도 부모가 갈라지지 않게 부모 선택의 기준으로 쓴다.
+        var firstTs: Int?
         var turnID: String?
         var looked = false
         /// 서브에이전트 파일 하나는 부모 턴 하나 — 처음 정한 부모를 파일 안에서 계속 쓴다.
@@ -311,15 +314,15 @@ nonisolated enum ObsCollector {
 
     /// 서브에이전트 파일의 부모 턴. 스키마를 건드리지 않고 정한다 —
     /// ① 이 수집에서 이미 정했으면 그것 ② 이 파일 경로로 저장된 obs_tool 행의 turn_id(재시작 · 이어 읽기;
-    /// obs_usage 에는 경로 열이 없다) ③ 처음 처리하는 사건의 시각으로 고른 턴. ③ 은 파일 안에서 한 번만 한다.
+    /// obs_usage 에는 경로 열이 없다) ③ 파일 첫 줄(띄운 순간)의 시각으로 고른 턴 — 틱이 갈려도 같은 답이 나온다(첫 줄을 못 읽으면 사건 시각).
     private static func subagentParent(_ ctx: ObsParser.Context, _ state: inout FileState, db: Database) throws -> ObsTurn? {
         if state.parentMissing { return nil }
         if let id = state.parentID, let t = try ObsTurn.fetchOne(db, key: id) { return t }
         let stored = try String.fetchOne(db, sql: """
             SELECT o.turn_id FROM obs_tool o JOIN obs_turn t ON t.id = o.turn_id
-            WHERE o.transcript_path = ? LIMIT 1
+            WHERE o.transcript_path = ? ORDER BY o.started_ts, o.rowid LIMIT 1
             """, arguments: [state.path])
-        let parent = try stored.flatMap { try ObsTurn.fetchOne(db, key: $0) } ?? parentTurn(ctx, db: db)
+        let parent = try stored.flatMap { try ObsTurn.fetchOne(db, key: $0) } ?? parentTurn(ctx, ts: state.firstTs ?? ctx.ts, db: db)
         guard let parent else { state.parentMissing = true; return nil }
         state.parentID = parent.id
         return parent
@@ -331,13 +334,14 @@ nonisolated enum ObsCollector {
         let dir = url.deletingLastPathComponent()
         guard dir.lastPathComponent == "subagents" else { return false }
         let main = dir.deletingLastPathComponent().appendingPathExtension("jsonl").path
+        // 있지만 읽을 수 없는 부모 파일은 틱마다 이 서브에이전트를 붙잡는다(허용).
         guard FileManager.default.fileExists(atPath: main) else { return false }
         return try ObsCursor.fetchOne(db, key: main) == nil
     }
 
     /// 서브에이전트 줄은 자기 파일에 턴이 없다 — 같은 세션에서 그 시각 직전의 사람 턴에 붙인다.
-    private static func parentTurn(_ ctx: ObsParser.Context, db: Database) throws -> ObsTurn? {
-        try ObsTurn.filter(Column("cc_session_id") == ctx.sessionId && Column("ts") <= ctx.ts)
+    private static func parentTurn(_ ctx: ObsParser.Context, ts: Int, db: Database) throws -> ObsTurn? {
+        try ObsTurn.filter(Column("cc_session_id") == ctx.sessionId && Column("ts") <= ts)
             .order(Column("ts").desc, Column("line_no").desc).fetchOne(db)
     }
 
@@ -382,11 +386,14 @@ nonisolated enum ObsCollector {
     }
 
     /// 파일 지문 — 첫 줄의 `uuid`. 앞 64KB 만 읽는다.
-    static func firstLineUUID(_ path: String) -> String? {
-        guard let h = FileHandle(forReadingAtPath: path) else { return nil }
+    static func firstLineUUID(_ path: String) -> String? { firstLine(path).uuid }
+
+    /// 첫 줄의 uuid 와 시각. 서브에이전트 파일의 첫 줄은 띄운 순간의 프롬프트라, 부모 턴을 고르는 기준 시각이 된다.
+    static func firstLine(_ path: String) -> (uuid: String?, ts: Int?) {
+        guard let h = FileHandle(forReadingAtPath: path) else { return (nil, nil) }
         defer { try? h.close() }
         guard let data = try? h.read(upToCount: 65_536), let nl = data.firstIndex(of: UInt8(ascii: "\n")),
-              let o = try? JSONSerialization.jsonObject(with: data[data.startIndex..<nl]) as? [String: Any] else { return nil }
-        return o["uuid"] as? String
+              let o = try? JSONSerialization.jsonObject(with: data[data.startIndex..<nl]) as? [String: Any] else { return (nil, nil) }
+        return (o["uuid"] as? String, (o["timestamp"] as? String).flatMap(ObsParser.epoch))
     }
 }

@@ -160,6 +160,25 @@ struct ObsCollectorTests {
         #expect(turns[1].sidechainTokens == 0)
     }
 
+    /// 틱이 갈려도(첫 틱엔 툴 행이 없음) 부모는 파일 첫 줄 시각으로 정해져 갈라지지 않는다.
+    @Test func 서브에이전트_부모는_틱이_갈려도_같다() throws {
+        try write("s1", [Fx.human("조사해", ts: "2026-10-10T01:00:00.000Z")])
+        try write("s1/subagents/agent-abc", [Fx.text("시작", ts: "2026-10-10T01:59:00.000Z", messageId: "c1", sidechain: true)])
+        try collect()
+        try write("s1", [Fx.human("다음", ts: "2026-10-10T02:00:00.000Z")], append: true)
+        try write("s1/subagents/agent-abc", [
+            Fx.toolUse("c2", name: "Read", input: ["file_path": "/r/ios/A.swift"], ts: "2026-10-10T02:01:00.000Z",
+                       sidechain: true, messageId: "c2m"),
+            Fx.text("끝", ts: "2026-10-10T02:01:30.000Z", messageId: "c3", sidechain: true),
+        ], append: true)
+        try collect()
+        let turns = try db.read { try ObsTurn.order(Column("ts")).fetchAll($0) }
+        #expect(turns.count == 2)
+        #expect(turns[0].sidechainTools == 1)
+        #expect(turns[0].sidechainTokens == (2 + 8 + 30) + (10 + 5 + 20) + (2 + 8 + 30))
+        #expect(turns[1].sidechainTokens == 0 && turns[1].sidechainTools == 0)
+    }
+
     /// 부모 세션 파일이 아직 수집 전이면 서브에이전트 커서를 올리지 않는다 — 다음 수집에서 다시 읽는다.
     @Test func 부모가_아직_없으면_서브에이전트_커서를_올리지_않는다() throws {
         try write("s1", [Fx.human("조사해", ts: "2026-10-10T01:00:00.000Z")])
