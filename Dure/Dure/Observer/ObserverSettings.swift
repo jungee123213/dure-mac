@@ -43,12 +43,6 @@ nonisolated struct ObserverSettings: Equatable, Sendable {
         d.set(now, forKey: firstStartKey)
         return now
     }
-
-    /// 데이터 재구성 성공 뒤 — 평가 기록(= "이미 자동 평가했다" 는 이력)이 같이 지워졌으므로,
-    /// 첫 시작을 지금으로 당겨야 지난 머지 · 날짜 단위가 자동 평가 큐로 다시 쏟아지지 않는다.
-    static func resetFirstStart(in d: UserDefaults, now: Int) {
-        d.set(now, forKey: firstStartKey)
-    }
 }
 
 /// 평가 큐의 판단. 스펙 v2 3-2 · 3-3. 순수 함수.

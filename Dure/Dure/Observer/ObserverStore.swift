@@ -35,8 +35,6 @@ final class ObserverStore {
     @ObservationIgnored private let runner: CommandRunning
     @ObservationIgnored private let resolver: RepoResolving
     @ObservationIgnored private let defaults: UserDefaults
-    /// 재구성 중에는 수집 · 평가를 새로 시작하지 않는다.
-    private(set) var resetting = false
     @ObservationIgnored private var collecting = false
     @ObservationIgnored private var collectAgain = false
     @ObservationIgnored private var loops: [Task<Void, Never>] = []
@@ -94,7 +92,7 @@ final class ObserverStore {
     // MARK: - 수집
 
     func collectSoon() {
-        guard settings.enabled, !resetting else { return }
+        guard settings.enabled else { return }
         if collecting { collectAgain = true; return }
         collecting = true
         let db = db, resolver = resolver, config = collectConfig
@@ -111,25 +109,6 @@ final class ObserverStore {
             self.pump()
             if self.collectAgain { self.collectAgain = false; self.collectSoon() }
         }
-    }
-
-    /// 감시자 데이터를 비우고 jsonl 에서 다시 모은다. 평가 중에는 하지 않는다(실행 중인 `claude -p` 의 근거가 사라진다).
-    /// 성공하면 첫 시작 시각(UserDefaults)을 지금으로 당긴다 — 평가 기록이 지워져 과거 머지가 자동 평가 큐로 쏟아지는 걸 막는다.
-    func resetAll() async -> Result<ObserverReset.Outcome, Error> {
-        guard !resetting, runningRunID == nil else { return .success(.refusedRunning) }
-        resetting = true
-        let db = db, dirs = dirs
-        let result = await Task.detached(priority: .utility) {
-            Result { try ObserverReset.run(db: db, dirs: dirs) }
-        }.value
-        resetting = false
-        chat = nil
-        // 성공했을 때만 — 거부 · 실패는 평가 이력이 그대로라 첫 시작을 당길 이유가 없다.
-        if case .success(.done) = result { ObserverSettings.resetFirstStart(in: defaults, now: now()) }
-        reload()
-        if case .failure(let e) = result { NSLog("[Dure] 감시자 재구성 실패: \(e)") }
-        collectSoon()
-        return result
     }
 
     func recordPermissionPrompt(ccSessionID: String) {
@@ -213,7 +192,7 @@ final class ObserverStore {
 
     /// 한 번에 하나. 끝나면 다음을 민다.
     func pump() {
-        guard runningRunID == nil, settings.enabled, !resetting else { return }
+        guard runningRunID == nil, settings.enabled else { return }
         let startOfDay = Int(Calendar.current.startOfDay(for: Date(timeIntervalSince1970: TimeInterval(now()))).timeIntervalSince1970)
         guard let read = try? db.read({ db in
             (try EvaluationRun.filter(Column("status") == RunStatus.queued.rawValue).fetchAll(db),
