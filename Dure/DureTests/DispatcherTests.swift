@@ -59,6 +59,52 @@ struct DispatcherTests {
     }
 
     /// Review Focus 1.
+    /// 이슈 #27 — 소켓 턴은 `UserPromptSubmit` 이 안 뜰 수 있어 페인 상태가 `done` 으로 남는다.
+    /// 그 상태만 믿으면 complete 직후 다음 배분이 끼어들고, 이어 온 이전 턴의 Stop 이 그것을 waiting 으로 만든다.
+    @Test func complete_직후에도_Stop_전에는_다음_배분을_안_넣는다() throws {
+        let w = try World(); w.idle("r1", session: "cc-a")
+        _ = try w.d.enqueue(workspaceID: "w1", repo: w.repoA, title: nil, instruction: "first", toolUseId: nil)
+        _ = try w.d.enqueue(workspaceID: "w1", repo: w.repoA, title: nil, instruction: "second", toolUseId: nil)
+        _ = try w.d.complete(repoID: "r1", summary: "first finished")
+        #expect(w.inbox.sent.count == 1)
+        w.d.didStop(repoID: "r1", lastMessage: "first finished")
+        #expect(w.inbox.sent.count == 2)
+        let open = try w.db.read { try DispatchOps.outstanding(repoID: "r1", in: $0) }
+        #expect(open?.state == .delivered)
+    }
+
+    @Test func 새_세션_시작이_Stop_대기를_풀어_큐가_흐른다() throws {
+        let w = try World(); w.idle("r1", session: "cc-a")
+        _ = try w.d.enqueue(workspaceID: "w1", repo: w.repoA, title: nil, instruction: "first", toolUseId: nil)
+        _ = try w.d.enqueue(workspaceID: "w1", repo: w.repoA, title: nil, instruction: "second", toolUseId: nil)
+        _ = try w.d.complete(repoID: "r1", summary: "done")
+        #expect(w.inbox.sent.count == 1)
+        w.idle("r1", session: "cc-b")                       // /clear — 옛 세션의 Stop 은 오지 않는다
+        w.d.didStart(repoID: "r1", session: "cc-b", source: "clear")
+        #expect(w.inbox.sent.count == 2 && w.inbox.sent[1].session == "cc-b")
+    }
+
+    @Test func 페인이_죽으면_Stop_대기를_풀어_다음_시작에_흐른다() throws {
+        let w = try World(); w.idle("r1", session: "cc-a")
+        _ = try w.d.enqueue(workspaceID: "w1", repo: w.repoA, title: nil, instruction: "first", toolUseId: nil)
+        _ = try w.d.enqueue(workspaceID: "w1", repo: w.repoA, title: nil, instruction: "second", toolUseId: nil)
+        w.d.didDie(repoID: "r1")
+        w.idle("r1", session: "cc-c")
+        w.d.didStart(repoID: "r1", session: "cc-c", source: "startup")
+        #expect(w.inbox.sent.count == 2)
+    }
+
+    @Test func 사람이_닫은_직후에도_Stop_전에는_다음_배분을_안_넣는다() throws {
+        let w = try World(); w.idle("r1", session: "cc-a")
+        _ = try w.d.enqueue(workspaceID: "w1", repo: w.repoA, title: nil, instruction: "first", toolUseId: nil)
+        _ = try w.d.enqueue(workspaceID: "w1", repo: w.repoA, title: nil, instruction: "second", toolUseId: nil)
+        let first = try w.db.read { try Dispatch.filter(Column("seq") == 1).fetchOne($0) }!
+        _ = try w.d.closeByHuman(first.id, workspaceID: "w1")
+        #expect(w.inbox.sent.count == 1)
+        w.d.didStop(repoID: "r1", lastMessage: "x")
+        #expect(w.inbox.sent.count == 2)
+    }
+
     @Test func 일하는_페인에는_보관했다가_Stop_뒤에_넣는다() throws {
         let w = try World(); w.busy("r1")
         #expect(try w.d.enqueue(workspaceID: "w1", repo: w.repoA, title: nil, instruction: "x", toolUseId: nil) == .queuedBusy(seq: 1))
