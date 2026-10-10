@@ -7,6 +7,7 @@ import GRDB
 /// — v4: workspace.default_agent_kind · repo.role (조율자 단계 1)
 /// — v5: agent.workspace_id · agent.repo_id nullable (조율자 단계 3).
 /// v6 (단계 4): dispatch · relay — 배분 큐이자 이력.
+/// v7 (이슈 #23): 감시자 — 작업 단위 · 턴 · 원장 · 툴 · 평가 실행 · 백로그 · 지적.
 enum AppDatabase {
 
     /// 부록 A5 — GRDB 는 `DatabaseQueue` 하나로 직렬화한다.
@@ -192,6 +193,174 @@ enum AppDatabase {
                 t.column("delivered_at", .integer)
             }
             try db.create(index: "idx_relay_workspace_state", on: "relay", columns: ["workspace_id", "state"])
+        }
+
+        m.registerMigration("v7_observer") { db in
+            // 감시자. 원본 jsonl 은 Claude Code 가 지운다(cleanupPeriodDays 기본 30일) — 평가에 쓸 사실을 여기 떠 둔다.
+            try db.create(table: "obs_cursor") { t in
+                t.primaryKey("path", .text)
+                t.column("byte_offset", .integer).notNull()
+                t.column("line_no", .integer).notNull()
+                t.column("mtime", .integer).notNull()
+                t.column("size", .integer).notNull()
+                t.column("fingerprint", .text)
+                t.column("recent_bad", .integer).notNull().defaults(to: 0)
+                t.column("recent_total", .integer).notNull().defaults(to: 0)
+                t.column("unknown_types", .integer).notNull().defaults(to: 0)
+            }
+            try db.create(table: "work_unit") { t in
+                t.primaryKey("id", .text)
+                t.column("unit_key", .text).notNull().unique()
+                t.column("base_key", .text).notNull()
+                t.column("kind", .text).notNull()
+                t.column("repo_root", .text)
+                t.column("cwd", .text)
+                t.column("branch", .text)
+                t.column("generation", .integer).notNull().defaults(to: 0)
+                t.column("day", .text)
+                t.column("issue_no", .integer)
+                t.column("github_repo", .text)
+                // 감시 기록은 워크스페이스가 아니라 사람의 것 — 워크스페이스를 지워도 단위는 남는다.
+                t.column("workspace_id", .text).references("workspace", onDelete: .setNull)
+                t.column("task_id", .text)
+                t.column("pr_number", .integer)
+                t.column("pr_url", .text)
+                t.column("pr_head", .text)
+                t.column("merged_at", .integer)
+                t.column("first_ts", .integer).notNull()
+                t.column("last_ts", .integer).notNull()
+                t.column("human_turns", .integer).notNull().defaults(to: 0)
+                t.column("peer_turns", .integer).notNull().defaults(to: 0)
+                t.column("edit_count", .integer).notNull().defaults(to: 0)
+                t.column("source_revision", .integer).notNull().defaults(to: 0)
+                t.column("lines_changed", .integer)
+            }
+            try db.create(index: "idx_work_unit_base", on: "work_unit", columns: ["base_key"])
+            try db.create(table: "obs_turn") { t in
+                t.primaryKey("id", .text)
+                t.column("unit_id", .text).notNull().references("work_unit", onDelete: .cascade)
+                t.column("event_id", .text).notNull().unique()
+                t.column("cc_session_id", .text).notNull()
+                t.column("transcript_path", .text).notNull()
+                t.column("line_no", .integer).notNull()
+                t.column("origin", .text).notNull()
+                t.column("prompt_kind", .text).notNull()
+                t.column("entrypoint", .text)
+                t.column("ts", .integer).notNull()
+                t.column("prompt", .text).notNull()
+                t.column("permission_mode", .text)
+                t.column("duration_ms", .integer)
+                t.column("answer_tail", .text)
+                t.column("interrupted", .boolean).notNull().defaults(to: false)
+                t.column("compacted", .boolean).notNull().defaults(to: false)
+                t.column("sidechain_tools", .integer).notNull().defaults(to: 0)
+                t.column("tokens_input", .integer).notNull().defaults(to: 0)
+                t.column("tokens_output", .integer).notNull().defaults(to: 0)
+                t.column("tokens_cache_creation", .integer).notNull().defaults(to: 0)
+                t.column("tokens_cache_read", .integer).notNull().defaults(to: 0)
+                t.column("sidechain_tokens", .integer).notNull().defaults(to: 0)
+                t.column("model", .text)
+            }
+            try db.create(index: "idx_obs_turn_unit", on: "obs_turn", columns: ["unit_id"])
+            try db.create(index: "idx_obs_turn_session_ts", on: "obs_turn", columns: ["cc_session_id", "ts"])
+            try db.create(index: "idx_obs_turn_path_line", on: "obs_turn", columns: ["transcript_path", "line_no"])
+            try db.create(table: "obs_usage") { t in
+                t.column("cc_session_id", .text).notNull()
+                t.column("message_id", .text).notNull()
+                t.column("turn_id", .text).notNull().references("obs_turn", onDelete: .cascade)
+                t.column("sidechain", .boolean).notNull()
+                t.primaryKey(["cc_session_id", "message_id"])
+            }
+            try db.create(table: "obs_tool") { t in
+                t.primaryKey("id", .text)
+                t.column("turn_id", .text).notNull().references("obs_turn", onDelete: .cascade)
+                t.column("transcript_path", .text).notNull()
+                t.column("tool_use_id", .text).notNull()
+                t.column("name", .text).notNull()
+                t.column("target", .text)
+                t.column("started_ts", .integer).notNull()
+                t.column("result_ts", .integer)
+                t.column("is_error", .boolean).notNull().defaults(to: false)
+                t.column("error_head", .text)
+                t.column("denied", .boolean).notNull().defaults(to: false)
+                t.uniqueKey(["transcript_path", "tool_use_id"])
+            }
+            try db.create(index: "idx_obs_tool_turn", on: "obs_tool", columns: ["turn_id"])
+            try db.create(table: "obs_permission") { t in
+                t.primaryKey("id", .text)
+                t.column("cc_session_id", .text).notNull()
+                t.column("ts", .integer).notNull()
+            }
+            try db.create(index: "idx_obs_permission_session", on: "obs_permission", columns: ["cc_session_id"])
+            try db.create(table: "observer_session") { t in
+                t.primaryKey("session_id", .text)
+                t.column("kind", .text).notNull()
+                t.column("created_at", .integer).notNull()
+            }
+            try db.create(table: "evaluation_run") { t in
+                t.primaryKey("id", .text)
+                t.column("unit_id", .text).notNull().references("work_unit", onDelete: .cascade)
+                t.column("trigger", .text).notNull()
+                t.column("status", .text).notNull()
+                t.column("source_revision", .integer)
+                t.column("created_at", .integer).notNull()
+                t.column("started_at", .integer)
+                t.column("finished_at", .integer)
+                t.column("cost_usd", .double)
+                t.column("failure", .text)
+                t.column("summary", .text)
+                t.column("notes", .text)
+                t.column("accepted", .integer).notNull().defaults(to: 0)
+                t.column("rejected", .integer).notNull().defaults(to: 0)
+                t.column("prompt_version", .integer).notNull().defaults(to: 0)
+                t.column("reference_stamp", .text)
+                t.column("digest_chars", .integer)
+                t.column("session_id", .text)
+            }
+            try db.create(index: "idx_run_unit", on: "evaluation_run", columns: ["unit_id"])
+            try db.create(index: "idx_run_status", on: "evaluation_run", columns: ["status"])
+            try db.create(table: "backlog_item") { t in
+                t.primaryKey("key", .text)
+                t.column("bucket", .text).notNull()
+                t.column("grp", .text).notNull()
+                t.column("kind", .text).notNull()
+                t.column("title", .text).notNull()
+                t.column("detail", .text).notNull()
+                t.column("suggestion", .text)
+                t.column("apply_text", .text)
+                t.column("state", .text).notNull()
+                t.column("linked_issue", .text)
+                t.column("resolved_at", .integer)
+                t.column("observed_count", .integer).notNull().defaults(to: 0)
+                t.column("unit_count", .integer).notNull().defaults(to: 0)
+                t.column("max_severity", .integer).notNull().defaults(to: 0)
+                t.column("first_seen", .integer)
+                t.column("last_seen", .integer)
+                t.column("useful_count", .integer).notNull().defaults(to: 0)
+                t.column("false_positive_count", .integer).notNull().defaults(to: 0)
+            }
+            try db.create(table: "finding") { t in
+                t.primaryKey("id", .text)
+                t.column("run_id", .text).notNull().references("evaluation_run", onDelete: .cascade)
+                t.column("unit_id", .text).notNull().references("work_unit", onDelete: .cascade)
+                t.column("backlog_key", .text).notNull().references("backlog_item", onDelete: .cascade)
+                t.column("grp", .text).notNull()
+                t.column("kind", .text).notNull()
+                t.column("title", .text).notNull()
+                t.column("detail", .text).notNull()
+                t.column("suggestion", .text)
+                t.column("apply_text", .text)
+                t.column("evidence", .text).notNull()
+                t.column("observed_at", .integer).notNull()
+                t.column("severity", .integer).notNull()
+                t.column("confidence", .text).notNull()
+                t.column("created_at", .integer).notNull()
+                t.column("feedback", .text)
+                t.column("feedback_at", .integer)
+            }
+            try db.create(index: "idx_finding_run", on: "finding", columns: ["run_id"])
+            try db.create(index: "idx_finding_unit", on: "finding", columns: ["unit_id"])
+            try db.create(index: "idx_finding_key", on: "finding", columns: ["backlog_key"])
         }
 
         return m

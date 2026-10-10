@@ -1,7 +1,8 @@
 import Foundation
 
 /// 트랜스크립트를 **append 분만** 읽는다. 부록 A4 의 `read_cursor`.
-enum TranscriptReader {
+/// 감시자 수집기가 백그라운드에서 쓴다 — 파일 읽기뿐이라 메인에 묶일 이유가 없다.
+nonisolated enum TranscriptReader {
 
     struct Batch {
         /// (줄 번호, 줄 내용). 줄 번호는 파일 전체 기준 1-based.

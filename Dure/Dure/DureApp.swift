@@ -2,6 +2,8 @@ import SwiftUI
 
 @main
 struct DureApp: App {
+    /// 이슈 #23 — 메인 창과 감시자 창이 같은 스토어를 본다.
+    @State private var observer = ObserverStore()
 
     init() {
         // F3 — 터미널을 하나라도 띄우기 전에 shim 과 훅 설정 파일이 있어야 한다.
@@ -16,12 +18,30 @@ struct DureApp: App {
 
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            ContentView(observer: observer)
         }
         .defaultSize(width: 1100, height: 800)
         .commands {
             // 1차에서는 탭·분할 명령을 두지 않는다 (ADR-13).
             CommandGroup(replacing: .newItem) {}
+            ObserverCommands()
+        }
+
+        // 감시자는 워크스페이스에 속하지 않는다 — 별도 창(D-25 와 같은 이유: 듀얼 모니터에서 옆에 둔다).
+        Window("감시자", id: "observer") {
+            ObserverView(observer: observer)
+        }
+        .defaultSize(width: 1100, height: 760)
+    }
+}
+
+struct ObserverCommands: Commands {
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some Commands {
+        CommandGroup(after: .windowArrangement) {
+            Button("감시자") { openWindow(id: "observer") }
+                .keyboardShortcut("o", modifiers: [.command, .shift])
         }
     }
 }

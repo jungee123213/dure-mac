@@ -83,6 +83,22 @@ enum SessionSettings {
         return url
     }
 
+    // MARK: - 감시자 (#23)
+
+    static func observerURL(root: URL = HookBridge.home) -> URL {
+        dir(root: root).appendingPathComponent("observer.json")
+    }
+
+    /// 묻기 페인(`Spawn` 이 `--settings` 를 요구한다). **훅을 넣지 않는다** — 감시자 세션이 두레 이벤트를 만들면 안 된다.
+    /// 툴 · MCP 격리는 `EvalSpec.isolationArgs` 의 플래그가 맡는다. 여기는 메시지만 한 번 더 막는다.
+    static func observerJSON() throws -> Data {
+        try encode(["permissions": ["deny": ["SendMessage", "ListAgents"]]])
+    }
+
+    static func writeObserver(root: URL = HookBridge.home) throws {
+        try write(try observerJSON(), to: observerURL(root: root))
+    }
+
     private static func encode(_ object: [String: Any]) throws -> Data {
         try JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys])
     }

@@ -115,4 +115,10 @@ struct SessionSettingsTests {
         let data = try Data(contentsOf: SessionSettings.repoPaneURL(root: root))
         #expect((try Self.object(data)["permissions"] as? [String: Any]) != nil)
     }
+
+    @Test func 감시자_묻기_설정은_훅이_없고_메시지를_막는다() throws {
+        let o = try #require(try JSONSerialization.jsonObject(with: SessionSettings.observerJSON()) as? [String: Any])
+        #expect(o["hooks"] == nil)
+        #expect((o["permissions"] as? [String: Any])?["deny"] as? [String] == ["SendMessage", "ListAgents"])
+    }
 }

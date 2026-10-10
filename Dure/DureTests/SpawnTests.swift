@@ -121,6 +121,14 @@ struct SpawnTests {
         #expect(s.contains("--settings '/s/repo-pane.json'"))
         #expect(s.contains("--name 'dure-ws-abcd-repo'"))
     }
+
+    @Test func 추가_인자는_인용해서_add_dir_앞에() {
+        let s = Spawn.script(cwd: "/u", sessionID: "x", settingsPath: "/s.json", sessionName: "dure-감시자",
+                             addDirs: ["/r"], initialPrompt: "읽어라",
+                             extraArgs: ["--safe-mode", "--tools", "Read,Grep,Glob", "--session-id", "abc"])
+        #expect(s.contains("'--safe-mode' '--tools' 'Read,Grep,Glob' '--session-id' 'abc' --add-dir '/r'"))
+        #expect(s.hasSuffix("-- '읽어라'"))
+    }
 }
 
 /// 문자열 비교만으로는 이스케이프가 맞는지 알 수 없다. **진짜 zsh 에 넣어본다.**

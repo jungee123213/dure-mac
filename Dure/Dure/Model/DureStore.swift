@@ -65,6 +65,8 @@ final class DureStore {
     @ObservationIgnored private var mcpServers: [String: MCPServer] = [:]
     /// 스폰 스크립트 캐시. `initialPrompt` 는 큐 항목을 `delivered` 로 찍는 쓰기라 뷰가 그릴 때마다 부르지 않는다 — 페인당 한 번.
     @ObservationIgnored private var launchScripts: [String: String] = [:]
+    /// 이슈 #23 — 감시자. 훅 두 가지만 넘긴다(수집 계기 · 실제 승인 프롬프트). 앱이 붙여 준다.
+    @ObservationIgnored weak var observer: ObserverStore?
     /// 유닛 테스트 호스트로 떠 있나. 테스트 호스트는 실제 앱을 띄우고 실제 DB 를 연다 — 그때 돌면 안 되는 일
     /// (앱 시작 복구처럼 실행 중인 진짜 두레의 기록을 바꾸는 것)을 거른다.
     static var isTestHost: Bool { ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil }
@@ -301,10 +303,16 @@ final class DureStore {
             if touchedDispatch { dispatchVersion += 1 }
         }
         if reaction.ingestTranscript { ingestTranscripts(for: event.dureSession) }
+        // 감시자는 두레 밖 세션까지 30초 틱으로 읽지만, 두레 페인의 턴이 끝난 순간은 여기서 바로 안다.
+        if event.ev == "Stop" { observer?.collectSoon() }
         if reaction.refreshGit, let repo = repo(for: event.dureSession) { refreshGit(for: repo) }
 
         switch reaction.alert {
         case .waiting(let message):
+            // 두레 페인의 승인 프롬프트는 추정이 아니라 실제 값이다 — 감시자 다이제스트가 턴에 귀속한다.
+            if let cc = currentSession(for: event.dureSession)?.ccSessionId {
+                observer?.recordPermissionPrompt(ccSessionID: cc)
+            }
             Notifier.post(title: WorkspaceSummary.alertTitle(
                               workspace: workspaceName(for: event.dureSession),
                               repo: paneName(forSession: event.dureSession),
