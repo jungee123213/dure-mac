@@ -103,6 +103,7 @@ nonisolated enum ObsCollector {
                         }
                     }
                 }
+                try flushTouched(&state, db: db)
             }
             start += max(config.chunk, 1)
         }
@@ -124,6 +125,31 @@ nonisolated enum ObsCollector {
         let path: String
         var turnID: String?
         var looked = false
+        /// 이 청크에서 처음 건드린 턴의 갱신 전 모습과 본 가장 늦은 시각. 청크 끝에서 최종값과 비교한다.
+        var touched: [String: (before: TurnSig, ts: Int)] = [:]
+    }
+
+    /// 평가 입력이 되는 턴 필드(답 꼬리 · 모델 · 길이 · 중단 · 압축). 토큰은 따로 센다.
+    private struct TurnSig: Equatable {
+        let tail: String?, model: String?, duration: Int?, interrupted: Bool, compacted: Bool
+        init(_ t: ObsTurn) {
+            tail = t.answerTail; model = t.model; duration = t.durationMs; interrupted = t.interrupted; compacted = t.compacted
+        }
+    }
+
+    /// 줄마다 비교하면 처음부터 다시 읽을 때 답 꼬리가 "끝" → "빌드할게" → "끝" 으로 오가며 매번 바뀐 것으로 보인다.
+    /// 청크 단위로 처음과 끝만 비교해, 다시 읽기는 같은 최종값이라 올리지 않고 진짜 새 줄은 한 번만 올린다.
+    private static func touch(_ turn: ObsTurn, ts: Int, _ state: inout FileState) {
+        let prior = state.touched[turn.id]
+        state.touched[turn.id] = (prior?.before ?? TurnSig(turn), max(prior?.ts ?? ts, ts))
+    }
+
+    private static func flushTouched(_ state: inout FileState, db: Database) throws {
+        defer { state.touched = [:] }
+        for (id, t) in state.touched {
+            guard let now = try ObsTurn.fetchOne(db, key: id), TurnSig(now) != t.before else { continue }
+            try bump(now.unitId, ts: t.ts, edit: false, db: db)
+        }
     }
 
     private enum Applied { case none, turn, unknown }
@@ -203,7 +229,6 @@ nonisolated enum ObsCollector {
             if skip(ctx) { return .none }
             let target = ctx.isSidechain ? try parentTurn(ctx, db: db) : try currentTurn(&state, db: db)
             guard var turn = target else { return .none }
-            let original = turn
             var counted = false
             if let messageId {
                 try ObsUsage(ccSessionId: ctx.sessionId, messageId: messageId, turnId: turn.id, sidechain: ctx.isSidechain)
@@ -221,34 +246,32 @@ nonisolated enum ObsCollector {
                 }
             }
             if !ctx.isSidechain {
+                touch(turn, ts: ctx.ts, &state)
                 if let text { turn.answerTail = String(text.suffix(500)) }
                 if let model { turn.model = model }
             }
             try turn.update(db)
-            // 토큰을 새로 셌거나 답 꼬리 · 모델이 바뀌었으면 평가 입력이 달라진 것이다.
-            if counted || turn != original { try bump(turn.unitId, ts: ctx.ts, edit: false, db: db) }
+            // 답 꼬리 · 모델 변화는 청크 끝(flushTouched)에서 비교한다.
+            if counted { try bump(turn.unitId, ts: ctx.ts, edit: false, db: db) }
             return .none
 
         case let .turnDuration(ms):
             guard var turn = try currentTurn(&state, db: db) else { return .none }
-            let original = turn
+            touch(turn, ts: turn.ts, &state)
             turn.durationMs = ms
             try turn.update(db)
-            if turn != original { try bump(turn.unitId, ts: turn.ts, edit: false, db: db) }
             return .none
         case .interrupted:
             guard var turn = try currentTurn(&state, db: db) else { return .none }
-            let original = turn
+            touch(turn, ts: turn.ts, &state)
             turn.interrupted = true
             try turn.update(db)
-            if turn != original { try bump(turn.unitId, ts: turn.ts, edit: false, db: db) }
             return .none
         case .compacted:
             guard var turn = try currentTurn(&state, db: db) else { return .none }
-            let original = turn
+            touch(turn, ts: turn.ts, &state)
             turn.compacted = true
             try turn.update(db)
-            if turn != original { try bump(turn.unitId, ts: turn.ts, edit: false, db: db) }
             return .none
         case .unknownType:
             return .unknown

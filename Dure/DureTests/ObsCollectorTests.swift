@@ -295,15 +295,35 @@ struct ObsCollectorTests {
         try write("s", [Fx.human("해줘"), Fx.text("일단", messageId: "msg_A")])
         try collect()
         var rev = try unit().sourceRevision
+        let lastTs = try unit().lastTs
         try write("s", [Fx.duration(5_000)], append: true)
         try collect()
         #expect(try unit().sourceRevision > rev); rev = try unit().sourceRevision
+        #expect(try unit().lastTs == lastTs)      // 길이 · 중단은 시각이 없어 last_ts 를 밀지 않는다
         try write("s", [Fx.interrupted()], append: true)
         try collect()
         #expect(try unit().sourceRevision > rev); rev = try unit().sourceRevision
+        #expect(try unit().lastTs == lastTs)
         // 같은 message 의 추가 텍스트 — 토큰은 이미 셌지만 답 꼬리가 바뀐다.
         try write("s", [Fx.text("마무리", messageId: "msg_A")], append: true)
         try collect()
         #expect(try unit().sourceRevision > rev)
+    }
+
+    /// 리뷰 — 답이 둘 이상인 턴을 처음부터 다시 읽어도(꼬리가 오갔다 돌아옴) revision 은 그대로.
+    @Test func 답이_여럿인_턴을_다시_읽어도_revision_은_그대로() throws {
+        let rest = [Fx.text("빌드할게", ts: "2026-10-10T01:00:01.000Z", messageId: "msg_1"),
+                    Fx.toolUse("t1", name: "Bash", input: ["command": "make"], ts: "2026-10-10T01:00:02.000Z"),
+                    Fx.text("끝", ts: "2026-10-10T01:00:04.000Z", messageId: "msg_2"),
+                    Fx.duration(5_000)]
+        let first = Fx.human("해줘", uuid: "u-1")
+        try write("s", [first] + rest)
+        try collect()
+        let before = try unit()
+        try write("s", [Fx.human("해줘", ts: "2026-10-10T01:00:00.000Z", uuid: "u-1"), Fx.toolResult("zz", ts: "2026-10-10T00:59:00.000Z")] + rest)
+        try collect()
+        let after = try unit()
+        #expect(after.sourceRevision == before.sourceRevision)
+        #expect(after.lastTs == before.lastTs)
     }
 }
