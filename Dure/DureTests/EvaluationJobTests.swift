@@ -164,6 +164,76 @@ struct EvaluationJobTests {
         #expect(try db.write { try EvaluationJob.enqueue(unitID: "u1", trigger: .auto, now: 1, in: $0) } == nil)
     }
 
+    /// 리뷰 재현 — 자동 실행이 보류(자동 평가 꺼짐)된 채 queued 일 때 수동 요청이 거절되면 평가할 방법이 없다.
+    @Test func manualEvaluationCanOverridePausedAutoQueue() throws {
+        let auto = try queue(.auto)
+        let promoted = try #require(try db.write { try EvaluationJob.enqueue(unitID: "u1", trigger: .manual, now: 5000, in: $0) })
+        #expect(promoted.id == auto.id && promoted.trigger == .manual)
+        #expect(try db.read { try EvaluationRun.fetchCount($0) } == 1)
+        var s = ObserverSettings()
+        s.autoEvaluate = false
+        let queued = try db.read { try EvaluationRun.fetchAll($0) }
+        #expect(ObserverRules.next(queued: queued, autoRunsToday: 0, s)?.id == auto.id)
+    }
+
+    @Test func 실행_중이면_수동_요청은_거절된다() throws {
+        let run = try queue(.auto)
+        try db.write { try $0.execute(sql: "UPDATE evaluation_run SET status = 'running' WHERE id = ?", arguments: [run.id]) }
+        #expect(try db.write { try EvaluationJob.enqueue(unitID: "u1", trigger: .manual, now: 5000, in: $0) } == nil)
+        #expect(try db.read { try EvaluationRun.fetchOne($0) }?.trigger == .auto)
+    }
+
+    @Test func 수동_대기가_있으면_다시_수동_요청은_중복으로_거절() throws {
+        _ = try queue(.manual)
+        #expect(try db.write { try EvaluationJob.enqueue(unitID: "u1", trigger: .manual, now: 5000, in: $0) } == nil)
+        #expect(try db.read { try EvaluationRun.fetchCount($0) } == 1)
+    }
+
+    // MARK: - 늦게 자격이 생긴 머지 단위
+
+    func markMerged(_ at: Int) throws {
+        try db.write { try $0.execute(sql: "UPDATE work_unit SET merged_at = ? WHERE id = 'u1'", arguments: [at]) }
+    }
+
+    @Test func 늦게_자격이_생긴_머지_단위는_다음_수집_뒤_자동으로_들어간다() throws {
+        try markMerged(3000)
+        let n = try db.write { try EvaluationJob.enqueueLateEligible(firstStart: 1000, ObserverSettings(), now: 6000, in: $0) }
+        #expect(n == 1)
+        let r = try db.read { try EvaluationRun.fetchAll($0) }
+        #expect(r.count == 1 && r[0].trigger == .auto && r[0].status == .queued)
+        // 멱등 — 이미 대기 중이다
+        #expect(try db.write { try EvaluationJob.enqueueLateEligible(firstStart: 1000, ObserverSettings(), now: 6001, in: $0) } == 0)
+    }
+
+    @Test func 자동_실행_이력이_있으면_다시_넣지_않는다() throws {
+        try markMerged(3000)
+        let run = try queue(.auto)
+        try db.write { try $0.execute(sql: "UPDATE evaluation_run SET status = 'failed' WHERE id = ?", arguments: [run.id]) }
+        #expect(try db.write { try EvaluationJob.enqueueLateEligible(firstStart: 1000, ObserverSettings(), now: 6000, in: $0) } == 0)
+        #expect(try db.read { try EvaluationRun.fetchCount($0) } == 1)
+    }
+
+    /// 수동으로 승격된 실행은 trigger 가 manual 이 되지만 자동 몫은 이미 치른 것이다 — 끝난 뒤 한 번 더 자동으로 돌지 않게.
+    @Test func 승격된_실행이_끝나도_자동을_다시_넣지_않는다() throws {
+        try markMerged(3000)
+        _ = try queue(.auto)
+        _ = try db.write { try EvaluationJob.enqueue(unitID: "u1", trigger: .manual, now: 5000, in: $0) }
+        try db.write { try $0.execute(sql: "UPDATE evaluation_run SET status = 'done'") }
+        #expect(try db.write { try EvaluationJob.enqueueLateEligible(firstStart: 1000, ObserverSettings(), now: 6000, in: $0) } == 0)
+    }
+
+    @Test func 첫_시작_전_머지는_넣지_않는다() throws {
+        try markMerged(500)
+        #expect(try db.write { try EvaluationJob.enqueueLateEligible(firstStart: 1000, ObserverSettings(), now: 6000, in: $0) } == 0)
+    }
+
+    @Test func 자동_평가가_꺼져_있으면_넣지_않는다() throws {
+        try markMerged(3000)
+        var s = ObserverSettings()
+        s.autoEvaluate = false
+        #expect(try db.write { try EvaluationJob.enqueueLateEligible(firstStart: 1000, s, now: 6000, in: $0) } == 0)
+    }
+
     /// 시나리오 4 — 평가 중 앱이 꺼졌다. 재시작하면 interrupted 로 닫고 같은 계기로 한 번만 다시 큐에.
     @Test func 중단된_실행은_한_번만_다시_큐에() throws {
         let run = try queue(.auto)

@@ -40,6 +40,11 @@ final class Dispatcher {
     /// 소켓이 시작한 턴에 `UserPromptSubmit` 이 뜨는지 미확인이라 상태(`done`)만 믿으면 조율자가 첫 묶음을
     /// 읽는 중에 다음 묶음이 끼어든다. 메모리에만 둔다 — 앱을 다시 켜면 조율자 세션도 새로 뜬다.
     private var orchestratorAwaitingStop: Set<String> = []
+    /// 레포 쪽 같은 가드(이슈 #27). 소켓으로 배분을 **보낸 순간** 넣고 그 턴의 Stop · 새 세션 · 페인 종료에서 뺀다.
+    /// `outstanding` 은 `complete` 로 닫히면 사라지지만 그 턴은 아직 돌고 있다 — 페인 상태(`done`)도 소켓 턴에
+    /// `UserPromptSubmit` 이 안 뜨면 그대로라 믿을 수 없다. 이 집합이 없으면 이전 턴의 Stop 이 새 배분을 waiting 으로 만든다.
+    /// argv 로 실은 배분은 넣지 않는다. 메모리에만 둔다 — 앱을 다시 켜면 `recoverOnLaunch` 가 열린 배분을 닫고 가드는 비어 있다.
+    private var repoAwaitingStop: Set<String> = []
 
     init(db: DatabaseQueue, inbox: InboxSending, lookups: Lookups,
          now: @escaping () -> Int = { Int(Date().timeIntervalSince1970) }) {
@@ -75,6 +80,8 @@ final class Dispatcher {
 
     /// 레포 페인의 새 세션. 열린 배분이 있으면 `DispatchRules.onSessionStart` 로 이어받기 · 유지 · 실패를 정한다(이슈 #24).
     func didStart(repoID: String, session: String?, source: String) {
+        // compact 는 같은 턴 한가운데서도 일어난다 — 그때는 Stop 이 아직 온다. 그 밖의 시작은 옛 턴의 Stop 이 오지 않는다.
+        if source != "compact" { repoAwaitingStop.remove(repoID) }
         do {
             if let open = try db.read({ try DispatchOps.outstanding(repoID: repoID, in: $0) }), let session {
                 switch DispatchRules.onSessionStart(deliveredSession: open.deliveredSession, newSession: session, source: source) {
@@ -96,6 +103,7 @@ final class Dispatcher {
     /// 조율자에게 "끝남" 을 보내지 않고, 그 페인에 다음 배분을 넣지 않는다. 마지막 답은 남겨 둔다.
     /// 배분이 아닌 턴(사람이 직접 친 것)이나 이미 `complete` 한 배분의 Stop 은 큐만 흘린다.
     func didStop(repoID: String, lastMessage: String?) {
+        repoAwaitingStop.remove(repoID)   // 먼저 푼다 — 아래 pump 가 다음 배분을 넣을 수 있어야 한다
         do {
             if let open = try db.read({ try DispatchOps.outstanding(repoID: repoID, in: $0) }) {
                 try db.write { try DispatchOps.markWaiting(open.id, lastMessage: lastMessage, in: $0) }
@@ -145,6 +153,7 @@ final class Dispatcher {
     }
 
     func didDie(repoID: String) {
+        repoAwaitingStop.remove(repoID)   // 죽은 세션의 Stop 은 오지 않는다
         do {
             guard let open = try db.read({ try DispatchOps.outstanding(repoID: repoID, in: $0) }) else { return }
             try db.write { try DispatchOps.markFailed(open.id, reason: "페인 종료", now: now(), in: $0) }
@@ -185,7 +194,8 @@ final class Dispatcher {
         do {
             let pane = lookups.repoPane(repoID)
             let open = try db.read { try DispatchOps.outstanding(repoID: repoID, in: $0) }
-            guard DispatchRules.isIdle(started: pane.started, state: pane.state, hasOutstanding: open != nil),
+            guard !repoAwaitingStop.contains(repoID),
+                  DispatchRules.isIdle(started: pane.started, state: pane.state, hasOutstanding: open != nil),
                   let session = pane.claudeSessionID,
                   let next = try db.read({ try DispatchOps.queued(repoID: repoID, in: $0) }).first else { return }
             let body = DispatchBody.dispatch(seq: next.seq, repoName: lookups.repoName(repoID), instruction: next.instruction)
@@ -202,6 +212,7 @@ final class Dispatcher {
                 }
                 return
             }
+            repoAwaitingStop.insert(repoID)
             // 보낸 뒤의 기록 실패는 "안 보냄" 이 아니다 — 재시도로 몰면 같은 지시가 두 번 간다. 로그만 남긴다.
             do {
                 try db.write { try DispatchOps.markDelivered(next.id, session: session, now: now(), in: $0) }

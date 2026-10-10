@@ -114,6 +114,17 @@ struct ObserverStoreTests {
         #expect(try db.read { try EvaluationRun.fetchOne($0) }?.status == .queued)
     }
 
+    /// 결함 B — 머지를 발견한 순간엔 자격이 없다가 수집으로 늦게 생긴 단위.
+    @Test func 수집_뒤_자격_재확인() async throws {
+        let mergedAt = Self.today - 100
+        try await db.write { try $0.execute(sql: "UPDATE work_unit SET merged_at = ?", arguments: [mergedAt]) }
+        let s = store(firstStart: Self.today - 1000)
+        await s.queueLateEligible()
+        #expect(try await db.read { try EvaluationRun.fetchOne($0) }?.trigger == .auto)
+        await s.queueLateEligible()
+        #expect(try await db.read { try EvaluationRun.fetchCount($0) } == 1)
+    }
+
     @Test func 백로그_상태와_피드백() throws {
         try db.write { db in
             try BacklogItem(key: "kkk", bucket: .dure, grp: "dure", kind: "x", title: "t", detail: "d", state: .open).insert(db)
@@ -159,5 +170,24 @@ struct ObserverStoreTests {
         let s = store()
         s.openChat("u1")
         #expect(s.chat == nil)
+    }
+
+    /// 이슈 #27 Task 4 — merged_at 을 적은 그 쓰기 안에서 머지 뒤 턴을 다음 세대로 옮기고, 자격은 옮긴 뒤 숫자로 본다.
+    @Test func 머지를_적으면_머지_뒤_턴을_다음_세대로_옮긴다() async throws {
+        try await db.write { db in
+            for (i, ts) in ["2026-10-09T10:00:00Z", "2026-10-09T21:00:00Z"].enumerated() {
+                try ObsTurn(unitId: "u1", eventId: "e\(i)", ccSessionId: "s", transcriptPath: "/t", lineNo: i,
+                            origin: .terminal, promptKind: .human, ts: ObsParser.epoch(ts)!, prompt: "p").insert(db)
+            }
+        }
+        let s = store(Self.merges, firstStart: ObsParser.epoch("2026-10-09T00:00:00Z")!)
+        s.settings.dailyCap = 0
+        await s.checkMerges()
+        let units = try await db.read { try WorkUnit.order(Column("generation")).fetchAll($0) }
+        #expect(units.count == 2)
+        #expect(units.map(\.humanTurns) == [1, 1])
+        #expect(units[0].editCount == 0)
+        // 옮긴 뒤 숫자로 자격을 본다 — 머지 전 사람 턴 1 · 수정 0 이면 자동 평가하지 않는다.
+        #expect(try await db.read { try EvaluationRun.fetchCount($0) } == 0)
     }
 }

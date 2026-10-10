@@ -104,6 +104,7 @@ final class ObserverStore {
             if case .failure(let e) = result { NSLog("[Dure] 감시자 수집 실패: \(e)") }
             self.collecting = false
             self.queueDueDayUnits()
+            await self.queueLateEligible()
             self.reload()
             self.pump()
             if self.collectAgain { self.collectAgain = false; self.collectSoon() }
@@ -152,6 +153,11 @@ final class ObserverStore {
                 x.prHead = m.head
                 x.mergedAt = m.mergedAt
                 try x.update(db)
+                // 같은 쓰기 안에서 머지 뒤 턴을 다음 세대로 옮긴다 — 다음 수집까지 섞인 상태를 평가가 집지 않게.
+                // 수집 잠금은 잡지 않는다: 한 트랜잭션이라 수집 청크와 섞이지 않고, 수집도 끝에서 같은 정합을 돈다.
+                try GenerationSplit.reconcile(in: db)
+                // 자동 평가 자격은 옮긴 뒤의(머지 전 작업만의) 숫자로 본다.
+                x = try WorkUnit.fetchOne(db, key: u.id) ?? x
                 if ObserverRules.shouldAutoEnqueue(x, firstStart: firstStart, s) {
                     _ = try EvaluationJob.enqueue(unitID: x.id, trigger: .auto, now: t, in: db)
                 }
@@ -161,13 +167,23 @@ final class ObserverStore {
         pump()
     }
 
+    /// 수집이 끝날 때마다 — 머지를 발견한 뒤에야 자격이 생긴 단위를 자동 평가에 넣는다.
+    /// `await` 라 DB 쓰기는 메인을 막지 않는다.
+    func queueLateEligible() async {
+        guard settings.enabled, settings.autoEvaluate else { return }
+        let s = settings, t = now(), firstStart = ObserverSettings.firstStart(in: defaults, now: t)
+        do { _ = try await db.write { try EvaluationJob.enqueueLateEligible(firstStart: firstStart, s, now: t, in: $0) } }
+        catch { NSLog("[Dure] 감시자 자격 재확인 실패: \(error)") }
+    }
+
     private func queueDueDayUnits() {
         let s = settings, t = now(), today = WorkUnitRules.day(t, timeZone: .current)
         guard s.autoEvaluateDayUnits else { return }
+        let firstStartDay = WorkUnitRules.day(ObserverSettings.firstStart(in: defaults, now: t), timeZone: .current)
         try? db.write { db in
             for u in try WorkUnit.filter([UnitKind.defaultBranch.rawValue, UnitKind.noGit.rawValue].contains(Column("kind"))).fetchAll(db) {
                 let hasRun = try EvaluationRun.filter(Column("unit_id") == u.id).fetchCount(db) > 0
-                if ObserverRules.dayUnitDue(u, today: today, s, hasRun: hasRun) {
+                if ObserverRules.dayUnitDue(u, today: today, firstStartDay: firstStartDay, s, hasRun: hasRun) {
                     _ = try EvaluationJob.enqueue(unitID: u.id, trigger: .auto, now: t, in: db)
                 }
             }

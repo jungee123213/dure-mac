@@ -27,6 +27,24 @@ struct ObserverSettingsTests {
         #expect(!ObserverRules.watchesMerge(Self.unit(.defaultBranch), now: 0))
     }
 
+    @Test func 자동_평가가_필요한_단위() {
+        let s = ObserverSettings()
+        var u = Self.unit(human: 3)
+        u.mergedAt = 2000
+        #expect(ObserverRules.needsAutoEvaluation(u, hasAutoRun: false, firstStart: 1000, s))
+        #expect(!ObserverRules.needsAutoEvaluation(u, hasAutoRun: true, firstStart: 1000, s))
+        #expect(!ObserverRules.needsAutoEvaluation(u, hasAutoRun: false, firstStart: 3000, s))
+    }
+
+    @Test func 자동_대기_보류_판단() {
+        var s = ObserverSettings()
+        s.dailyCap = 2
+        #expect(!ObserverRules.autoQueuePaused(autoRunsToday: 0, s))
+        #expect(ObserverRules.autoQueuePaused(autoRunsToday: 2, s))
+        s.autoEvaluate = false
+        #expect(ObserverRules.autoQueuePaused(autoRunsToday: 0, s))
+    }
+
     /// F5d — 30일 넘게 손대지 않은 브랜치는 더 보지 않는다(버려진 브랜치마다 gh 를 부르지 않게).
     @Test func 오래된_작업은_머지를_보지_않는다() {
         let day = 86_400
@@ -68,11 +86,14 @@ struct ObserverSettingsTests {
     @Test func 날짜_단위는_설정을_켜야_하루가_지나면() {
         var s = ObserverSettings()
         let u = Self.unit(.defaultBranch, human: 3, day: "2026-10-09")
-        #expect(!ObserverRules.dayUnitDue(u, today: "2026-10-10", s, hasRun: false))
+        #expect(!ObserverRules.dayUnitDue(u, today: "2026-10-10", firstStartDay: "2026-10-01", s, hasRun: false))
         s.autoEvaluateDayUnits = true
-        #expect(ObserverRules.dayUnitDue(u, today: "2026-10-10", s, hasRun: false))
-        #expect(!ObserverRules.dayUnitDue(u, today: "2026-10-10", s, hasRun: true))
-        #expect(!ObserverRules.dayUnitDue(Self.unit(.defaultBranch, human: 3, day: "2026-10-10"), today: "2026-10-10", s, hasRun: false))
+        #expect(ObserverRules.dayUnitDue(u, today: "2026-10-10", firstStartDay: "2026-10-01", s, hasRun: false))
+        #expect(!ObserverRules.dayUnitDue(u, today: "2026-10-10", firstStartDay: "2026-10-01", s, hasRun: true))
+        // 첫 시작 날짜 이전의 날은 자동 평가하지 않는다
+        #expect(!ObserverRules.dayUnitDue(u, today: "2026-10-10", firstStartDay: "2026-10-10", s, hasRun: false))
+        #expect(ObserverRules.dayUnitDue(u, today: "2026-10-10", firstStartDay: "2026-10-09", s, hasRun: false))
+        #expect(!ObserverRules.dayUnitDue(Self.unit(.defaultBranch, human: 3, day: "2026-10-10"), today: "2026-10-10", firstStartDay: "2026-10-01", s, hasRun: false))
     }
 
     static func run(_ t: RunTrigger, created: Int) -> EvaluationRun {

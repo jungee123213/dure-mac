@@ -16,8 +16,11 @@ nonisolated enum WorkUnitRules {
         var workspaceId: String?
 
         var baseKey: String { "\(kind.rawValue)|\(repoRoot ?? cwd ?? "-")|\(branch ?? "-")|\(day ?? "-")" }
-        func key(generation: Int) -> String { "\(baseKey)|g\(generation)" }
+        func key(generation: Int) -> String { WorkUnitRules.unitKey(baseKey: baseKey, generation: generation) }
     }
+
+    /// 단위 열쇠 형식의 유일한 정의 — 수집이 새 세대를 만들 때와 머지 경계로 나눌 때가 같은 열쇠를 써야 한다.
+    static func unitKey(baseKey: String, generation: Int) -> String { "\(baseKey)|g\(generation)" }
 
     static func place(cwd: String, branch: String?, repo: RepoInfo?, ts: Int, timeZone: TimeZone,
                       workspacesRoot: String) -> Placement {

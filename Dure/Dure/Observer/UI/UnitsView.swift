@@ -56,7 +56,11 @@ struct UnitsView: View {
                 }.frame(maxWidth: 220)
             }
             Button(runs.contains { $0.status == .done } ? "다시 평가" : "평가") { observer.requestEvaluation(u.id) }
-                .disabled(runs.contains { $0.status == .queued || $0.status == .running })
+                .disabled(runs.contains { $0.status == .running })      // 대기 중인 자동 실행은 수동 요청이 승격한다
+            if runs.contains(where: { $0.status == .queued && $0.trigger == .auto }),
+               ObserverRules.autoQueuePaused(autoRunsToday: observer.autoRunsToday, observer.settings) {
+                Text("자동 대기(보류)").font(.caption).foregroundStyle(.orange).help("자동 평가가 꺼져 있거나 오늘 상한에 닿았습니다. [평가] 를 누르면 바로 돕니다.")
+            }
             Button("리포트에 대해 묻기") {
                 if let open = observer.chat, open.unitID != u.id { confirmReplace = u.id } else { observer.openChat(u.id) }
             }

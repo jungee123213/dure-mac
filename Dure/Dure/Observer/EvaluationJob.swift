@@ -24,14 +24,40 @@ nonisolated enum EvaluationJob {
 
     private struct JobError: Error, CustomStringConvertible { var description: String }
 
+    /// 같은 단위에 대기 · 실행 중인 실행이 있으면 새로 만들지 않는다.
+    /// 단 **수동 요청**은 대기 중인 auto 를 manual 로 승격한다 — 자동 평가가 꺼졌거나 상한이면 auto 는 영영 안 도는데,
+    /// 중복으로 거절하면 사람이 평가할 방법이 없다. 실행 중이면 승격하지 않고 nil.
     static func enqueue(unitID: String, trigger: RunTrigger, now: Int, in db: Database) throws -> EvaluationRun? {
         let busy = try EvaluationRun.filter(Column("unit_id") == unitID &&
                                             [RunStatus.queued.rawValue, RunStatus.running.rawValue].contains(Column("status")))
-            .fetchCount(db)
-        guard busy == 0 else { return nil }
+            .fetchAll(db)
+        if trigger == .manual, !busy.contains(where: { $0.status == .running }),
+           var queued = busy.first(where: { $0.status == .queued && $0.trigger == .auto }) {
+            queued.trigger = .manual
+            try queued.update(db)
+            return queued
+        }
+        // 수동 대기 · 실행 중 · auto 요청의 중복은 기존 계약대로 nil.
+        guard busy.isEmpty else { return nil }
         let r = EvaluationRun(unitId: unitID, trigger: trigger, status: .queued, createdAt: now)
         try r.insert(db)
         return r
+    }
+
+    /// 수집이 끝날 때마다. 머지됐는데 아직 자동 평가를 한 번도 안 넣은 단위 중 자격이 생긴 것을 auto 로 넣는다.
+    /// "자동 이력" 은 trigger 가 auto 인 실행, 또는 머지 뒤에 만들어진 실행(수동 승격으로 manual 이 된 자동 몫 포함)이다.
+    static func enqueueLateEligible(firstStart: Int, _ s: ObserverSettings, now: Int, in db: Database) throws -> Int {
+        guard s.autoEvaluate else { return 0 }
+        var n = 0
+        for u in try WorkUnit.filter(Column("merged_at") != nil && Column("merged_at") >= firstStart).fetchAll(db) {
+            let hasAutoRun = try Int.fetchOne(db, sql: """
+                SELECT COUNT(*) FROM evaluation_run
+                WHERE unit_id = ?1 AND ("trigger" = 'auto' OR created_at >= ?2)
+                """, arguments: [u.id, u.mergedAt ?? 0]) ?? 0 > 0
+            guard ObserverRules.needsAutoEvaluation(u, hasAutoRun: hasAutoRun, firstStart: firstStart, s) else { continue }
+            if try enqueue(unitID: u.id, trigger: .auto, now: now, in: db) != nil { n += 1 }
+        }
+        return n
     }
 
     /// 앱 시작 때. 평가 중에 꺼진 실행은 영영 끝나지 않는다 — 닫고 같은 계기로 한 번만 다시 큐에(리뷰 P1-B).

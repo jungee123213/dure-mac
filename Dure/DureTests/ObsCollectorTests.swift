@@ -137,6 +137,87 @@ struct ObsCollectorTests {
         #expect(try db.read { try ObsTool.fetchCount($0) } == 1)
     }
 
+    /// 옛 형식 — 메인 기록 안에 isSidechain 줄이 섞여 있다(재구성은 옛 기록도 다시 읽는다).
+    /// 파일 단위로 못 박으면 둘째 턴의 서브에이전트 사용량이 첫 턴으로 간다 — 줄마다 직전 턴에 붙인다.
+    @Test func 메인_파일의_인라인_사이드체인은_줄마다_직전_턴에() throws {
+        try write("s1", [
+            Fx.human("하나", ts: "2026-10-10T01:00:00.000Z"),
+            Fx.text("조사", ts: "2026-10-10T01:10:02.000Z", messageId: "in1", sidechain: true),
+            Fx.human("둘", ts: "2026-10-10T02:00:00.000Z"),
+            Fx.text("조사2", ts: "2026-10-10T02:10:02.000Z", messageId: "in2", sidechain: true),
+        ])
+        try collect()
+        let turns = try db.read { try ObsTurn.order(Column("ts")).fetchAll($0) }
+        #expect(turns.count == 2)
+        #expect(turns[0].sidechainTokens == (2 + 8 + 30))
+        #expect(turns[1].sidechainTokens == (2 + 8 + 30))
+    }
+
+    /// 리뷰 `subagentRemainsWithLaunchingTask` — 백그라운드 서브에이전트가 도는 사이 다음 턴이 시작돼도
+    /// 서브에이전트 파일 하나는 처음 고른 부모 턴 하나에 붙는다.
+    @Test func 서브에이전트는_띄운_작업에_남는다() throws {
+        try write("s1", [Fx.human("조사해", ts: "2026-10-10T01:00:00.000Z"), Fx.human("다음", ts: "2026-10-10T02:00:00.000Z")])
+        try write("s1/subagents/agent-abc", [
+            Fx.toolUse("c1", name: "Read", input: ["file_path": "/r/ios/A.swift"], ts: "2026-10-10T01:59:00.000Z",
+                       sidechain: true, messageId: "child1"),
+            Fx.text("계속", ts: "2026-10-10T02:01:00.000Z", messageId: "child2", sidechain: true),
+        ])
+        try collect()
+        var turns = try db.read { try ObsTurn.order(Column("ts")).fetchAll($0) }
+        #expect(turns[0].sidechainTokens == (10 + 5 + 20) + (2 + 8 + 30))
+        #expect(turns[1].sidechainTokens == 0)
+        // 재시작(새 수집 상태)으로 같은 파일에 줄이 더 붙어도 같은 부모로 간다.
+        try write("s1/subagents/agent-abc", [
+            Fx.text("또", ts: "2026-10-10T02:05:00.000Z", messageId: "child3", sidechain: true),
+        ], append: true)
+        try collect()
+        turns = try db.read { try ObsTurn.order(Column("ts")).fetchAll($0) }
+        #expect(turns[0].sidechainTokens == (10 + 5 + 20) + 2 * (2 + 8 + 30))
+        #expect(turns[1].sidechainTokens == 0)
+    }
+
+    /// 틱이 갈려도(첫 틱엔 툴 행이 없음) 부모는 파일 첫 줄 시각으로 정해져 갈라지지 않는다.
+    @Test func 서브에이전트_부모는_틱이_갈려도_같다() throws {
+        try write("s1", [Fx.human("조사해", ts: "2026-10-10T01:00:00.000Z")])
+        try write("s1/subagents/agent-abc", [Fx.text("시작", ts: "2026-10-10T01:59:00.000Z", messageId: "c1", sidechain: true)])
+        try collect()
+        try write("s1", [Fx.human("다음", ts: "2026-10-10T02:00:00.000Z")], append: true)
+        try write("s1/subagents/agent-abc", [
+            Fx.toolUse("c2", name: "Read", input: ["file_path": "/r/ios/A.swift"], ts: "2026-10-10T02:01:00.000Z",
+                       sidechain: true, messageId: "c2m"),
+            Fx.text("끝", ts: "2026-10-10T02:01:30.000Z", messageId: "c3", sidechain: true),
+        ], append: true)
+        try collect()
+        let turns = try db.read { try ObsTurn.order(Column("ts")).fetchAll($0) }
+        #expect(turns.count == 2)
+        #expect(turns[0].sidechainTools == 1)
+        #expect(turns[0].sidechainTokens == (2 + 8 + 30) + (10 + 5 + 20) + (2 + 8 + 30))
+        #expect(turns[1].sidechainTokens == 0 && turns[1].sidechainTools == 0)
+    }
+
+    /// 부모 세션 파일이 아직 수집 전이면 서브에이전트 커서를 올리지 않는다 — 다음 수집에서 다시 읽는다.
+    @Test func 부모가_아직_없으면_서브에이전트_커서를_올리지_않는다() throws {
+        try write("s1", [Fx.human("조사해", ts: "2026-10-10T01:00:00.000Z")])
+        let sub = try write("s1/subagents/agent-abc", [
+            Fx.text("찾았다", ts: "2026-10-10T01:10:02.000Z", messageId: "m1", sidechain: true),
+        ])
+        let r = try ObsCollector.ingest(file: sub, db: db, config: config, resolver: resolver)
+        #expect(r.filesRead == 0)
+        #expect(try db.read { try ObsCursor.fetchOne($0, key: sub.path) } == nil)
+        try collect()
+        #expect(try turn().sidechainTokens > 0)
+    }
+
+    /// 부모 파일이 아예 없으면(지워짐) 영원히 붙잡지 않고 예전처럼 건너뛰며 커서를 올린다.
+    @Test func 부모_파일이_없으면_건너뛰고_커서를_올린다() throws {
+        try write("gone/subagents/agent-abc", [
+            Fx.text("찾았다", ts: "2026-10-10T01:10:02.000Z", messageId: "m1", sidechain: true),
+        ])
+        try collect()
+        #expect(try db.read { try ObsCursor.fetchCount($0) } == 1)   // 경로 표기(/var ↔ /private/var)와 무관하게 센다
+        #expect(try db.read { try ObsUsage.fetchCount($0) } == 0)
+    }
+
     @Test func 바뀌지_않은_파일은_다시_읽지_않는다() throws {
         try write("s", [Fx.human("a")])
         #expect(try collect().filesRead == 1)
@@ -245,5 +326,212 @@ struct ObsCollectorTests {
         #expect(try turn().sidechainTools == 1)
         #expect(try unit().editCount == 1)
         #expect(try db.read { try ObsTool.filter(Column("tool_use_id") == "st1").fetchCount($0) } == 1)
+    }
+
+    // MARK: - 평가 입력이 바뀌면 revision · last_ts (이슈 #27 Task 2)
+
+    @Test func 툴_결과가_들어오면_평가_뒤_변경이_된다() throws {
+        try write("s", [Fx.human("빌드해줘"),
+                        Fx.toolUse("t1", name: "Bash", input: ["command": "xcodebuild build"], ts: "2026-10-10T01:00:02.000Z")])
+        try collect()
+        let before = try unit()
+        try write("s", [Fx.toolResult("t1", isError: true, content: "error: build failed", ts: "2026-10-10T01:00:40.000Z")], append: true)
+        try collect()
+        let after = try unit()
+        #expect(after.sourceRevision > before.sourceRevision)
+        #expect(after.lastTs > before.lastTs)
+    }
+
+    @Test func 같은_결과를_다시_읽어도_revision_은_그대로() throws {
+        let lines = [Fx.human("빌드해줘", uuid: "u-1"),
+                     Fx.toolUse("t1", name: "Bash", input: ["command": "xcodebuild build"], ts: "2026-10-10T01:00:02.000Z"),
+                     Fx.toolResult("t1", isError: true, content: "error: build failed", ts: "2026-10-10T01:00:40.000Z"),
+                     Fx.duration(41_000)]
+        try write("s", lines)
+        try collect()
+        let before = try unit()
+        // 첫 줄이 달라져 지문이 바뀌면 처음부터 다시 읽는다.
+        try write("s", [Fx.toolResult("zz", ts: "2026-10-10T00:59:00.000Z")] + lines)
+        try collect()
+        let after = try unit()
+        #expect(after.sourceRevision == before.sourceRevision)
+        #expect(after.lastTs == before.lastTs)
+    }
+
+    @Test func 서브에이전트_툴_결과도_revision_을_올린다() throws {
+        try write("s1", [Fx.human("고쳐", ts: "2026-10-10T01:00:00.000Z")])
+        try write("s1/subagents/agent-abc", [
+            Fx.toolUse("st1", name: "Bash", input: ["command": "make"], ts: "2026-10-10T01:10:00.000Z", sidechain: true, messageId: "msg_S1"),
+        ])
+        try collect()
+        let before = try unit()
+        try write("s1/subagents/agent-abc", [Fx.toolResult("st1", isError: true, ts: "2026-10-10T01:11:00.000Z", sidechain: true)], append: true)
+        try collect()
+        let after = try unit()
+        #expect(after.sourceRevision > before.sourceRevision)
+        #expect(after.lastTs > before.lastTs)
+    }
+
+    @Test func 턴_길이와_중단과_답_갱신도_revision_을_올린다() throws {
+        try write("s", [Fx.human("해줘"), Fx.text("일단", messageId: "msg_A")])
+        try collect()
+        var rev = try unit().sourceRevision
+        let lastTs = try unit().lastTs
+        try write("s", [Fx.duration(5_000)], append: true)
+        try collect()
+        #expect(try unit().sourceRevision > rev); rev = try unit().sourceRevision
+        #expect(try unit().lastTs == lastTs)      // 길이 · 중단은 시각이 없어 last_ts 를 밀지 않는다
+        try write("s", [Fx.interrupted()], append: true)
+        try collect()
+        #expect(try unit().sourceRevision > rev); rev = try unit().sourceRevision
+        #expect(try unit().lastTs == lastTs)
+        // 같은 message 의 추가 텍스트 — 토큰은 이미 셌지만 답 꼬리가 바뀐다.
+        try write("s", [Fx.text("마무리", messageId: "msg_A")], append: true)
+        try collect()
+        #expect(try unit().sourceRevision > rev)
+    }
+
+    /// 리뷰 — 답이 둘 이상인 턴을 처음부터 다시 읽어도(꼬리가 오갔다 돌아옴) revision 은 그대로.
+    @Test func 답이_여럿인_턴을_다시_읽어도_revision_은_그대로() throws {
+        let rest = [Fx.text("빌드할게", ts: "2026-10-10T01:00:01.000Z", messageId: "msg_1"),
+                    Fx.toolUse("t1", name: "Bash", input: ["command": "make"], ts: "2026-10-10T01:00:02.000Z"),
+                    Fx.text("끝", ts: "2026-10-10T01:00:04.000Z", messageId: "msg_2"),
+                    Fx.duration(5_000)]
+        let first = Fx.human("해줘", uuid: "u-1")
+        try write("s", [first] + rest)
+        try collect()
+        let before = try unit()
+        try write("s", [Fx.human("해줘", ts: "2026-10-10T01:00:00.000Z", uuid: "u-1"), Fx.toolResult("zz", ts: "2026-10-10T00:59:00.000Z")] + rest)
+        try collect()
+        let after = try unit()
+        #expect(after.sourceRevision == before.sourceRevision)
+        #expect(after.lastTs == before.lastTs)
+    }
+
+    /// 리뷰 R2a 재검토 — 같은 턴의 답 줄이 청크 경계에 걸려도(chunk 1 = 줄마다 경계) 다시 읽기는 revision 을 올리지 않는다.
+    @Test func 청크_경계에_걸린_턴을_다시_읽어도_revision_은_그대로() throws {
+        var cfg = config
+        cfg.chunk = 1
+        let rest = [Fx.text("빌드할게", ts: "2026-10-10T01:00:01.000Z", messageId: "msg_1"),
+                    Fx.toolUse("t1", name: "Bash", input: ["command": "make"], ts: "2026-10-10T01:00:02.000Z"),
+                    Fx.text("끝", ts: "2026-10-10T01:00:04.000Z", messageId: "msg_2"),
+                    Fx.duration(5_000)]
+        let human = Fx.human("해줘", uuid: "u-1")
+        try write("s", [human] + rest)
+        try ObsCollector.collect(db: db, config: cfg, resolver: resolver)
+        let before = try unit()
+        try write("s", [Fx.toolResult("zz", ts: "2026-10-10T00:59:00.000Z"), human] + rest)
+        try ObsCollector.collect(db: db, config: cfg, resolver: resolver)
+        let after = try unit()
+        #expect(after.sourceRevision == before.sourceRevision)
+        #expect(after.lastTs == before.lastTs)
+    }
+
+    // MARK: - 머지 경계를 뒤늦게 알아도 세대를 나눈다 (이슈 #27 Task 4)
+
+    /// 백필 · 앱을 꺼 둔 동안 같은 브랜치 재사용 — 머지 전후 턴이 한 단위에 들어간 뒤 merged_at 을 알게 된 경우.
+    func backfillMixed() throws {
+        try write("s1", [Fx.human("옛 작업", ts: "2026-10-10T01:00:00.000Z"),
+                         Fx.toolUse("old-e", name: "Edit", input: ["file_path": "/r/ios/A.swift"], ts: "2026-10-10T01:00:05.000Z",
+                                    messageId: "m-old"),
+                         Fx.human("새 작업", ts: "2026-10-10T03:00:00.000Z"),
+                         Fx.toolUse("new-e", name: "Edit", input: ["file_path": "/r/ios/B.swift"], ts: "2026-10-10T03:00:05.000Z",
+                                    messageId: "m-new"),
+                         Fx.toolResult("new-e", ts: "2026-10-10T03:00:06.000Z")])
+        try write("s1/subagents/agent-new", [
+            Fx.toolUse("sub-e", name: "Write", input: ["file_path": "/r/ios/C.swift"], ts: "2026-10-10T03:10:00.000Z",
+                       sidechain: true, messageId: "m-sub"),
+        ])
+        try collect()
+        #expect(try db.read { try WorkUnit.fetchCount($0) } == 1)
+    }
+
+    @Test func backfillThenMergeMustSeparateBranchGeneration() throws {
+        try backfillMixed()
+        let merged = ObsParser.epoch("2026-10-10T02:00:00.000Z")!
+        try db.write { try $0.execute(sql: "UPDATE work_unit SET merged_at = ?", arguments: [merged]) }
+        try collect()
+        #expect(try db.read { try WorkUnit.fetchCount($0) } == 2)
+        let units = try db.read { try WorkUnit.order(Column("generation")).fetchAll($0) }
+        try #require(units.count == 2)
+        let (old, new) = (units[0], units[1])
+        #expect(old.generation == 0 && new.generation == 1)
+        #expect(new.unitKey == WorkUnitRules.unitKey(baseKey: old.baseKey, generation: 1) && new.baseKey == old.baseKey)
+        #expect(new.mergedAt == nil && new.prNumber == nil && old.mergedAt == merged)
+        #expect(new.kind == old.kind && new.branch == old.branch && new.githubRepo == old.githubRepo)
+        // 남은 쪽 · 옮긴 쪽을 DB 에서 다시 센다.
+        #expect(old.humanTurns == 1 && new.humanTurns == 1)
+        #expect(old.firstTs == ObsParser.epoch("2026-10-10T01:00:00.000Z")!)
+        #expect(old.lastTs == ObsParser.epoch("2026-10-10T01:00:05.000Z")!)
+        #expect(new.firstTs == ObsParser.epoch("2026-10-10T03:00:00.000Z")!)
+        #expect(new.lastTs == ObsParser.epoch("2026-10-10T03:10:00.000Z")!)
+        // Edit 계열 — 서브에이전트의 Write 도 센다(수집 규칙과 같게).
+        #expect(old.editCount == 1 && new.editCount == 2)
+        // 툴 · 토큰은 turn_id 로 턴을 따라간다.
+        let newTurn = try db.read { try #require(try ObsTurn.filter(Column("unit_id") == new.id).fetchOne($0)) }
+        #expect(newTurn.sidechainTokens > 0 && newTurn.sidechainTools == 1)
+        let movedTools = try db.read { try ObsTool.filter(Column("turn_id") == newTurn.id).fetchAll($0) }
+        #expect(Set(movedTools.map(\.toolUseId)) == ["new-e", "sub-e"])
+        #expect(try db.read { try ObsUsage.filter(Column("turn_id") == newTurn.id).fetchCount($0) } == 2)
+    }
+
+    @Test func 세대_나누기는_다시_수집해도_그대로() throws {
+        try backfillMixed()
+        let before = try db.read { try #require(try WorkUnit.fetchOne($0)) }
+        try db.write { try $0.execute(sql: "UPDATE work_unit SET merged_at = ?",
+                                      arguments: [ObsParser.epoch("2026-10-10T02:00:00.000Z")!]) }
+        try collect()
+        let split = try db.read { try WorkUnit.order(Column("generation")).fetchAll($0) }
+        try #require(split.count == 2)
+        // 실제로 나눈 한 번에 양쪽 +1.
+        #expect(split[0].sourceRevision == before.sourceRevision + 1)
+        #expect(split[1].sourceRevision == 1)
+        try collect()
+        try collect()
+        let again = try db.read { try WorkUnit.order(Column("generation")).fetchAll($0) }
+        #expect(again == split)
+    }
+
+    @Test func 옮길_턴이_없으면_아무것도_안_한다() throws {
+        try backfillMixed()
+        try db.write { try $0.execute(sql: "UPDATE work_unit SET merged_at = ?",
+                                      arguments: [ObsParser.epoch("2026-10-10T05:00:00.000Z")!]) }
+        let before = try unit()
+        try collect()
+        #expect(try db.read { try WorkUnit.fetchAll($0) } == [before])
+    }
+
+    @Test func 다음_세대도_머지됐으면_이어서_나눈다() throws {
+        try write("s1", [Fx.human("1", ts: "2026-10-10T01:00:00.000Z"), Fx.human("2", ts: "2026-10-10T03:00:00.000Z"),
+                         Fx.human("3", ts: "2026-10-10T05:00:00.000Z")])
+        try collect()
+        let gen0 = try unit()
+        // 이미 머지된 다음 세대가 있다(다른 경로로 생긴 단위) — 턴 2 는 거기로, 턴 3 은 그 다음 세대로.
+        try db.write { db in
+            try db.execute(sql: "UPDATE work_unit SET merged_at = ?", arguments: [ObsParser.epoch("2026-10-10T02:00:00.000Z")!])
+            var g1 = gen0
+            g1.id = "g1"; g1.generation = 1; g1.unitKey = WorkUnitRules.unitKey(baseKey: gen0.baseKey, generation: 1)
+            g1.mergedAt = ObsParser.epoch("2026-10-10T04:00:00.000Z")!
+            g1.humanTurns = 0; g1.sourceRevision = 0
+            try g1.insert(db)
+        }
+        try collect()
+        let units = try db.read { try WorkUnit.order(Column("generation")).fetchAll($0) }
+        #expect(units.map(\.generation) == [0, 1, 2])
+        #expect(units.map(\.humanTurns) == [1, 1, 1])
+        try #require(units.count == 3)
+        #expect(units[1].firstTs == ObsParser.epoch("2026-10-10T03:00:00.000Z")!)
+        #expect(units[2].firstTs == ObsParser.epoch("2026-10-10T05:00:00.000Z")!)
+    }
+
+    @Test func 나눠도_평가_실행과_지적은_원래_단위에() throws {
+        try backfillMixed()
+        let u = try unit()
+        try db.write { db in
+            try EvaluationRun(id: "r1", unitId: u.id, trigger: .manual, status: .done, createdAt: 1).insert(db)
+            try db.execute(sql: "UPDATE work_unit SET merged_at = ?", arguments: [ObsParser.epoch("2026-10-10T02:00:00.000Z")!])
+        }
+        try collect()
+        #expect(try db.read { try EvaluationRun.fetchOne($0, key: "r1") }?.unitId == u.id)
     }
 }
