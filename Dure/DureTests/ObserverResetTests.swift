@@ -49,7 +49,7 @@ struct ObserverResetTests {
     func counts() throws -> [String: Int] {
         try db.read { db in
             var r: [String: Int] = [:]
-            for t in ObserverReset.tables + ["observer_session"] {
+            for t in ObserverReset.tables + ["observer_session", "obs_permission"] {
                 r[t] = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM \(t)") ?? 0
             }
             return r
@@ -64,6 +64,7 @@ struct ObserverResetTests {
         let after = try counts()
         for t in ObserverReset.tables { #expect(after[t] == 0, "\(t)") }
         #expect(after["observer_session"] == 1)
+        #expect(after["obs_permission"] == 1)    // 훅이 채운 기록 — jsonl 로 못 복원하니 남긴다
     }
 
     @Test func units_폴더는_지우고_reference_는_남긴다() throws {

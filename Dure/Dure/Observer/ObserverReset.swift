@@ -13,7 +13,9 @@ nonisolated enum ObserverReset {
 
     /// 자식부터. 외래키가 cascade 라 부모만 지워도 되지만 순서를 지켜 두면 cascade 설정이 바뀌어도 안전하다.
     /// **`observer_session` 은 남긴다** — 지난 평가 · 묻기 세션이 다시 수집되어 작업으로 잡히면 안 된다.
-    static let tables = ["finding", "backlog_item", "evaluation_run", "obs_permission",
+    /// **`obs_permission` 도 남긴다** — Notification(permission_prompt) 훅이 채우는 표라 jsonl 로는 복원되지 않는다.
+    /// 턴과는 세션 + 시각으로 이어지므로 턴을 다시 모아도 그대로 맞는다.
+    static let tables = ["finding", "backlog_item", "evaluation_run",
                          "obs_tool", "obs_usage", "obs_turn", "work_unit", "obs_cursor"]
 
     static func wipe(in db: Database) throws {
