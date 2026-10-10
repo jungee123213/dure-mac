@@ -326,4 +326,23 @@ struct ObsCollectorTests {
         #expect(after.sourceRevision == before.sourceRevision)
         #expect(after.lastTs == before.lastTs)
     }
+
+    /// 리뷰 R2a 재검토 — 같은 턴의 답 줄이 청크 경계에 걸려도(chunk 1 = 줄마다 경계) 다시 읽기는 revision 을 올리지 않는다.
+    @Test func 청크_경계에_걸린_턴을_다시_읽어도_revision_은_그대로() throws {
+        var cfg = config
+        cfg.chunk = 1
+        let rest = [Fx.text("빌드할게", ts: "2026-10-10T01:00:01.000Z", messageId: "msg_1"),
+                    Fx.toolUse("t1", name: "Bash", input: ["command": "make"], ts: "2026-10-10T01:00:02.000Z"),
+                    Fx.text("끝", ts: "2026-10-10T01:00:04.000Z", messageId: "msg_2"),
+                    Fx.duration(5_000)]
+        let human = Fx.human("해줘", uuid: "u-1")
+        try write("s", [human] + rest)
+        try ObsCollector.collect(db: db, config: cfg, resolver: resolver)
+        let before = try unit()
+        try write("s", [Fx.toolResult("zz", ts: "2026-10-10T00:59:00.000Z"), human] + rest)
+        try ObsCollector.collect(db: db, config: cfg, resolver: resolver)
+        let after = try unit()
+        #expect(after.sourceRevision == before.sourceRevision)
+        #expect(after.lastTs == before.lastTs)
+    }
 }

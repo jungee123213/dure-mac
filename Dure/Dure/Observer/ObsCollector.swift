@@ -103,10 +103,13 @@ nonisolated enum ObsCollector {
                         }
                     }
                 }
-                try flushTouched(&state, db: db)
             }
             start += max(config.chunk, 1)
         }
+
+        // 청크마다 비교하면 경계에 걸린 턴의 중간 꼬리가 "원본" 이 되어 다시 읽기마다 두 번 올라간다 —
+        // 파일 전체를 읽은 뒤 처음과 끝만 한 번 비교한다. 중간에 죽으면 커서가 안 가므로 파일 전체를 다시 읽는다.
+        try db.write { db in try flushTouched(&state, db: db) }
 
         // 3. 커서
         try db.write { db in
