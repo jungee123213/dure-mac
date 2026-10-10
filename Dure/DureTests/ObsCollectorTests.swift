@@ -137,6 +137,22 @@ struct ObsCollectorTests {
         #expect(try db.read { try ObsTool.fetchCount($0) } == 1)
     }
 
+    /// 옛 형식 — 메인 기록 안에 isSidechain 줄이 섞여 있다(재구성은 옛 기록도 다시 읽는다).
+    /// 파일 단위로 못 박으면 둘째 턴의 서브에이전트 사용량이 첫 턴으로 간다 — 줄마다 직전 턴에 붙인다.
+    @Test func 메인_파일의_인라인_사이드체인은_줄마다_직전_턴에() throws {
+        try write("s1", [
+            Fx.human("하나", ts: "2026-10-10T01:00:00.000Z"),
+            Fx.text("조사", ts: "2026-10-10T01:10:02.000Z", messageId: "in1", sidechain: true),
+            Fx.human("둘", ts: "2026-10-10T02:00:00.000Z"),
+            Fx.text("조사2", ts: "2026-10-10T02:10:02.000Z", messageId: "in2", sidechain: true),
+        ])
+        try collect()
+        let turns = try db.read { try ObsTurn.order(Column("ts")).fetchAll($0) }
+        #expect(turns.count == 2)
+        #expect(turns[0].sidechainTokens == (2 + 8 + 30))
+        #expect(turns[1].sidechainTokens == (2 + 8 + 30))
+    }
+
     /// 리뷰 `subagentRemainsWithLaunchingTask` — 백그라운드 서브에이전트가 도는 사이 다음 턴이 시작돼도
     /// 서브에이전트 파일 하나는 처음 고른 부모 턴 하나에 붙는다.
     @Test func 서브에이전트는_띄운_작업에_남는다() throws {

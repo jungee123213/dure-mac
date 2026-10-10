@@ -324,6 +324,11 @@ nonisolated enum ObsCollector {
     /// ① 이 수집에서 이미 정했으면 그것 ② 이 파일 경로로 저장된 obs_tool 행의 turn_id(재시작 · 이어 읽기;
     /// obs_usage 에는 경로 열이 없다) ③ 파일 첫 줄(띄운 순간)의 시각으로 고른 턴 — 틱이 갈려도 같은 답이 나온다(첫 줄을 못 읽으면 사건 시각).
     private static func subagentParent(_ ctx: ObsParser.Context, _ state: inout FileState, db: Database) throws -> ObsTurn? {
+        // 옛 형식의 메인 기록 안 isSidechain 줄은 파일 단위로 못 박지 않는다 — 한 파일에 턴이 여럿이라
+        // 못 박으면 뒤 턴의 사용량이 첫 턴으로 간다. 줄마다 직전 턴에 붙인다(#27 이전 동작).
+        guard URL(fileURLWithPath: state.path).deletingLastPathComponent().lastPathComponent == "subagents" else {
+            return try parentTurn(ctx, ts: ctx.ts, db: db)
+        }
         if state.parentMissing { return nil }
         if let id = state.parentID, let t = try ObsTurn.fetchOne(db, key: id) { return t }
         let stored = try String.fetchOne(db, sql: """
