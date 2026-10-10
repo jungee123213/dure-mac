@@ -114,6 +114,17 @@ struct ObserverStoreTests {
         #expect(try db.read { try EvaluationRun.fetchOne($0) }?.status == .queued)
     }
 
+    /// 결함 B — 머지를 발견한 순간엔 자격이 없다가 수집으로 늦게 생긴 단위.
+    @Test func 수집_뒤_자격_재확인() async throws {
+        let mergedAt = Self.today - 100
+        try await db.write { try $0.execute(sql: "UPDATE work_unit SET merged_at = ?", arguments: [mergedAt]) }
+        let s = store(firstStart: Self.today - 1000)
+        await s.queueLateEligible()
+        #expect(try await db.read { try EvaluationRun.fetchOne($0) }?.trigger == .auto)
+        await s.queueLateEligible()
+        #expect(try await db.read { try EvaluationRun.fetchCount($0) } == 1)
+    }
+
     @Test func 백로그_상태와_피드백() throws {
         try db.write { db in
             try BacklogItem(key: "kkk", bucket: .dure, grp: "dure", kind: "x", title: "t", detail: "d", state: .open).insert(db)

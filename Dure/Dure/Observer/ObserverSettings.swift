@@ -63,6 +63,18 @@ nonisolated enum ObserverRules {
         return eligible(u, s)
     }
 
+    /// 머지를 발견한 순간이 아니라 **수집이 끝날 때마다** 다시 보는 규칙. 머지 발견 때는 자격이 없다가
+    /// 이후 수집으로 자격이 생긴 단위를 놓치지 않는다(`watchesMerge` 는 merged 단위를 빼서 다시 안 본다).
+    /// 조건은 `shouldAutoEnqueue` 를 그대로 쓰고, 자동 실행 이력(상태 무관)이 없을 때만 더한다 — 같은 규칙을 두 군데서 쓴다.
+    static func needsAutoEvaluation(_ u: WorkUnit, hasAutoRun: Bool, firstStart: Int, _ s: ObserverSettings) -> Bool {
+        !hasAutoRun && shouldAutoEnqueue(u, firstStart: firstStart, s)
+    }
+
+    /// 자동 대기 실행이 지금은 못 도는 상태(자동 평가 꺼짐 또는 하루 상한). `next` 와 UI 가 같은 판단을 쓴다.
+    static func autoQueuePaused(autoRunsToday: Int, _ s: ObserverSettings) -> Bool {
+        !s.autoEvaluate || autoRunsToday >= s.dailyCap
+    }
+
     static func eligible(_ u: WorkUnit, _ s: ObserverSettings) -> Bool {
         u.activity >= s.minTurns || u.editCount > 0
     }
@@ -77,7 +89,7 @@ nonisolated enum ObserverRules {
     static func next(queued: [EvaluationRun], autoRunsToday: Int, _ s: ObserverSettings) -> EvaluationRun? {
         let byAge: (EvaluationRun, EvaluationRun) -> Bool = { $0.createdAt < $1.createdAt }
         if let m = queued.filter({ $0.trigger == .manual }).sorted(by: byAge).first { return m }
-        guard s.autoEvaluate, autoRunsToday < s.dailyCap else { return nil }
+        guard !autoQueuePaused(autoRunsToday: autoRunsToday, s) else { return nil }
         return queued.filter { $0.trigger == .auto }.sorted(by: byAge).first
     }
 

@@ -104,6 +104,7 @@ final class ObserverStore {
             if case .failure(let e) = result { NSLog("[Dure] 감시자 수집 실패: \(e)") }
             self.collecting = false
             self.queueDueDayUnits()
+            await self.queueLateEligible()
             self.reload()
             self.pump()
             if self.collectAgain { self.collectAgain = false; self.collectSoon() }
@@ -164,6 +165,15 @@ final class ObserverStore {
         }
         reload()
         pump()
+    }
+
+    /// 수집이 끝날 때마다 — 머지를 발견한 뒤에야 자격이 생긴 단위를 자동 평가에 넣는다.
+    /// `await` 라 DB 쓰기는 메인을 막지 않는다.
+    func queueLateEligible() async {
+        guard settings.enabled, settings.autoEvaluate else { return }
+        let s = settings, t = now(), firstStart = ObserverSettings.firstStart(in: defaults, now: t)
+        do { _ = try await db.write { try EvaluationJob.enqueueLateEligible(firstStart: firstStart, s, now: t, in: $0) } }
+        catch { NSLog("[Dure] 감시자 자격 재확인 실패: \(error)") }
     }
 
     private func queueDueDayUnits() {
