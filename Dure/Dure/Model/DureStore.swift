@@ -291,7 +291,7 @@ final class DureStore {
             case ("Stop", .orchestrator(let ws)):
                 dispatcher.didStopOrchestrator(workspaceID: ws)
             case ("SessionStart", .repo(let r)):
-                dispatcher.didStart(repoID: r.id)
+                dispatcher.didStart(repoID: r.id, session: event.ccSessionID, source: event.source)
             case ("SessionStart", .orchestrator(let ws)):
                 dispatcher.didStartOrchestrator(workspaceID: ws)
             default: touchedDispatch = false
@@ -508,6 +508,13 @@ final class DureStore {
     func cancelDispatch(_ id: String) {
         guard let ws = selectedWorkspaceID else { return }
         _ = try? dispatcher.cancel(.id(id), workspaceID: ws)
+        dispatchVersion += 1
+    }
+
+    /// 이슈 #24 — 대시보드 ④ [완료로 닫기].
+    func closeDispatch(_ id: String) {
+        guard let ws = selectedWorkspaceID else { return }
+        _ = try? dispatcher.closeByHuman(id, workspaceID: ws)
         dispatchVersion += 1
     }
 

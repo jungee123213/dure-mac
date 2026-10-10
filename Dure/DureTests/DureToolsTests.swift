@@ -9,8 +9,13 @@ struct DureToolsTests {
         #expect(DureTools.names(for: .orchestrator) == ["dispatch", "workspace", "tasks", "cancel"])
     }
 
-    @Test func 레포_툴_둘() {
-        #expect(DureTools.names(for: .repo) == ["report", "ask_orchestrator"])
+    @Test func 레포_툴_셋() {
+        #expect(DureTools.names(for: .repo) == ["complete", "report", "ask_orchestrator"])
+    }
+
+    @Test func complete_는_summary_가_필수다() throws {
+        let d = try #require(DureTools.definitions(for: .repo).first { $0["name"] as? String == "complete" })
+        #expect((d["inputSchema"] as? [String: Any])?["required"] as? [String] == ["summary"])
     }
 
     @Test func 정의마다_설명과_스키마가_있다() {

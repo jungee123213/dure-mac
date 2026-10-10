@@ -4,8 +4,11 @@ import GRDB
 /// 단계 4 — 조율자가 레포 페인에 넘긴 일 하나. **이 표가 곧 큐이자 이력이다** (설계 4절).
 /// `queued` 행이 큐, 나머지가 대시보드 ④ 의 과거다. 메모리 큐를 따로 두지 않는 이유는
 /// 앱을 껐다 켜도 큐가 남아야 해서다.
+/// 이슈 #24 — `waiting` 은 전달된 배분의 턴이 `complete` 없이 끝난 것(사람에게 묻고 멈춤). 완료가 아니다 —
+/// 그 페인은 아직 그 일을 하는 중이라 다음 배분을 넣지 않고, 조율자에게 "끝남" 을 보내지 않는다.
+/// 상태는 TEXT 열이라 새 값에 마이그레이션이 필요 없다.
 enum DispatchState: String, Codable {
-    case queued, delivered, done, failed, cancelled
+    case queued, delivered, waiting, done, failed, cancelled
 }
 
 struct Dispatch: Codable, Identifiable, Hashable, FetchableRecord, PersistableRecord {
@@ -21,7 +24,7 @@ struct Dispatch: Codable, Identifiable, Hashable, FetchableRecord, PersistableRe
     var toolUseId: String?
     /// 어느 claude 세션(cc_session_id)이 받았나. 기동 프롬프트로 실었으면 "argv".
     var deliveredSession: String?
-    /// `Stop` 의 `last_assistant_message`.
+    /// `complete` 의 요약. 응답 대기 중에는 그 턴의 `last_assistant_message`(사람이 닫을 때 결과가 된다).
     var result: String?
     var failure: String?
     var attempts: Int = 0

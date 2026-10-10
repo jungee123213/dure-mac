@@ -33,6 +33,17 @@ struct DispatchRulesTests {
         #expect(!DispatchRules.acceptsHook(current: .done, sessionOfPane: nil, eventSession: "s1"))
     }
 
+    /// 이슈 #24 — 열린 배분이 있는 페인에 SessionStart 가 오면. 기동 프롬프트(argv)는 첫 세션이 이어받고,
+    /// 같은 세션의 압축 · 재개는 그대로, `/clear` 나 다른 세션이면 그 배분은 끝날 수 없다.
+    @Test func 세션_시작_때_열린_배분() {
+        #expect(DispatchRules.onSessionStart(deliveredSession: "argv", newSession: "cc", source: "startup") == .adopt)
+        #expect(DispatchRules.onSessionStart(deliveredSession: nil, newSession: "cc", source: "startup") == .adopt)
+        #expect(DispatchRules.onSessionStart(deliveredSession: "cc-a", newSession: "cc-a", source: "compact") == .keep)
+        #expect(DispatchRules.onSessionStart(deliveredSession: "cc-a", newSession: "cc-a", source: "resume") == .keep)
+        #expect(DispatchRules.onSessionStart(deliveredSession: "cc-a", newSession: "cc-a", source: "clear") == .fail)
+        #expect(DispatchRules.onSessionStart(deliveredSession: "cc-a", newSession: "cc-b", source: "startup") == .fail)
+    }
+
     @Test func 세_번_실패하면_포기한다() {
         #expect(!DispatchRules.givesUp(afterAttempts: 2))
         #expect(DispatchRules.givesUp(afterAttempts: 3))

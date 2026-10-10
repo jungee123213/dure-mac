@@ -82,37 +82,109 @@ struct DispatcherTests {
         #expect(w.d.initialPrompt(forRepo: "r2") == nil)
     }
 
-    @Test func 전달_뒤_첫_Stop_이_닫고_조율자에게_올린다() throws {
+    /// 이슈 #24 — 질문으로 멈춘 턴은 완료가 아니다. 응답 대기로 두고 조율자에게 "끝남" 을 보내지 않는다.
+    @Test func 질문으로_끝난_턴은_응답_대기이고_끝남을_안_보낸다() throws {
         let w = try World(); w.idle("r1", session: "cc-a"); w.orchIdle()
         _ = try w.d.enqueue(workspaceID: "w1", repo: w.repoA, title: nil, instruction: "x", toolUseId: nil)
         w.clock = 2_000
-        w.d.didStop(repoID: "r1", lastMessage: "다 했다")
+        w.d.didStop(repoID: "r1", lastMessage: "A 로 할까요, B 로 할까요?")
         let row = try w.db.read { try Dispatch.fetchOne($0) }
-        #expect(row?.state == .done && row?.result == "다 했다" && row?.doneAt == 2_000)
-        // 조율자가 놀고 있으니 바로 전달됐다
+        #expect(row?.state == .waiting && row?.result == "A 로 할까요, B 로 할까요?" && row?.doneAt == nil)
+        #expect(w.inbox.sent.filter { $0.session == "cc-orch" }.isEmpty)
+        #expect(w.d.outstandingDispatchID(repoID: "r1") == row?.id)     // 그 페인은 아직 그 일을 하는 중이다
+    }
+
+    /// 이슈 #24 — 완료는 레포 에이전트가 `complete` 로 선언한다.
+    @Test func complete_가_닫고_조율자에게_올린다() throws {
+        let w = try World(); w.idle("r1", session: "cc-a"); w.orchIdle()
+        _ = try w.d.enqueue(workspaceID: "w1", repo: w.repoA, title: nil, instruction: "x", toolUseId: nil)
+        w.d.didStop(repoID: "r1", lastMessage: "질문")              // 사람에게 묻고
+        w.clock = 3_000
+        #expect(try w.d.complete(repoID: "r1", summary: "다 했다") == 1)   // 답을 받은 뒤 끝냈다
+        let row = try w.db.read { try Dispatch.fetchOne($0) }
+        #expect(row?.state == .done && row?.result == "다 했다" && row?.doneAt == 3_000)
         let toOrch = w.inbox.sent.filter { $0.session == "cc-orch" }
         #expect(toOrch.count == 1)
         #expect(toOrch[0].content.hasPrefix("[두레] ‹android› 배분 #1 끝남 (") && toOrch[0].content.hasSuffix("\n다 했다"))
-        #expect(try w.db.read { try Relay.fetchOne($0) }?.state == .delivered)
-        // 그다음 사람의 턴은 보고하지 않는다
+        // 그 턴의 Stop · 이후 사람의 턴은 보고하지 않는다
+        w.d.didStopOrchestrator(workspaceID: "w1")
         w.d.didStop(repoID: "r1", lastMessage: "사람과 잡담")
         #expect(w.inbox.sent.filter { $0.session == "cc-orch" }.count == 1)
+        #expect(try w.d.complete(repoID: "r1", summary: "또") == nil)       // 열린 배분이 없다
     }
 
-    @Test func 전달_뒤에는_상태가_done_이어도_다음_것을_안_넣는다() throws {
+    @Test func 응답_대기_중에는_다음_배분을_안_넣고_complete_뒤에_넣는다() throws {
         let w = try World(); w.idle("r1", session: "cc-a")
         _ = try w.d.enqueue(workspaceID: "w1", repo: w.repoA, title: nil, instruction: "하나", toolUseId: nil)
         #expect(try w.d.enqueue(workspaceID: "w1", repo: w.repoA, title: nil, instruction: "둘", toolUseId: nil) == .queuedBusy(seq: 2))
         #expect(w.inbox.sent.count == 1)
+        w.d.didStop(repoID: "r1", lastMessage: "어떻게 할까요?")
+        #expect(w.inbox.sent.count == 1)     // 질문 중인 페인에 끼어들지 않는다
+        w.busy("r1")
+        _ = try w.d.complete(repoID: "r1", summary: "하나 끝")
+        #expect(w.inbox.sent.count == 1)     // complete 를 부른 턴이 아직 돈다
+        w.idle("r1", session: "cc-a")
         w.d.didStop(repoID: "r1", lastMessage: "하나 끝")
         #expect(w.inbox.sent.count == 2)     // 둘이 흘렀다 (조율자가 안 떠 있어 보고는 큐에)
         #expect(try w.db.read { try DispatchOps.queuedRelays(workspaceID: "w1", in: $0) }.count == 1)
     }
 
+    /// 이슈 #24 — 에이전트가 complete 를 잊었을 때 사람이 대시보드에서 닫는다. 마지막 답이 결과로 올라간다.
+    @Test func 사람이_완료로_닫는다() throws {
+        let w = try World(); w.idle("r1", session: "cc-a"); w.orchIdle()
+        _ = try w.d.enqueue(workspaceID: "w1", repo: w.repoA, title: nil, instruction: "x", toolUseId: nil)
+        w.d.didStop(repoID: "r1", lastMessage: "작업을 마쳤습니다")
+        let id = try #require(w.d.outstandingDispatchID(repoID: "r1"))
+        #expect(try w.d.closeByHuman(id, workspaceID: "w1") == true)
+        let row = try w.db.read { try Dispatch.fetchOne($0) }
+        #expect(row?.state == .done && row?.result == "작업을 마쳤습니다")
+        #expect(w.inbox.sent.last?.content.contains("배분 #1 끝남") == true)
+        #expect(w.inbox.sent.last?.content.hasSuffix("\n작업을 마쳤습니다") == true)
+        #expect(try w.d.closeByHuman(id, workspaceID: "w1") == false)        // 이미 닫힘
+    }
+
+    @Test func 다른_워크스페이스의_배분은_닫지_못한다() throws {
+        let w = try World(); w.idle("r1")
+        _ = try w.d.enqueue(workspaceID: "w1", repo: w.repoA, title: nil, instruction: "x", toolUseId: nil)
+        let id = try #require(w.d.outstandingDispatchID(repoID: "r1"))
+        #expect(try w.d.closeByHuman(id, workspaceID: "w2") == false)
+    }
+
+    /// 이슈 #24 — 기동 프롬프트(argv)로 실은 배분은 그 페인의 첫 세션이 이어받는다.
+    @Test func argv_로_실은_배분은_첫_세션이_이어받는다() throws {
+        let w = try World()
+        _ = try w.d.enqueue(workspaceID: "w1", repo: w.repoA, title: nil, instruction: "첫", toolUseId: nil)
+        _ = w.d.initialPrompt(forRepo: "r1")
+        w.idle("r1", session: "cc-new")
+        w.d.didStart(repoID: "r1", session: "cc-new", source: "startup")
+        let row = try w.db.read { try Dispatch.fetchOne($0) }
+        #expect(row?.state == .delivered && row?.deliveredSession == "cc-new")
+    }
+
+    /// 이슈 #24 — 열린 배분이 있는데 세션이 바뀌면(`/clear` · 다른 세션) 그 배분은 끝나지 않는다. 실패로 닫고 알린다.
+    @Test(arguments: [("cc-a", "clear"), ("cc-b", "startup"), ("cc-b", "resume")])
+    func 세션이_바뀌면_열린_배분을_실패로_닫는다(_ session: String, _ source: String) throws {
+        let w = try World(); w.idle("r1", session: "cc-a"); w.orchIdle()
+        _ = try w.d.enqueue(workspaceID: "w1", repo: w.repoA, title: nil, instruction: "x", toolUseId: nil)
+        w.idle("r1", session: session)
+        w.d.didStart(repoID: "r1", session: session, source: source)
+        let row = try w.db.read { try Dispatch.fetchOne($0) }
+        #expect(row?.state == .failed && row?.failure == "세션 재시작")
+        #expect(w.inbox.sent.last?.content.contains("배분 #1 실패") == true)
+    }
+
+    @Test(arguments: ["compact", "resume"])
+    func 같은_세션의_압축_재개는_배분을_유지한다(_ source: String) throws {
+        let w = try World(); w.idle("r1", session: "cc-a")
+        _ = try w.d.enqueue(workspaceID: "w1", repo: w.repoA, title: nil, instruction: "x", toolUseId: nil)
+        w.d.didStart(repoID: "r1", session: "cc-a", source: source)
+        #expect(try w.db.read { try Dispatch.fetchOne($0) }?.state == .delivered)
+    }
+
     @Test func 조율자가_안_떠_있으면_쌓았다가_시작_때_묶는다() throws {
         let w = try World(); w.idle("r1")
         _ = try w.d.enqueue(workspaceID: "w1", repo: w.repoA, title: nil, instruction: "a", toolUseId: nil)
-        w.d.didStop(repoID: "r1", lastMessage: "끝 a")
+        _ = try w.d.complete(repoID: "r1", summary: "끝 a")
         try w.d.relay(workspaceID: "w1", dispatchID: nil, repoID: "r2", kind: .question, body: "왜?")
         let bundle = try #require(w.d.initialPrompt(forOrchestrator: "w1"))
         #expect(bundle.contains("배분 #1 끝남") && bundle.contains("\n\n---\n\n") && bundle.contains("‹ios› 질문"))
@@ -220,6 +292,7 @@ struct DispatcherTests {
         let w = try World(); w.idle("r1")
         _ = try w.d.enqueue(workspaceID: "w1", repo: w.repoA, title: nil, instruction: "x", toolUseId: nil)
         let fresh = Dispatcher(db: w.db, inbox: w.inbox, lookups: w.d.lookups, now: { 5 })
+        w.d.didStop(repoID: "r1", lastMessage: "질문")         // 응답 대기도 앱이 꺼지면 영영 안 닫힌다
         fresh.recoverOnLaunch()
         #expect(try w.db.read { try Dispatch.fetchOne($0) }?.failure == "앱 종료")
         #expect(try w.db.read { try Relay.fetchOne($0) }?.kind == .failure)

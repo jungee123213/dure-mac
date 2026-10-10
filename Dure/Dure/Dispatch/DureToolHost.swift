@@ -63,7 +63,7 @@ enum DureToolHost {
                 var rows = d.history(workspaceID: ctx.workspaceID)
                 if let raw = call.arguments["state"], !raw.isEmpty {
                     guard let s = DispatchState(rawValue: raw) else {
-                        return .init(text: "state 는 queued | delivered | done | failed | cancelled 중 하나다.", isError: true)
+                        return .init(text: "state 는 queued | delivered | waiting | done | failed | cancelled 중 하나다.", isError: true)
                     }
                     rows = rows.filter { $0.state == s }
                 }
@@ -74,13 +74,22 @@ enum DureToolHost {
                 var lines = rows.prefix(tasksLimit).map { r -> String in
                     let first = (r.result ?? "").split(separator: "\n").first.map(String.init) ?? ""
                     let head = r.title ?? r.instruction.split(separator: "\n").first.map(String.init) ?? ""
-                    return "- #\(r.seq) · \(names[r.repoId] ?? "?") · \(r.state.rawValue) · \(head)" + (first.isEmpty ? "" : " → \(first)")
+                    // 응답 대기는 레포가 사람 답을 기다리는 것 — 조율자가 "끝났다" 로 읽지 않게 풀어 쓴다(이슈 #24).
+                    let state = r.state == .waiting ? "waiting(응답 대기)" : r.state.rawValue
+                    return "- #\(r.seq) · \(names[r.repoId] ?? "?") · \(state) · \(head)" + (first.isEmpty ? "" : " → \(first)")
                 }
                 if extra > 0 { lines.append("(… 외 \(extra)건 — state 로 거르거나 대시보드에서)") }
                 return .init(text: lines.joined(separator: "\n"))
             case "cancel":
                 let ok = try d.cancel(DispatchRules.cancelRef(call.arguments["id"] ?? ""), workspaceID: ctx.workspaceID)
                 return ok ? .init(text: "취소했다.") : .init(text: "큐에 있는 배분이 아니다(이미 전달됐거나 없다).", isError: true)
+            case "complete":
+                let summary = (call.arguments["summary"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !summary.isEmpty else { return .init(text: "summary 가 비었다.", isError: true) }
+                guard let repoID = ctx.repoID, let seq = try d.complete(repoID: repoID, summary: summary) else {
+                    return .init(text: "닫을 배분이 없다(두레 배분으로 받은 일이 아니거나 이미 닫혔다).", isError: true)
+                }
+                return .init(text: "배분 #\(seq) 을 완료로 닫고 조율자에게 올렸다.")
             case "report", "ask_orchestrator":
                 let key = call.name == "report" ? "summary" : "question"
                 let body = (call.arguments[key] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)

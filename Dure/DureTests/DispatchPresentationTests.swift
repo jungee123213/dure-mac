@@ -19,6 +19,7 @@ struct DispatchPresentationTests {
         #expect(DispatchPresentation.stateLabel(.done) == "완료")
         #expect(DispatchPresentation.stateLabel(.failed) == "실패")
         #expect(DispatchPresentation.stateLabel(.cancelled) == "취소")
+        #expect(DispatchPresentation.stateLabel(.waiting) == "응답 대기")
     }
 
     @Test func 한_줄은_번호_레포_상태_시각() {

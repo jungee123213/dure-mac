@@ -82,6 +82,10 @@ struct DispatchHistoryView: View {
                 if d.state == .queued {
                     Button("취소") { store.cancelDispatch(d.id) }.font(.caption).buttonStyle(.borderless)
                 }
+                // 이슈 #24 — 에이전트가 complete 를 잊었을 때. 마지막 답을 결과로 조율자에게 올린다.
+                if d.state == .delivered || d.state == .waiting {
+                    Button("완료로 닫기") { store.closeDispatch(d.id) }.font(.caption).buttonStyle(.borderless)
+                }
                 Button(expanded.contains(d.id) ? "접기" : "펼치기") {
                     if expanded.contains(d.id) { expanded.remove(d.id) } else { expanded.insert(d.id) }
                 }
@@ -112,6 +116,7 @@ struct DispatchHistoryView: View {
         switch s {
         case .queued: .orange
         case .delivered: .blue
+        case .waiting: .purple
         case .done: .green
         case .failed: .red
         case .cancelled: .secondary
