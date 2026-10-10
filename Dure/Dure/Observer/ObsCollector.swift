@@ -186,13 +186,24 @@ nonisolated enum ObsCollector {
             try db.execute(sql: """
                 UPDATE obs_tool SET result_ts = ?, is_error = ?, error_head = ?, denied = ?
                 WHERE transcript_path = ? AND tool_use_id = ?
-                """, arguments: [ts, isError, errorHead, denied, state.path, toolUseId])
+                  AND (result_ts IS NOT ? OR is_error IS NOT ? OR error_head IS NOT ? OR denied IS NOT ?)
+                """, arguments: [ts, isError, errorHead, denied, state.path, toolUseId, ts, isError, errorHead, denied])
+            // 평가는 결과(실패 · 거부)를 근거로 삼는다 — 값이 실제로 바뀐 때만 단위를 "바뀜" 으로 표시한다.
+            // 같은 줄을 다시 읽으면 바뀐 게 없어 올리지 않는다(멱등). 서브에이전트 행도 turn_id 로 같은 길을 탄다.
+            if db.changesCount > 0,
+               let unitId = try String.fetchOne(db, sql: """
+                   SELECT t.unit_id FROM obs_tool o JOIN obs_turn t ON t.id = o.turn_id
+                   WHERE o.transcript_path = ? AND o.tool_use_id = ?
+                   """, arguments: [state.path, toolUseId]) {
+                try bump(unitId, ts: ts, edit: false, db: db)
+            }
             return .none
 
         case let .assistant(ctx, text, messageId, model, usage):
             if skip(ctx) { return .none }
             let target = ctx.isSidechain ? try parentTurn(ctx, db: db) : try currentTurn(&state, db: db)
             guard var turn = target else { return .none }
+            let original = turn
             var counted = false
             if let messageId {
                 try ObsUsage(ccSessionId: ctx.sessionId, messageId: messageId, turnId: turn.id, sidechain: ctx.isSidechain)
@@ -214,23 +225,30 @@ nonisolated enum ObsCollector {
                 if let model { turn.model = model }
             }
             try turn.update(db)
-            if counted { try bump(turn.unitId, ts: ctx.ts, edit: false, db: db) }
+            // 토큰을 새로 셌거나 답 꼬리 · 모델이 바뀌었으면 평가 입력이 달라진 것이다.
+            if counted || turn != original { try bump(turn.unitId, ts: ctx.ts, edit: false, db: db) }
             return .none
 
         case let .turnDuration(ms):
             guard var turn = try currentTurn(&state, db: db) else { return .none }
+            let original = turn
             turn.durationMs = ms
             try turn.update(db)
+            if turn != original { try bump(turn.unitId, ts: turn.ts, edit: false, db: db) }
             return .none
         case .interrupted:
             guard var turn = try currentTurn(&state, db: db) else { return .none }
+            let original = turn
             turn.interrupted = true
             try turn.update(db)
+            if turn != original { try bump(turn.unitId, ts: turn.ts, edit: false, db: db) }
             return .none
         case .compacted:
             guard var turn = try currentTurn(&state, db: db) else { return .none }
+            let original = turn
             turn.compacted = true
             try turn.update(db)
+            if turn != original { try bump(turn.unitId, ts: turn.ts, edit: false, db: db) }
             return .none
         case .unknownType:
             return .unknown

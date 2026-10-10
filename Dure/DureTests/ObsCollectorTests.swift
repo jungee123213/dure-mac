@@ -246,4 +246,64 @@ struct ObsCollectorTests {
         #expect(try unit().editCount == 1)
         #expect(try db.read { try ObsTool.filter(Column("tool_use_id") == "st1").fetchCount($0) } == 1)
     }
+
+    // MARK: - 평가 입력이 바뀌면 revision · last_ts (이슈 #27 Task 2)
+
+    @Test func 툴_결과가_들어오면_평가_뒤_변경이_된다() throws {
+        try write("s", [Fx.human("빌드해줘"),
+                        Fx.toolUse("t1", name: "Bash", input: ["command": "xcodebuild build"], ts: "2026-10-10T01:00:02.000Z")])
+        try collect()
+        let before = try unit()
+        try write("s", [Fx.toolResult("t1", isError: true, content: "error: build failed", ts: "2026-10-10T01:00:40.000Z")], append: true)
+        try collect()
+        let after = try unit()
+        #expect(after.sourceRevision > before.sourceRevision)
+        #expect(after.lastTs > before.lastTs)
+    }
+
+    @Test func 같은_결과를_다시_읽어도_revision_은_그대로() throws {
+        let lines = [Fx.human("빌드해줘", uuid: "u-1"),
+                     Fx.toolUse("t1", name: "Bash", input: ["command": "xcodebuild build"], ts: "2026-10-10T01:00:02.000Z"),
+                     Fx.toolResult("t1", isError: true, content: "error: build failed", ts: "2026-10-10T01:00:40.000Z"),
+                     Fx.duration(41_000)]
+        try write("s", lines)
+        try collect()
+        let before = try unit()
+        // 첫 줄이 달라져 지문이 바뀌면 처음부터 다시 읽는다.
+        try write("s", [Fx.toolResult("zz", ts: "2026-10-10T00:59:00.000Z")] + lines)
+        try collect()
+        let after = try unit()
+        #expect(after.sourceRevision == before.sourceRevision)
+        #expect(after.lastTs == before.lastTs)
+    }
+
+    @Test func 서브에이전트_툴_결과도_revision_을_올린다() throws {
+        try write("s1", [Fx.human("고쳐", ts: "2026-10-10T01:00:00.000Z")])
+        try write("s1/subagents/agent-abc", [
+            Fx.toolUse("st1", name: "Bash", input: ["command": "make"], ts: "2026-10-10T01:10:00.000Z", sidechain: true, messageId: "msg_S1"),
+        ])
+        try collect()
+        let before = try unit()
+        try write("s1/subagents/agent-abc", [Fx.toolResult("st1", isError: true, ts: "2026-10-10T01:11:00.000Z", sidechain: true)], append: true)
+        try collect()
+        let after = try unit()
+        #expect(after.sourceRevision > before.sourceRevision)
+        #expect(after.lastTs > before.lastTs)
+    }
+
+    @Test func 턴_길이와_중단과_답_갱신도_revision_을_올린다() throws {
+        try write("s", [Fx.human("해줘"), Fx.text("일단", messageId: "msg_A")])
+        try collect()
+        var rev = try unit().sourceRevision
+        try write("s", [Fx.duration(5_000)], append: true)
+        try collect()
+        #expect(try unit().sourceRevision > rev); rev = try unit().sourceRevision
+        try write("s", [Fx.interrupted()], append: true)
+        try collect()
+        #expect(try unit().sourceRevision > rev); rev = try unit().sourceRevision
+        // 같은 message 의 추가 텍스트 — 토큰은 이미 셌지만 답 꼬리가 바뀐다.
+        try write("s", [Fx.text("마무리", messageId: "msg_A")], append: true)
+        try collect()
+        #expect(try unit().sourceRevision > rev)
+    }
 }
