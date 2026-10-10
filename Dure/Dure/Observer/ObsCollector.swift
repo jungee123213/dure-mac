@@ -28,6 +28,12 @@ nonisolated enum ObsCollector {
     /// 틱 수집과 평가 직전 flush 가 겹치면 같은 파일 커서가 엇갈린다 — 한 번에 하나.
     private static let gate = NSLock()
 
+    /// 수집과 겹치면 안 되는 일(데이터 재구성)이 같은 잠금을 잡고 돈다 — 반쯤 지워진 표를 수집이 이어 쓰지 않게.
+    static func exclusively<T>(_ body: () throws -> T) rethrows -> T {
+        gate.lock(); defer { gate.unlock() }
+        return try body()
+    }
+
     static func jsonlFiles(in dir: URL) -> [URL] {
         let fm = FileManager.default
         func list(_ u: URL) -> [URL] { (try? fm.contentsOfDirectory(at: u, includingPropertiesForKeys: nil)) ?? [] }
