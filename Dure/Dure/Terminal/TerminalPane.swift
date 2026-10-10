@@ -11,8 +11,16 @@ struct TerminalPane: NSViewRepresentable {
     var isActive: Bool = true
     /// PTY 가 죽으면 부른다. F4 의 `dead` 는 훅이 아니라 이 경로로 들어온다.
     var onExit: (Int32?) -> Void = { _ in }
+    /// SwiftUI 가 이 뷰를 걷어낼 때 프로세스도 끝낼까. 레포 · 조율자 페인은 **끄지 않는다**(기본값) —
+    /// 층을 바꿔도 페인이 살아 있어야 하고(D-27) 종료는 사람이 claude 안에서 한다. 감시자 묻기 페인만 켠다:
+    /// 닫기 = 대화 끝이고, 안 끄면 보이지 않는 claude 가 남는다.
+    var terminateOnDismantle = false
 
-    func makeCoordinator() -> Coordinator { Coordinator(onExit: onExit) }
+    func makeCoordinator() -> Coordinator { Coordinator(onExit: onExit, terminateOnDismantle: terminateOnDismantle) }
+
+    static func dismantleNSView(_ nsView: LocalProcessTerminalView, coordinator: Coordinator) {
+        if coordinator.terminateOnDismantle { nsView.terminate() }
+    }
 
     func makeNSView(context: Context) -> LocalProcessTerminalView {
         let view = LocalProcessTerminalView(frame: .init(x: 0, y: 0, width: 800, height: 240))
@@ -56,7 +64,11 @@ struct TerminalPane: NSViewRepresentable {
     @MainActor
     final class Coordinator: NSObject, LocalProcessTerminalViewDelegate {
         private let onExit: (Int32?) -> Void
-        init(onExit: @escaping (Int32?) -> Void) { self.onExit = onExit }
+        let terminateOnDismantle: Bool
+        init(onExit: @escaping (Int32?) -> Void, terminateOnDismantle: Bool) {
+            self.onExit = onExit
+            self.terminateOnDismantle = terminateOnDismantle
+        }
 
         func sizeChanged(source: LocalProcessTerminalView, newCols: Int, newRows: Int) {}
         func setTerminalTitle(source: LocalProcessTerminalView, title: String) {}
