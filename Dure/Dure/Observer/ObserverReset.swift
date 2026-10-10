@@ -35,7 +35,10 @@ nonisolated enum ObserverReset {
             }
             if refused { return .refusedRunning }
             let fm = FileManager.default
-            if fm.fileExists(atPath: dirs.units.path) { try fm.removeItem(at: dirs.units) }
+            // DB 는 이미 커밋됐다 — 폴더를 못 지웠다고 재구성 전체를 실패로 알리지 않는다(남은 폴더는 무해한 찌꺼기).
+            if fm.fileExists(atPath: dirs.units.path) {
+                do { try fm.removeItem(at: dirs.units) } catch { NSLog("[Dure] 감시자 units 폴더 삭제 실패: \(error)") }
+            }
             return .done
         }
     }

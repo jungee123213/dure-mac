@@ -43,6 +43,12 @@ nonisolated struct ObserverSettings: Equatable, Sendable {
         d.set(now, forKey: firstStartKey)
         return now
     }
+
+    /// 데이터 재구성 성공 뒤 — 평가 기록(= "이미 자동 평가했다" 는 이력)이 같이 지워졌으므로,
+    /// 첫 시작을 지금으로 당겨야 지난 머지 · 날짜 단위가 자동 평가 큐로 다시 쏟아지지 않는다.
+    static func resetFirstStart(in d: UserDefaults, now: Int) {
+        d.set(now, forKey: firstStartKey)
+    }
 }
 
 /// 평가 큐의 판단. 스펙 v2 3-2 · 3-3. 순수 함수.
@@ -79,10 +85,11 @@ nonisolated enum ObserverRules {
         u.activity >= s.minTurns || u.editCount > 0
     }
 
-    static func dayUnitDue(_ u: WorkUnit, today: String, _ s: ObserverSettings, hasRun: Bool) -> Bool {
+    /// `firstStartDay` 이전 날짜의 단위는 자동 평가하지 않는다 — 첫 수집 백필 · 재구성 뒤 옛 날들이 상한을 먹지 않게.
+    static func dayUnitDue(_ u: WorkUnit, today: String, firstStartDay: String, _ s: ObserverSettings, hasRun: Bool) -> Bool {
         guard s.enabled, s.autoEvaluate, s.autoEvaluateDayUnits, !hasRun,
               u.kind == .defaultBranch || u.kind == .noGit, let day = u.day else { return false }
-        return day < today && eligible(u, s)
+        return day < today && day >= firstStartDay && eligible(u, s)
     }
 
     /// 사람이 누른 것 먼저(오래된 순), 자동은 켜져 있고 상한 안일 때만.

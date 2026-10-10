@@ -114,7 +114,7 @@ final class ObserverStore {
     }
 
     /// 감시자 데이터를 비우고 jsonl 에서 다시 모은다. 평가 중에는 하지 않는다(실행 중인 `claude -p` 의 근거가 사라진다).
-    /// 첫 시작 시각(UserDefaults)은 건드리지 않는다 — 다시 모으며 과거 머지가 자동 평가 큐로 쏟아지지 않게.
+    /// 성공하면 첫 시작 시각(UserDefaults)을 지금으로 당긴다 — 평가 기록이 지워져 과거 머지가 자동 평가 큐로 쏟아지는 걸 막는다.
     func resetAll() async -> Result<ObserverReset.Outcome, Error> {
         guard !resetting, runningRunID == nil else { return .success(.refusedRunning) }
         resetting = true
@@ -124,6 +124,8 @@ final class ObserverStore {
         }.value
         resetting = false
         chat = nil
+        // 성공했을 때만 — 거부 · 실패는 평가 이력이 그대로라 첫 시작을 당길 이유가 없다.
+        if case .success(.done) = result { ObserverSettings.resetFirstStart(in: defaults, now: now()) }
         reload()
         if case .failure(let e) = result { NSLog("[Dure] 감시자 재구성 실패: \(e)") }
         collectSoon()
@@ -198,10 +200,11 @@ final class ObserverStore {
     private func queueDueDayUnits() {
         let s = settings, t = now(), today = WorkUnitRules.day(t, timeZone: .current)
         guard s.autoEvaluateDayUnits else { return }
+        let firstStartDay = WorkUnitRules.day(ObserverSettings.firstStart(in: defaults, now: t), timeZone: .current)
         try? db.write { db in
             for u in try WorkUnit.filter([UnitKind.defaultBranch.rawValue, UnitKind.noGit.rawValue].contains(Column("kind"))).fetchAll(db) {
                 let hasRun = try EvaluationRun.filter(Column("unit_id") == u.id).fetchCount(db) > 0
-                if ObserverRules.dayUnitDue(u, today: today, s, hasRun: hasRun) {
+                if ObserverRules.dayUnitDue(u, today: today, firstStartDay: firstStartDay, s, hasRun: hasRun) {
                     _ = try EvaluationJob.enqueue(unitID: u.id, trigger: .auto, now: t, in: db)
                 }
             }

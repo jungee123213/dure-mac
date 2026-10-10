@@ -98,11 +98,46 @@ struct ObserverResetTests {
         d.set(123, forKey: ObserverSettings.firstStartKey)
         let s = ObserverStore(db: db, runner: FakeRunner { _ in FakeRunner.ok("") }, resolver: resolver, defaults: d, dirs: dirs)
         s.settings.enabled = false          // 재수집 틱이 테스트를 흔들지 않게
+        s.now = { 5000 }
         let r = await s.resetAll()
         #expect((try? r.get()) == .done)
-        #expect(d.integer(forKey: ObserverSettings.firstStartKey) == 123)
+        #expect(d.integer(forKey: ObserverSettings.firstStartKey) == 5000)    // 평가 이력이 지워졌으니 첫 시작을 당긴다
         let runs = try await db.read { try EvaluationRun.fetchCount($0) }
         #expect(runs == 0)
         #expect(!s.resetting)
+    }
+
+    @MainActor
+    @Test func 거부되면_첫_시작_시각을_바꾸지_않는다() async throws {
+        try seedAll()
+        try await db.write { try $0.execute(sql: "UPDATE evaluation_run SET status = 'running'") }
+        let d = UserDefaults(suiteName: "obsreset-\(UUID().uuidString)")!
+        d.set(123, forKey: ObserverSettings.firstStartKey)
+        let s = ObserverStore(db: db, runner: FakeRunner { _ in FakeRunner.ok("") }, resolver: resolver, defaults: d, dirs: dirs)
+        s.settings.enabled = false
+        s.now = { 5000 }
+        let r = await s.resetAll()
+        #expect((try? r.get()) == .refusedRunning)
+        #expect(d.integer(forKey: ObserverSettings.firstStartKey) == 123)
+    }
+
+    /// 재구성 뒤 옛 머지(옛 첫 시작 이후였던)는 자동 평가 큐에 다시 들어가지 않는다.
+    @MainActor
+    @Test func 재구성_뒤_지난_머지는_자동_큐에_들어가지_않는다() async throws {
+        try collect()
+        let d = UserDefaults(suiteName: "obsreset-\(UUID().uuidString)")!
+        d.set(1000, forKey: ObserverSettings.firstStartKey)
+        let s = ObserverStore(db: db, runner: FakeRunner { _ in FakeRunner.ok("") }, resolver: resolver, defaults: d, dirs: dirs)
+        s.settings.enabled = false
+        s.now = { 5000 }
+        _ = await s.resetAll()
+        try collect()
+        // 머지는 옛 첫 시작(1000) 이후, 재구성(5000) 이전
+        try await db.write { try $0.execute(sql: "UPDATE work_unit SET merged_at = 3000, edit_count = 5") }
+        s.settings.enabled = true
+        s.settings.autoEvaluate = true
+        await s.queueLateEligible()
+        let runs = try await db.read { try EvaluationRun.fetchCount($0) }
+        #expect(runs == 0)
     }
 }

@@ -31,7 +31,7 @@ struct ObserverSettingsSheet: View {
             Button("모두 지우고 다시 수집", role: .destructive) {
                 Task {
                     switch await observer.resetAll() {
-                    case .success(.done): resetMessage = "다시 수집을 시작했습니다."
+                    case .success(.done): resetMessage = observer.settings.enabled ? "다시 수집을 시작했습니다." : "지웠습니다. 감시자를 켜면 다시 수집합니다."
                     case .success(.refusedRunning): resetMessage = "평가가 돌고 있어 하지 못했습니다."
                     case .failure(let e): resetMessage = "실패: \(e.localizedDescription)"
                     }
@@ -39,7 +39,7 @@ struct ObserverSettingsSheet: View {
             }
             Button("취소", role: .cancel) {}
         } message: {
-            Text("평가 기록 · 백로그 · 피드백도 모두 지워집니다. 기준 문서와 설정은 그대로입니다.")
+            Text("평가 기록 · 백로그 · 피드백도 모두 지워집니다. 지금까지의 작업은 자동 평가하지 않습니다([평가] 로 직접). 기준 문서와 설정은 그대로입니다.")
         }
         .padding(16).frame(width: 520)
         .onAppear { excludesText = observer.settings.excludes.joined(separator: ", ") }

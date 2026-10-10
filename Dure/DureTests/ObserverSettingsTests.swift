@@ -86,11 +86,14 @@ struct ObserverSettingsTests {
     @Test func 날짜_단위는_설정을_켜야_하루가_지나면() {
         var s = ObserverSettings()
         let u = Self.unit(.defaultBranch, human: 3, day: "2026-10-09")
-        #expect(!ObserverRules.dayUnitDue(u, today: "2026-10-10", s, hasRun: false))
+        #expect(!ObserverRules.dayUnitDue(u, today: "2026-10-10", firstStartDay: "2026-10-01", s, hasRun: false))
         s.autoEvaluateDayUnits = true
-        #expect(ObserverRules.dayUnitDue(u, today: "2026-10-10", s, hasRun: false))
-        #expect(!ObserverRules.dayUnitDue(u, today: "2026-10-10", s, hasRun: true))
-        #expect(!ObserverRules.dayUnitDue(Self.unit(.defaultBranch, human: 3, day: "2026-10-10"), today: "2026-10-10", s, hasRun: false))
+        #expect(ObserverRules.dayUnitDue(u, today: "2026-10-10", firstStartDay: "2026-10-01", s, hasRun: false))
+        #expect(!ObserverRules.dayUnitDue(u, today: "2026-10-10", firstStartDay: "2026-10-01", s, hasRun: true))
+        // 첫 시작 날짜 이전의 날은 자동 평가하지 않는다
+        #expect(!ObserverRules.dayUnitDue(u, today: "2026-10-10", firstStartDay: "2026-10-10", s, hasRun: false))
+        #expect(ObserverRules.dayUnitDue(u, today: "2026-10-10", firstStartDay: "2026-10-09", s, hasRun: false))
+        #expect(!ObserverRules.dayUnitDue(Self.unit(.defaultBranch, human: 3, day: "2026-10-10"), today: "2026-10-10", firstStartDay: "2026-10-01", s, hasRun: false))
     }
 
     static func run(_ t: RunTrigger, created: Int) -> EvaluationRun {
