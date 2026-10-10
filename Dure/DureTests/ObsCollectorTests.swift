@@ -137,6 +137,52 @@ struct ObsCollectorTests {
         #expect(try db.read { try ObsTool.fetchCount($0) } == 1)
     }
 
+    /// 리뷰 `subagentRemainsWithLaunchingTask` — 백그라운드 서브에이전트가 도는 사이 다음 턴이 시작돼도
+    /// 서브에이전트 파일 하나는 처음 고른 부모 턴 하나에 붙는다.
+    @Test func 서브에이전트는_띄운_작업에_남는다() throws {
+        try write("s1", [Fx.human("조사해", ts: "2026-10-10T01:00:00.000Z"), Fx.human("다음", ts: "2026-10-10T02:00:00.000Z")])
+        try write("s1/subagents/agent-abc", [
+            Fx.toolUse("c1", name: "Read", input: ["file_path": "/r/ios/A.swift"], ts: "2026-10-10T01:59:00.000Z",
+                       sidechain: true, messageId: "child1"),
+            Fx.text("계속", ts: "2026-10-10T02:01:00.000Z", messageId: "child2", sidechain: true),
+        ])
+        try collect()
+        var turns = try db.read { try ObsTurn.order(Column("ts")).fetchAll($0) }
+        #expect(turns[0].sidechainTokens == (10 + 5 + 20) + (2 + 8 + 30))
+        #expect(turns[1].sidechainTokens == 0)
+        // 재시작(새 수집 상태)으로 같은 파일에 줄이 더 붙어도 같은 부모로 간다.
+        try write("s1/subagents/agent-abc", [
+            Fx.text("또", ts: "2026-10-10T02:05:00.000Z", messageId: "child3", sidechain: true),
+        ], append: true)
+        try collect()
+        turns = try db.read { try ObsTurn.order(Column("ts")).fetchAll($0) }
+        #expect(turns[0].sidechainTokens == (10 + 5 + 20) + 2 * (2 + 8 + 30))
+        #expect(turns[1].sidechainTokens == 0)
+    }
+
+    /// 부모 세션 파일이 아직 수집 전이면 서브에이전트 커서를 올리지 않는다 — 다음 수집에서 다시 읽는다.
+    @Test func 부모가_아직_없으면_서브에이전트_커서를_올리지_않는다() throws {
+        try write("s1", [Fx.human("조사해", ts: "2026-10-10T01:00:00.000Z")])
+        let sub = try write("s1/subagents/agent-abc", [
+            Fx.text("찾았다", ts: "2026-10-10T01:10:02.000Z", messageId: "m1", sidechain: true),
+        ])
+        let r = try ObsCollector.ingest(file: sub, db: db, config: config, resolver: resolver)
+        #expect(r.filesRead == 0)
+        #expect(try db.read { try ObsCursor.fetchOne($0, key: sub.path) } == nil)
+        try collect()
+        #expect(try turn().sidechainTokens > 0)
+    }
+
+    /// 부모 파일이 아예 없으면(지워짐) 영원히 붙잡지 않고 예전처럼 건너뛰며 커서를 올린다.
+    @Test func 부모_파일이_없으면_건너뛰고_커서를_올린다() throws {
+        try write("gone/subagents/agent-abc", [
+            Fx.text("찾았다", ts: "2026-10-10T01:10:02.000Z", messageId: "m1", sidechain: true),
+        ])
+        try collect()
+        #expect(try db.read { try ObsCursor.fetchCount($0) } == 1)   // 경로 표기(/var ↔ /private/var)와 무관하게 센다
+        #expect(try db.read { try ObsUsage.fetchCount($0) } == 0)
+    }
+
     @Test func 바뀌지_않은_파일은_다시_읽지_않는다() throws {
         try write("s", [Fx.human("a")])
         #expect(try collect().filesRead == 1)

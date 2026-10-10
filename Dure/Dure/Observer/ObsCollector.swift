@@ -107,6 +107,10 @@ nonisolated enum ObsCollector {
             start += max(config.chunk, 1)
         }
 
+        // 부모 턴을 못 찾은 서브에이전트 파일: 부모 세션 파일이 아직 수집 전이면 커서를 올리지 않고 다음 수집에서 다시 읽는다.
+        // 부모 파일이 아예 없거나 이미 수집됐는데 턴이 없으면(지워짐 · 제외된 세션) 영원히 붙잡지 않고 줄을 건너뛴다.
+        if state.parentMissing, try db.read({ try parentFilePending(path, db: $0) }) { return Report() }
+
         // 청크마다 비교하면 경계에 걸린 턴의 중간 꼬리가 "원본" 이 되어 다시 읽기마다 두 번 올라간다 —
         // 파일 전체를 읽은 뒤 처음과 끝만 한 번 비교한다. 중간에 죽으면 커서가 안 가므로 파일 전체를 다시 읽는다.
         try db.write { db in try flushTouched(&state, db: db) }
@@ -128,7 +132,12 @@ nonisolated enum ObsCollector {
         let path: String
         var turnID: String?
         var looked = false
-        /// 이 청크에서 처음 건드린 턴의 갱신 전 모습과 본 가장 늦은 시각. 청크 끝에서 최종값과 비교한다.
+        /// 서브에이전트 파일 하나는 부모 턴 하나 — 처음 정한 부모를 파일 안에서 계속 쓴다.
+        /// 다음 턴이 시작된 뒤에 도착한 줄이 다음 작업으로 새는 것을 막는다.
+        var parentID: String?
+        /// 부모를 못 찾았다. 이후 줄도 같은 파일이므로 시도하지 않고 건너뛴다(중간에 다른 부모로 갈라지지 않게).
+        var parentMissing = false
+        /// 이 파일에서 처음 건드린 턴의 갱신 전 모습과 본 가장 늦은 시각. 파일 끝에서 최종값과 비교한다.
         var touched: [String: (before: TurnSig, ts: Int)] = [:]
     }
 
@@ -141,7 +150,7 @@ nonisolated enum ObsCollector {
     }
 
     /// 줄마다 비교하면 처음부터 다시 읽을 때 답 꼬리가 "끝" → "빌드할게" → "끝" 으로 오가며 매번 바뀐 것으로 보인다.
-    /// 청크 단위로 처음과 끝만 비교해, 다시 읽기는 같은 최종값이라 올리지 않고 진짜 새 줄은 한 번만 올린다.
+    /// 파일 단위로 처음과 끝만 비교해, 다시 읽기는 같은 최종값이라 올리지 않고 진짜 새 줄은 한 번만 올린다.
     private static func touch(_ turn: ObsTurn, ts: Int, _ state: inout FileState) {
         let prior = state.touched[turn.id]
         state.touched[turn.id] = (prior?.before ?? TurnSig(turn), max(prior?.ts ?? ts, ts))
@@ -194,7 +203,7 @@ nonisolated enum ObsCollector {
         case let .toolUse(ctx, id, name, target):
             if skip(ctx) { return .none }
             if ctx.isSidechain {
-                guard let parent = try parentTurn(ctx, db: db) else { return .none }
+                guard let parent = try subagentParent(ctx, &state, db: db) else { return .none }
                 // 재읽기(크래시 · 파일 축소 · 지문 변경)에 카운터가 부풀지 않게, 기존 유니크 키
                 // (경로, tool_use_id)로 한 번만 센다. 결과 줄은 아래 toolResult 가 같은 키로 갱신한다.
                 try ObsTool(turnId: parent.id, transcriptPath: state.path, toolUseId: id, name: name, target: target,
@@ -230,7 +239,7 @@ nonisolated enum ObsCollector {
 
         case let .assistant(ctx, text, messageId, model, usage):
             if skip(ctx) { return .none }
-            let target = ctx.isSidechain ? try parentTurn(ctx, db: db) : try currentTurn(&state, db: db)
+            let target = ctx.isSidechain ? try subagentParent(ctx, &state, db: db) : try currentTurn(&state, db: db)
             guard var turn = target else { return .none }
             var counted = false
             if let messageId {
@@ -254,7 +263,7 @@ nonisolated enum ObsCollector {
                 if let model { turn.model = model }
             }
             try turn.update(db)
-            // 답 꼬리 · 모델 변화는 청크 끝(flushTouched)에서 비교한다.
+            // 답 꼬리 · 모델 변화는 파일 끝(flushTouched)에서 비교한다.
             if counted { try bump(turn.unitId, ts: ctx.ts, edit: false, db: db) }
             return .none
 
@@ -298,6 +307,32 @@ nonisolated enum ObsCollector {
         }
         guard let id = state.turnID else { return nil }
         return try ObsTurn.fetchOne(db, key: id)
+    }
+
+    /// 서브에이전트 파일의 부모 턴. 스키마를 건드리지 않고 정한다 —
+    /// ① 이 수집에서 이미 정했으면 그것 ② 이 파일 경로로 저장된 obs_tool 행의 turn_id(재시작 · 이어 읽기;
+    /// obs_usage 에는 경로 열이 없다) ③ 처음 처리하는 사건의 시각으로 고른 턴. ③ 은 파일 안에서 한 번만 한다.
+    private static func subagentParent(_ ctx: ObsParser.Context, _ state: inout FileState, db: Database) throws -> ObsTurn? {
+        if state.parentMissing { return nil }
+        if let id = state.parentID, let t = try ObsTurn.fetchOne(db, key: id) { return t }
+        let stored = try String.fetchOne(db, sql: """
+            SELECT o.turn_id FROM obs_tool o JOIN obs_turn t ON t.id = o.turn_id
+            WHERE o.transcript_path = ? LIMIT 1
+            """, arguments: [state.path])
+        let parent = try stored.flatMap { try ObsTurn.fetchOne(db, key: $0) } ?? parentTurn(ctx, db: db)
+        guard let parent else { state.parentMissing = true; return nil }
+        state.parentID = parent.id
+        return parent
+    }
+
+    /// `<세션>/subagents/x.jsonl` 의 부모 세션 파일 `<세션>.jsonl` 이 있는데 아직 수집(커서)되지 않았는가.
+    private static func parentFilePending(_ path: String, db: Database) throws -> Bool {
+        let url = URL(fileURLWithPath: path)
+        let dir = url.deletingLastPathComponent()
+        guard dir.lastPathComponent == "subagents" else { return false }
+        let main = dir.deletingLastPathComponent().appendingPathExtension("jsonl").path
+        guard FileManager.default.fileExists(atPath: main) else { return false }
+        return try ObsCursor.fetchOne(db, key: main) == nil
     }
 
     /// 서브에이전트 줄은 자기 파일에 턴이 없다 — 같은 세션에서 그 시각 직전의 사람 턴에 붙인다.
