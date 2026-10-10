@@ -410,4 +410,112 @@ struct ObsCollectorTests {
         #expect(after.sourceRevision == before.sourceRevision)
         #expect(after.lastTs == before.lastTs)
     }
+
+    // MARK: - 머지 경계를 뒤늦게 알아도 세대를 나눈다 (이슈 #27 Task 4)
+
+    /// 백필 · 앱을 꺼 둔 동안 같은 브랜치 재사용 — 머지 전후 턴이 한 단위에 들어간 뒤 merged_at 을 알게 된 경우.
+    func backfillMixed() throws {
+        try write("s1", [Fx.human("옛 작업", ts: "2026-10-10T01:00:00.000Z"),
+                         Fx.toolUse("old-e", name: "Edit", input: ["file_path": "/r/ios/A.swift"], ts: "2026-10-10T01:00:05.000Z",
+                                    messageId: "m-old"),
+                         Fx.human("새 작업", ts: "2026-10-10T03:00:00.000Z"),
+                         Fx.toolUse("new-e", name: "Edit", input: ["file_path": "/r/ios/B.swift"], ts: "2026-10-10T03:00:05.000Z",
+                                    messageId: "m-new"),
+                         Fx.toolResult("new-e", ts: "2026-10-10T03:00:06.000Z")])
+        try write("s1/subagents/agent-new", [
+            Fx.toolUse("sub-e", name: "Write", input: ["file_path": "/r/ios/C.swift"], ts: "2026-10-10T03:10:00.000Z",
+                       sidechain: true, messageId: "m-sub"),
+        ])
+        try collect()
+        #expect(try db.read { try WorkUnit.fetchCount($0) } == 1)
+    }
+
+    @Test func backfillThenMergeMustSeparateBranchGeneration() throws {
+        try backfillMixed()
+        let merged = ObsParser.epoch("2026-10-10T02:00:00.000Z")!
+        try db.write { try $0.execute(sql: "UPDATE work_unit SET merged_at = ?", arguments: [merged]) }
+        try collect()
+        #expect(try db.read { try WorkUnit.fetchCount($0) } == 2)
+        let units = try db.read { try WorkUnit.order(Column("generation")).fetchAll($0) }
+        try #require(units.count == 2)
+        let (old, new) = (units[0], units[1])
+        #expect(old.generation == 0 && new.generation == 1)
+        #expect(new.unitKey == WorkUnitRules.unitKey(baseKey: old.baseKey, generation: 1) && new.baseKey == old.baseKey)
+        #expect(new.mergedAt == nil && new.prNumber == nil && old.mergedAt == merged)
+        #expect(new.kind == old.kind && new.branch == old.branch && new.githubRepo == old.githubRepo)
+        // 남은 쪽 · 옮긴 쪽을 DB 에서 다시 센다.
+        #expect(old.humanTurns == 1 && new.humanTurns == 1)
+        #expect(old.firstTs == ObsParser.epoch("2026-10-10T01:00:00.000Z")!)
+        #expect(old.lastTs == ObsParser.epoch("2026-10-10T01:00:05.000Z")!)
+        #expect(new.firstTs == ObsParser.epoch("2026-10-10T03:00:00.000Z")!)
+        #expect(new.lastTs == ObsParser.epoch("2026-10-10T03:10:00.000Z")!)
+        // Edit 계열 — 서브에이전트의 Write 도 센다(수집 규칙과 같게).
+        #expect(old.editCount == 1 && new.editCount == 2)
+        // 툴 · 토큰은 turn_id 로 턴을 따라간다.
+        let newTurn = try db.read { try #require(try ObsTurn.filter(Column("unit_id") == new.id).fetchOne($0)) }
+        #expect(newTurn.sidechainTokens > 0 && newTurn.sidechainTools == 1)
+        let movedTools = try db.read { try ObsTool.filter(Column("turn_id") == newTurn.id).fetchAll($0) }
+        #expect(Set(movedTools.map(\.toolUseId)) == ["new-e", "sub-e"])
+        #expect(try db.read { try ObsUsage.filter(Column("turn_id") == newTurn.id).fetchCount($0) } == 2)
+    }
+
+    @Test func 세대_나누기는_다시_수집해도_그대로() throws {
+        try backfillMixed()
+        let before = try db.read { try #require(try WorkUnit.fetchOne($0)) }
+        try db.write { try $0.execute(sql: "UPDATE work_unit SET merged_at = ?",
+                                      arguments: [ObsParser.epoch("2026-10-10T02:00:00.000Z")!]) }
+        try collect()
+        let split = try db.read { try WorkUnit.order(Column("generation")).fetchAll($0) }
+        try #require(split.count == 2)
+        // 실제로 나눈 한 번에 양쪽 +1.
+        #expect(split[0].sourceRevision == before.sourceRevision + 1)
+        #expect(split[1].sourceRevision == 1)
+        try collect()
+        try collect()
+        let again = try db.read { try WorkUnit.order(Column("generation")).fetchAll($0) }
+        #expect(again == split)
+    }
+
+    @Test func 옮길_턴이_없으면_아무것도_안_한다() throws {
+        try backfillMixed()
+        try db.write { try $0.execute(sql: "UPDATE work_unit SET merged_at = ?",
+                                      arguments: [ObsParser.epoch("2026-10-10T05:00:00.000Z")!]) }
+        let before = try unit()
+        try collect()
+        #expect(try db.read { try WorkUnit.fetchAll($0) } == [before])
+    }
+
+    @Test func 다음_세대도_머지됐으면_이어서_나눈다() throws {
+        try write("s1", [Fx.human("1", ts: "2026-10-10T01:00:00.000Z"), Fx.human("2", ts: "2026-10-10T03:00:00.000Z"),
+                         Fx.human("3", ts: "2026-10-10T05:00:00.000Z")])
+        try collect()
+        let gen0 = try unit()
+        // 이미 머지된 다음 세대가 있다(다른 경로로 생긴 단위) — 턴 2 는 거기로, 턴 3 은 그 다음 세대로.
+        try db.write { db in
+            try db.execute(sql: "UPDATE work_unit SET merged_at = ?", arguments: [ObsParser.epoch("2026-10-10T02:00:00.000Z")!])
+            var g1 = gen0
+            g1.id = "g1"; g1.generation = 1; g1.unitKey = WorkUnitRules.unitKey(baseKey: gen0.baseKey, generation: 1)
+            g1.mergedAt = ObsParser.epoch("2026-10-10T04:00:00.000Z")!
+            g1.humanTurns = 0; g1.sourceRevision = 0
+            try g1.insert(db)
+        }
+        try collect()
+        let units = try db.read { try WorkUnit.order(Column("generation")).fetchAll($0) }
+        #expect(units.map(\.generation) == [0, 1, 2])
+        #expect(units.map(\.humanTurns) == [1, 1, 1])
+        try #require(units.count == 3)
+        #expect(units[1].firstTs == ObsParser.epoch("2026-10-10T03:00:00.000Z")!)
+        #expect(units[2].firstTs == ObsParser.epoch("2026-10-10T05:00:00.000Z")!)
+    }
+
+    @Test func 나눠도_평가_실행과_지적은_원래_단위에() throws {
+        try backfillMixed()
+        let u = try unit()
+        try db.write { db in
+            try EvaluationRun(id: "r1", unitId: u.id, trigger: .manual, status: .done, createdAt: 1).insert(db)
+            try db.execute(sql: "UPDATE work_unit SET merged_at = ?", arguments: [ObsParser.epoch("2026-10-10T02:00:00.000Z")!])
+        }
+        try collect()
+        #expect(try db.read { try EvaluationRun.fetchOne($0, key: "r1") }?.unitId == u.id)
+    }
 }

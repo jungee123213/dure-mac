@@ -152,6 +152,11 @@ final class ObserverStore {
                 x.prHead = m.head
                 x.mergedAt = m.mergedAt
                 try x.update(db)
+                // 같은 쓰기 안에서 머지 뒤 턴을 다음 세대로 옮긴다 — 다음 수집까지 섞인 상태를 평가가 집지 않게.
+                // 수집 잠금은 잡지 않는다: 한 트랜잭션이라 수집 청크와 섞이지 않고, 수집도 끝에서 같은 정합을 돈다.
+                try GenerationSplit.reconcile(in: db)
+                // 자동 평가 자격은 옮긴 뒤의(머지 전 작업만의) 숫자로 본다.
+                x = try WorkUnit.fetchOne(db, key: u.id) ?? x
                 if ObserverRules.shouldAutoEnqueue(x, firstStart: firstStart, s) {
                     _ = try EvaluationJob.enqueue(unitID: x.id, trigger: .auto, now: t, in: db)
                 }

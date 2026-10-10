@@ -49,6 +49,8 @@ nonisolated enum ObsCollector {
         for f in jsonlFiles(in: config.projectsDir) {
             total += try ingest(file: f, db: db, config: config, resolver: resolver, excludedSessions: excluded)
         }
+        // 백필 · 앱을 꺼 둔 동안 섞인 머지 전후 턴을 나눈다. 옮길 게 없으면 쓰지 않는다(멱등).
+        try db.write { try GenerationSplit.reconcile(in: $0) }
         return total
     }
 
