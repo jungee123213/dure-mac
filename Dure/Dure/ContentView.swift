@@ -61,6 +61,18 @@ struct ContentView: View {
             for: NSApplication.willTerminateNotification)) { _ in
             store.saveContextBeforeLeaving()
         }
+        // 이슈 #30 — iTerm 에서 직접 닫은 창은 두레로 돌아올 때 `열기` 로 되돌린다. 폴링하지 않는다.
+        .onReceive(NotificationCenter.default.publisher(
+            for: NSApplication.didBecomeActiveNotification)) { _ in
+            store.shells.refresh()
+        }
+        .alert("터미널을 열 수 없습니다",
+               isPresented: Binding(get: { store.shells.problem != nil },
+                                    set: { if !$0 { store.shells.problem = nil } })) {
+            Button("확인", role: .cancel) {}
+        } message: {
+            Text(store.shells.problem ?? "")
+        }
         // 창만 닫아도 이 뷰와 store 가 사라진다 (앱은 계속 뜬다).
         .onDisappear { store.saveContextBeforeLeaving() }
     }
@@ -369,6 +381,7 @@ struct ContentView: View {
                 }
             }
             Spacer()
+            if case .repo(let repo) = target { shellButton(for: repo) }
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 4)
@@ -377,6 +390,25 @@ struct ContentView: View {
         .contentShape(Rectangle())
         .onTapGesture { store.toggleCollapsed(target) }
         .help(store.isCollapsed(target) ? "눌러서 펼치기" : "눌러서 접기 — 접어도 claude 는 계속 돕니다")
+    }
+
+    /// 이슈 #30 — 레포 경로로 iTerm 창 하나를 열고 닫는다. 커밋 · push 는 사람이 거기서 한다(ADR-4).
+    /// 헤더 전체가 접기 토글이지만 버튼은 탭을 먼저 가져간다.
+    private func shellButton(for repo: Repo) -> some View {
+        let isOpen = store.shells.isOpen(repo)
+        let app = store.shells.appName(for: repo)
+        return Button { store.shells.toggle(repo) } label: {
+            HStack(spacing: 4) {
+                Image(systemName: "apple.terminal")
+                Text(isOpen ? "닫기" : "열기")
+                if isOpen { Circle().fill(.green).frame(width: 6, height: 6) }
+            }
+            .font(.caption2)
+        }
+        .buttonStyle(.borderless)
+        .disabled(!isOpen && !repo.folderExists)
+        .help(isOpen ? "이 레포의 \(app) 창을 닫습니다"
+                     : "이 레포 경로에서 \(app) 창을 엽니다 — claude 는 띄우지 않습니다")
     }
 
     // MARK: - 워크스페이스 관리 (이슈 #12)

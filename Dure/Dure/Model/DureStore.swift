@@ -48,6 +48,8 @@ final class DureStore {
     /// 페인을 시작하지 못한 이유(페인 키 → 문장). 조율자 준비(설정·지시문 쓰기) 실패가 여기 온다.
     /// 권한이나 지시문이 빠진 채로 뜨면 git 읽기마다 승인이 뜨거나 메시지 범위 규칙이 없다 — 그래서 아예 안 띄운다.
     private(set) var paneProblems: [String: String] = [:]
+    /// 이슈 #30 — 레포 경로로 연 바깥 터미널(iTerm). 두레가 관할하지 않고 창 번호만 기억한다.
+    let shells = RepoShells()
     /// 단계 4 — 배분 흐름. 스토어 상태는 클로저로 넘긴다(테스트 가능성).
     @ObservationIgnored private(set) lazy var dispatcher = Dispatcher(
         db: AppDatabase.queue, inbox: LiveInbox(),
