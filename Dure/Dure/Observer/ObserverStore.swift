@@ -34,14 +34,14 @@ final class ObserverStore {
     @ObservationIgnored private let db: DatabaseQueue
     @ObservationIgnored private let runner: CommandRunning
     @ObservationIgnored private let resolver: RepoResolving
-    @ObservationIgnored private let defaults: UserDefaults
+    @ObservationIgnored private let defaults: SettingsStore
     @ObservationIgnored private var collecting = false
     @ObservationIgnored private var collectAgain = false
     @ObservationIgnored private var loops: [Task<Void, Never>] = []
     @ObservationIgnored var now: () -> Int = { Int(Date().timeIntervalSince1970) }
 
     /// 기본값을 인자에 두면 호출 쪽 격리 문맥에서 평가돼 경고가 난다 — 실물 조합은 아래 편의 init 이 넘긴다.
-    init(db: DatabaseQueue, runner: CommandRunning, resolver: RepoResolving, defaults: UserDefaults, dirs: ObserverDirs) {
+    init(db: DatabaseQueue, runner: CommandRunning, resolver: RepoResolving, defaults: SettingsStore, dirs: ObserverDirs) {
         self.db = db
         self.runner = runner
         self.resolver = resolver
@@ -52,12 +52,12 @@ final class ObserverStore {
 
     convenience init() {
         self.init(db: AppDatabase.queue, runner: LiveCommandRunner(), resolver: LiveRepoResolver(),
-                  defaults: .standard, dirs: ObserverPaths.live)
+                  defaults: UserDefaults.standard, dirs: ObserverPaths.live)
     }
 
-    /// 앱 시작 때 한 번. **테스트 호스트에서는 아무것도 하지 않는다.**
+    /// 앱 시작 때 한 번. 유닛 테스트 호스트에서는 앱 본체가 뜨지 않아 불리지 않는다(이슈 #29).
     func start() {
-        guard !DureStore.isTestHost, loops.isEmpty else { return }
+        guard loops.isEmpty else { return }
         _ = ObserverSettings.firstStart(in: defaults, now: now())
         // 평가 중에 앱을 끄면 `claude -p` 가 고아로 남아 한도를 계속 쓴다 — 트리째 죽인다(최종 리뷰 F5e).
         let runner = runner

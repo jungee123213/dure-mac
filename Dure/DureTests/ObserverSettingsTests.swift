@@ -5,7 +5,7 @@ import Testing
 struct ObserverSettingsTests {
 
     @Test func 저장하고_다시_읽는다() throws {
-        let d = try #require(UserDefaults(suiteName: "obs-\(UUID().uuidString)"))
+        let d = MemorySettings()
         #expect(ObserverSettings.load(from: d) == ObserverSettings())
         var s = ObserverSettings()
         s.autoEvaluate = false; s.minTurns = 5; s.dailyCap = 2; s.autoEvaluateDayUnits = true; s.excludes = ["/x/"]
@@ -67,7 +67,7 @@ struct ObserverSettingsTests {
     }
 
     @Test func 첫_시작_시각은_한_번만_적는다() throws {
-        let d = try #require(UserDefaults(suiteName: "obs-\(UUID().uuidString)"))
+        let d = MemorySettings()
         #expect(ObserverSettings.firstStart(in: d, now: 50) == 50)
         #expect(ObserverSettings.firstStart(in: d, now: 99) == 50)
         var s = ObserverSettings(); s.dailyCap = 3; s.save(to: d)

@@ -34,12 +34,12 @@ struct ContentView: View {
         }
         .onAppear {
             store.load()
-            // 이슈 #23 — 감시자. 테스트 호스트에서는 start() 가 아무것도 하지 않는다.
+            // 이슈 #23 — 감시자.
             store.observer = observer
             observer.start()
             // 단계 4 — 지난번 앱이 꺼질 때 전달 중이던 배분은 Stop 을 영영 못 본다. 실패로 닫고 조율자에게 알린다.
-            // 유닛 테스트 호스트도 이 앱을 띄운다 — 그때 돌면 **지금 실행 중인 진짜 두레**의 배분(같은 DB)을 실패로 닫는다.
-            if !DureStore.isTestHost { store.dispatcher.recoverOnLaunch() }
+            // (유닛 테스트 호스트에서는 이 뷰가 아예 뜨지 않는다 — 이슈 #29, `DureMain`.)
+            store.dispatcher.recoverOnLaunch()
             if store.workspaces.isEmpty {
                 store.addWorkspace(name: "기본 워크스페이스")
             }
