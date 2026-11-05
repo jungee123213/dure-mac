@@ -43,6 +43,14 @@ struct ObserverStoreTests {
         #expect(!FileManager.default.fileExists(atPath: dirs.chatSettings.path))
     }
 
+    /// 이슈 #35 — 대시보드 사용량이 이 값을 보고 다시 계산한다.
+    @Test func reload_마다_데이터_버전이_오른다() {
+        let s = store()
+        let v = s.dataVersion
+        s.reload()
+        #expect(s.dataVersion == v + 1)
+    }
+
     @Test func 수동_평가_요청은_한_번만_큐에() throws {
         let s = store()
         s.settings.enabled = false        // pump 가 실행을 시작하지 않게
