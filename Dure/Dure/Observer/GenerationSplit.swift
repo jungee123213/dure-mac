@@ -69,7 +69,7 @@ nonisolated enum GenerationSplit {
         let edits = ObsCollector.editTools.map { "'\($0)'" }.joined(separator: ",")
         try db.execute(sql: """
             UPDATE work_unit SET
-              human_turns = (SELECT COUNT(*) FROM obs_turn WHERE unit_id = :id AND prompt_kind = 'human'),
+              human_turns = (SELECT COUNT(*) FROM obs_turn WHERE unit_id = :id AND prompt_kind IN \(PromptKind.humanSQLList)),
               peer_turns = (SELECT COUNT(*) FROM obs_turn WHERE unit_id = :id AND prompt_kind = 'peer'),
               edit_count = (SELECT COUNT(*) FROM obs_tool o JOIN obs_turn t ON t.id = o.turn_id
                             WHERE t.unit_id = :id AND o.name IN (\(edits))),

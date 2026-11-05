@@ -4,7 +4,9 @@ import Foundation
 /// 턴 하나가 어느 작업 단위(추정 묶음)에 들어가는가. 스펙 v2 3-1. **순수 함수.**
 nonisolated enum WorkUnitRules {
 
-    static let fallbackDefaults: Set<String> = ["main", "master", "dev", "develop", "HEAD"]
+    /// 오래 사는 브랜치 — 날짜로 묶는다. **지금 ref 가 있는지 보지 않는다**: GitHub Flow 로 옮기며 `dev` 를
+    /// 지운 레포도 트랜스크립트에는 과거 `dev` 턴이 남아 있다(이슈 #32, D-40). `HEAD` 는 복원 실패 · 진짜 detached.
+    static let longLivedNames: Set<String> = ["main", "master", "dev", "develop", "development", "staging", "HEAD"]
 
     struct Placement: Equatable, Sendable {
         var kind: UnitKind
@@ -33,7 +35,7 @@ nonisolated enum WorkUnitRules {
             return Placement(kind: .noGit, cwd: (cwd as NSString).standardizingPath, day: day(ts, timeZone: timeZone))
         }
         let b = branch ?? "HEAD"
-        let isDefault = repo.defaultBranch.map { b == $0 || b == "HEAD" } ?? fallbackDefaults.contains(b)
+        let isDefault = longLivedNames.contains(b) || b == repo.defaultBranch
         if isDefault {
             return Placement(kind: .defaultBranch, repoRoot: repo.root, branch: b, day: day(ts, timeZone: timeZone))
         }

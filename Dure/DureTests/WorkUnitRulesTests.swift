@@ -43,10 +43,17 @@ struct WorkUnitRulesTests {
         #expect(p.kind == .defaultBranch && p.day == "2026-10-10")
     }
 
-    @Test(arguments: ["main", "master", "dev", "develop", "HEAD"])
-    func 기본_브랜치를_모르면_흔한_이름(_ b: String) {
-        let repo = RepoInfo(root: "/r/a", defaultBranch: nil, githubRepo: nil)
-        #expect(WorkUnitRules.place(cwd: "/r/a", branch: b, repo: repo, ts: 0, timeZone: utc, workspacesRoot: ws).kind == .defaultBranch)
+    /// 이슈 #32 — GitHub Flow 로 옮기며 `dev` 를 지운 레포도 과거 `dev` 턴은 날짜로 묶는다. ref 를 보지 않는다.
+    @Test(arguments: ["main", "master", "dev", "develop", "development", "staging", "HEAD"])
+    func 오래_사는_브랜치는_기본_브랜치를_알아도_몰라도_날짜(_ b: String) {
+        for repo in [ios, RepoInfo(root: "/r/ios", defaultBranch: nil, githubRepo: nil)] {
+            #expect(WorkUnitRules.place(cwd: "/r/ios", branch: b, repo: repo, ts: 0, timeZone: utc, workspacesRoot: ws).kind == .defaultBranch)
+        }
+    }
+
+    @Test func origin_HEAD_가_가리키는_이름도_날짜() {
+        let backend = RepoInfo(root: "/r/b", defaultBranch: "trunk", githubRepo: nil)
+        #expect(WorkUnitRules.place(cwd: "/r/b", branch: "trunk", repo: backend, ts: 0, timeZone: utc, workspacesRoot: ws).kind == .defaultBranch)
     }
 
     @Test func git_밖과_조율자() {

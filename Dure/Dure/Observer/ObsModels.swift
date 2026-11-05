@@ -13,7 +13,17 @@ nonisolated enum TurnOrigin: String, Codable, Sendable {
     case dureRepo = "dure_repo", dureOrchestrator = "dure_orchestrator", terminal
 }
 /// 사람이 친 것 · 다른 세션(두레 배분)이 넣은 것 · `claude -p`.
-nonisolated enum PromptKind: String, Codable, Sendable { case human, peer, sdk }
+/// 턴을 연 입력의 종류. 이슈 #32 — `!` 셸 · 슬래시 명령 · 작업 알림도 사용자 줄로 기록되지만 사람의 요청은 아니다.
+/// `command` 는 사용자 정의 · 플러그인 명령(`/pr-draft`), `builtin` 은 내장 관리 명령(`/clear`).
+nonisolated enum PromptKind: String, Codable, Sendable, CaseIterable {
+    case human, peer, sdk, shell, command, builtin, notice
+
+    /// `human_turns` 에 세는가. 사용자 정의 명령은 사람이 일을 시킨 것이다.
+    var countsAsHuman: Bool { self == .human || self == .command }
+
+    /// SQL `IN` 목록 — 재계산이 카운터와 같은 규칙을 쓰게 여기서만 만든다.
+    static let humanSQLList = "(" + allCases.filter(\.countsAsHuman).map { "'\($0.rawValue)'" }.joined(separator: ",") + ")"
+}
 nonisolated enum RunStatus: String, Codable, Sendable { case queued, running, done, failed, interrupted, cancelled }
 /// 하루 상한은 `auto` 만 센다 — 사람이 누른 것까지 막으면 버튼이 거짓말을 한다.
 nonisolated enum RunTrigger: String, Codable, Sendable { case auto, manual }
