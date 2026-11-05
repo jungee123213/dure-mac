@@ -450,6 +450,19 @@ final class DureStore {
         }
     }
 
+    // MARK: - 대시보드 ③ 사용량 (이슈 #35)
+
+    /// 이슈 #35 — 대시보드 ③ 사용량 · 툴 에러 상위. 메인 스레드에서 DB 를 잡지 않게 백그라운드에서 센다.
+    func usageSummary(period: UsageStats.Period) async -> UsageStats.Summary? {
+        guard let ws = selectedWorkspaceID else { return nil }
+        let paths = visibleRepos.map(\.path)
+        let since = period.since(now: Int(Date().timeIntervalSince1970), timeZone: .current)
+        let db = AppDatabase.queue
+        return await Task.detached(priority: .utility) {
+            try? db.read { try UsageStats.compute(workspaceID: ws, repoPaths: paths, since: since, in: $0) }
+        }.value
+    }
+
     // MARK: - F6 · F7 (Step 5)
 
     /// 트랜스크립트에서 **새로 붙은 줄만** 읽어 반영한다.
