@@ -6,9 +6,12 @@ import Testing
 
 struct FakeResolver: RepoResolving {
     var repos: [String: RepoInfo]
+    /// 루트 → reflog 로 복원될 브랜치(시각 무관).
+    var branches: [String: String] = [:]
     func info(forCwd cwd: String) -> RepoInfo? {
         repos.first { cwd == $0.key || cwd.hasPrefix($0.key + "/") }?.value
     }
+    func branch(atRoot root: String, ts: Int) -> String? { branches[root] }
 }
 
 struct ObsCollectorTests {
@@ -48,6 +51,64 @@ struct ObsCollectorTests {
     func collect() throws -> ObsCollector.Report { try ObsCollector.collect(db: db, config: config, resolver: resolver) }
     func unit() throws -> WorkUnit { try db.read { try #require(try WorkUnit.fetchOne($0)) } }
     func turn() throws -> ObsTurn { try db.read { try #require(try ObsTurn.fetchOne($0)) } }
+
+    // MARK: - 이슈 #32 브랜치 복원
+
+    @Test func HEAD_로_찍힌_턴은_복원한_브랜치의_이슈_단위로_간다() throws {
+        var r = resolver; r.branches["/r/ios"] = "feat/#30/open-in-iterm"
+        try write("a", [Fx.human("고쳐줘", branch: "HEAD")])
+        try ObsCollector.collect(db: db, config: config, resolver: r)
+        let u = try unit()
+        #expect(u.kind == .issueBranch && u.branch == "feat/#30/open-in-iterm" && u.issueNo == 30)
+    }
+
+    @Test func 브랜치_기록이_없는_턴도_복원한다() throws {
+        var r = resolver; r.branches["/r/ios"] = "feat/#30/open-in-iterm"
+        try write("a", [Fx.human("고쳐줘", branch: nil)])
+        try ObsCollector.collect(db: db, config: config, resolver: r)
+        #expect(try unit().branch == "feat/#30/open-in-iterm")
+    }
+
+    @Test func 복원_실패면_지금처럼_HEAD_날짜_단위() throws {
+        try write("a", [Fx.human("고쳐줘", branch: "HEAD")])
+        try collect()
+        let u = try unit()
+        #expect(u.kind == .defaultBranch && u.branch == "HEAD")
+    }
+
+    @Test func 기록된_브랜치가_있으면_reflog_를_보지_않는다() throws {
+        var r = resolver; r.branches["/r/ios"] = "feat/#99/other"
+        try write("a", [Fx.human("고쳐줘", branch: "feat/#52/x")])
+        try ObsCollector.collect(db: db, config: config, resolver: r)
+        #expect(try unit().branch == "feat/#52/x")
+    }
+
+    @Test func human_turns_는_사람_요청과_사용자_명령만_센다() throws {
+        try write("a", [
+            Fx.human("고쳐줘", ts: "2026-10-10T01:00:00.000Z"),
+            Fx.human("<bash-input>git add .</bash-input>", ts: "2026-10-10T01:00:01.000Z"),
+            Fx.human("<command-name>/clear</command-name>", ts: "2026-10-10T01:00:02.000Z"),
+            Fx.human("<command-name>/pr-draft</command-name>", ts: "2026-10-10T01:00:03.000Z"),
+            Fx.human("<task-notification>x</task-notification>", ts: "2026-10-10T01:00:04.000Z"),
+        ])
+        try collect()
+        #expect(try unit().humanTurns == 2)
+        #expect(try db.read { try ObsTurn.fetchCount($0) } == 5)      // 턴 행은 그대로 남는다
+    }
+
+    @Test func 머지_경계로_나눈_뒤에도_셸_입력은_세지_않는다() throws {
+        try write("s1", [Fx.human("옛 작업", ts: "2026-10-10T01:00:00.000Z"),
+                         Fx.human("<bash-input>git pull</bash-input>", ts: "2026-10-10T01:00:01.000Z"),
+                         Fx.human("새 작업", ts: "2026-10-10T03:00:00.000Z"),
+                         Fx.human("<bash-input>git status</bash-input>", ts: "2026-10-10T03:00:01.000Z")])
+        try collect()
+        let merged = ObsParser.epoch("2026-10-10T02:00:00.000Z")!
+        try db.write { try $0.execute(sql: "UPDATE work_unit SET merged_at = ?", arguments: [merged]) }
+        try collect()
+        let units = try db.read { try WorkUnit.order(Column("generation")).fetchAll($0) }
+        try #require(units.count == 2)
+        #expect(units[0].humanTurns == 1 && units[1].humanTurns == 1)
+    }
 
     @Test func 터미널과_두레_세션이_같은_브랜치면_한_단위() throws {
         try db.write { db in

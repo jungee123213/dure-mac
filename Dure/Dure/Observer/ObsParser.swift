@@ -78,8 +78,26 @@ nonisolated enum ObsParser {
                                permissionMode: root["permissionMode"] as? String)]
         }
         if text.hasPrefix("<local-command-stdout") || text.hasPrefix("<local-command-stderr") { return [.ignored] }
-        let kind: PromptKind = root["promptSource"] as? String == "sdk" ? .sdk : .human
+        let kind: PromptKind = root["promptSource"] as? String == "sdk" ? .sdk : (classify(text) ?? .human)
         return [.turnStart(ctx, prompt: text, kind: kind, permissionMode: root["permissionMode"] as? String)]
+    }
+
+    /// 사람 요청으로 세지 않는 내장 관리 명령. 여기 없는 슬래시 명령(스킬 · 플러그인)은 사람이 일을 시킨 것이다.
+    static let builtinCommands: Set<String> = [
+        "clear", "compact", "model", "config", "resume", "exit", "login", "logout", "cost", "status", "help",
+        "permissions", "mcp", "plugin", "plugins", "hooks", "memory", "context", "usage", "init", "doctor", "agents",
+        "add-dir", "ide", "theme", "vim", "fast", "rewind", "export", "release-notes", "upgrade", "bug", "feedback",
+    ]
+
+    /// 사람이 직접 쓴 말이 아닌 사용자 줄을 가른다. 해당 없으면 `nil`(사람 요청). 이슈 #32.
+    static func classify(_ text: String) -> PromptKind? {
+        let t = text.drop { $0.isWhitespace }
+        if t.hasPrefix("<task-notification>") { return .notice }
+        if t.hasPrefix("<bash-input>") || t.hasPrefix("<bash-stdout>") || t.hasPrefix("<bash-stderr>") { return .shell }
+        guard let open = t.range(of: "<command-name>/"),
+              let close = t.range(of: "</command-name>", range: open.upperBound..<t.endIndex) else { return nil }
+        let name = String(t[open.upperBound..<close.lowerBound])
+        return builtinCommands.contains(name) ? .builtin : .command
     }
 
     private static func assistant(_ root: [String: Any]) -> [Event]? {

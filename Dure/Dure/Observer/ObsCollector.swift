@@ -79,13 +79,16 @@ nonisolated enum ObsCollector {
         if let old = cursor?.fingerprint, old != fingerprint { offset = 0; lineNo = 0 }   // 교체된 파일
         guard let batch = TranscriptReader.read(path: path, offset: offset, lineNo: lineNo) else { return Report() }
 
-        // 1. 트랜잭션 밖: 파싱 · 레포 조회(git 프로세스)
-        let parsed = batch.lines.map { (no: $0.no, events: ObsParser.parse($0.data)) }
+        // 1. 트랜잭션 밖: 파싱 · 레포 조회 · 브랜치 복원(git 프로세스)
+        var parsed = batch.lines.map { (no: $0.no, events: ObsParser.parse($0.data)) }
         var repos: [String: RepoInfo?] = [:]
         for line in parsed {
             for e in line.events ?? [] {
                 if case let .turnStart(ctx, _, _, _) = e, repos[ctx.cwd] == nil { repos[ctx.cwd] = .some(resolve(ctx, resolver)) }
             }
+        }
+        parsed = parsed.map { line in
+            (no: line.no, events: line.events?.map { recoverBranch($0, repos: repos, resolver: resolver) })
         }
 
         // 2. 짧은 트랜잭션
@@ -196,11 +199,7 @@ nonisolated enum ObsCollector {
             guard stored?.id == turn.id else { return .none }          // 다시 읽은 사건
             unit.firstTs = min(unit.firstTs, ctx.ts)
             unit.lastTs = max(unit.lastTs, ctx.ts)
-            switch kind {
-            case .human: unit.humanTurns += 1
-            case .peer: unit.peerTurns += 1
-            case .sdk: break
-            }
+            if kind.countsAsHuman { unit.humanTurns += 1 } else if kind == .peer { unit.peerTurns += 1 }
             unit.sourceRevision += 1
             try unit.update(db)
             return .turn
@@ -358,6 +357,17 @@ nonisolated enum ObsCollector {
         let known = try Bool.fetchOne(db, sql: "SELECT EXISTS(SELECT 1 FROM cc_session WHERE cc_session_id = ?)",
                                       arguments: [ctx.sessionId]) ?? false
         return known ? .dureRepo : .terminal
+    }
+
+    /// 이슈 #32 — `#` 이 든 브랜치는 트랜스크립트에 `"HEAD"` 로 남는다. 턴 시작의 브랜치가 `HEAD` 이거나 없으면
+    /// 그 레포 reflog 로 그 시각의 브랜치를 되살린다. 못 하면 그대로 둔다(지금처럼 날짜 단위).
+    static func recoverBranch(_ e: ObsParser.Event, repos: [String: RepoInfo?], resolver: RepoResolving) -> ObsParser.Event {
+        guard case .turnStart(var ctx, let prompt, let kind, let mode) = e,
+              ctx.gitBranch == nil || ctx.gitBranch == "HEAD",
+              let repo = repos[ctx.cwd] ?? nil,
+              let recovered = resolver.branch(atRoot: repo.root, ts: ctx.ts) else { return e }
+        ctx.gitBranch = recovered
+        return .turnStart(ctx, prompt: prompt, kind: kind, permissionMode: mode)
     }
 
     private static func resolve(_ ctx: ObsParser.Context, _ resolver: RepoResolving) -> RepoInfo? {

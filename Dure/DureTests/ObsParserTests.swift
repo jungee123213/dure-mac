@@ -31,6 +31,28 @@ struct ObsParserTests {
         #expect(kind == .peer && prompt == "[두레] 조율자 배분 #7")
     }
 
+    // MARK: - 이슈 #32 입력 분류
+
+    @Test(arguments: [
+        ("<task-notification> <task-id>a1</task-id>", PromptKind.notice),
+        ("<bash-input>git add .</bash-input>", .shell),
+        ("<bash-stdout>(Bash completed with no output)</bash-stdout><bash-stderr></bash-stderr>", .shell),
+        ("<command-message>pr-draft</command-message>\n<command-name>/pr-draft</command-name>", .command),
+        ("<command-name>/superpowers:brainstorming</command-name>", .command),
+        ("<command-name>/clear</command-name>\n<command-message>clear</command-message>", .builtin),
+        ("  <command-name>/compact</command-name>", .builtin),
+        ("진행", .human),
+    ])
+    func 입력_분류(_ text: String, _ kind: PromptKind) throws {
+        guard case let .turnStart(_, _, k, _) = try one(Fx.human(text)) else { Issue.record("턴 시작이 아님"); return }
+        #expect(k == kind)
+    }
+
+    @Test func 사람_요청으로_세는_kind() {
+        #expect(PromptKind.allCases.filter(\.countsAsHuman) == [.human, .command])
+        #expect(PromptKind.humanSQLList == "('human','command')")
+    }
+
     @Test func 스킬_본문_같은_메타는_무시한다() throws {
         #expect(try one(Fx.meta("Base directory for this skill: /x")) == .ignored)
     }
