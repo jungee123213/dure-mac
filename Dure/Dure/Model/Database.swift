@@ -16,7 +16,12 @@ enum AppDatabase {
         catch { fatalError("DB 초기화 실패: \(error)") }
     }()
 
-    static func makeQueue() throws -> DatabaseQueue {
+    enum OpenError: Error, Equatable { case testHost }
+
+    /// 테스트 호스트에서는 열지 않는다(이슈 #29) — 피처 브랜치의 테스트가 머지 전 스키마를 실제 DB 에 올리면 안 된다.
+    /// 테스트는 `migrator` 로 메모리 DB 를 만든다. 여기 오면 앱 본체가 테스트 중에 시작됐다는 뜻이라 크게 실패한다.
+    static func makeQueue(environment: [String: String] = ProcessInfo.processInfo.environment) throws -> DatabaseQueue {
+        guard !TestHost.isActive(environment) else { throw OpenError.testHost }
         let fm = FileManager.default
         let dir = try fm.url(for: .applicationSupportDirectory,
                              in: .userDomainMask,

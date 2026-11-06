@@ -12,18 +12,18 @@ nonisolated struct ObserverSettings: Equatable, Sendable {
 
     private static let p = "observer."
 
-    static func load(from d: UserDefaults) -> ObserverSettings {
+    static func load(from d: SettingsStore) -> ObserverSettings {
         var s = ObserverSettings()
-        if d.object(forKey: p + "enabled") != nil { s.enabled = d.bool(forKey: p + "enabled") }
-        if d.object(forKey: p + "autoEvaluate") != nil { s.autoEvaluate = d.bool(forKey: p + "autoEvaluate") }
-        if d.object(forKey: p + "minTurns") != nil { s.minTurns = d.integer(forKey: p + "minTurns") }
-        if d.object(forKey: p + "dailyCap") != nil { s.dailyCap = d.integer(forKey: p + "dailyCap") }
-        if d.object(forKey: p + "autoEvaluateDayUnits") != nil { s.autoEvaluateDayUnits = d.bool(forKey: p + "autoEvaluateDayUnits") }
-        if let e = d.stringArray(forKey: p + "excludes") { s.excludes = e }
+        if let v = d.object(forKey: p + "enabled") as? Bool { s.enabled = v }
+        if let v = d.object(forKey: p + "autoEvaluate") as? Bool { s.autoEvaluate = v }
+        if let v = d.object(forKey: p + "minTurns") as? Int { s.minTurns = v }
+        if let v = d.object(forKey: p + "dailyCap") as? Int { s.dailyCap = v }
+        if let v = d.object(forKey: p + "autoEvaluateDayUnits") as? Bool { s.autoEvaluateDayUnits = v }
+        if let e = d.object(forKey: p + "excludes") as? [String] { s.excludes = e }
         return s
     }
 
-    func save(to d: UserDefaults) {
+    func save(to d: SettingsStore) {
         let p = Self.p
         d.set(enabled, forKey: p + "enabled")
         d.set(autoEvaluate, forKey: p + "autoEvaluate")
@@ -38,8 +38,8 @@ nonisolated struct ObserverSettings: Equatable, Sendable {
 
     /// 없으면 지금을 적고 돌려준다. 첫 수집이 지난 30일의 이슈 브랜치를 한꺼번에 만들므로,
     /// 그 머지들까지 자동 평가하면 첫 실행에 상한을 다 쓰고 옛 작업만 평가하게 된다(최종 리뷰 F1).
-    static func firstStart(in d: UserDefaults, now: Int) -> Int {
-        if d.object(forKey: firstStartKey) != nil { return d.integer(forKey: firstStartKey) }
+    static func firstStart(in d: SettingsStore, now: Int) -> Int {
+        if let v = d.object(forKey: firstStartKey) as? Int { return v }
         d.set(now, forKey: firstStartKey)
         return now
     }
@@ -104,3 +104,12 @@ nonisolated enum ObserverRules {
         return String(text[r].suffix(10))
     }
 }
+
+/// 설정을 키로 읽고 쓰는 곳. 앱은 `UserDefaults.standard`, 테스트는 메모리 저장소를 넘긴다 —
+/// 이슈 #29: 테스트가 `UserDefaults(suiteName:)` 를 쓰면 `~/Library/Preferences` 에 plist 가 쌓인다.
+nonisolated protocol SettingsStore: AnyObject, Sendable {
+    func object(forKey key: String) -> Any?
+    func set(_ value: Any?, forKey key: String)
+}
+
+extension UserDefaults: SettingsStore {}
