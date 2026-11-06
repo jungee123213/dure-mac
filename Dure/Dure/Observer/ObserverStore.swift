@@ -17,6 +17,8 @@ final class ObserverStore {
     private(set) var formatWarning = false
     private(set) var unknownTypes = 0
     private(set) var autoRunsToday = 0
+    /// 감시자 데이터를 다시 읽을 때마다 오른다(수집 · 평가 · 피드백 뒤). 대시보드 사용량이 이 값을 보고 다시 계산한다(이슈 #35).
+    private(set) var dataVersion = 0
     /// 묻기 페인 — 한 번에 하나. 뷰가 아니라 여기 두는 이유: 탭을 바꾸면 뷰 상태는 사라지지만 대화는 이어져야 한다(최종 리뷰 F4).
     private(set) var chat: ChatPane?
     var settings: ObserverSettings { didSet { settings.save(to: defaults) } }
@@ -252,6 +254,7 @@ final class ObserverStore {
         backlog = BacklogRules.ranked((try? db.read { try BacklogItem.fetchAll($0) }) ?? [])
         formatWarning = (try? db.read { try ObsCollector.formatWarning(in: $0) }) ?? false
         unknownTypes = (try? db.read { try ObsCollector.unknownTypeCount(in: $0) }) ?? 0
+        dataVersion += 1
     }
 
     // MARK: - 조회 · 조작
