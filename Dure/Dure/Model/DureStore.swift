@@ -69,9 +69,6 @@ final class DureStore {
     @ObservationIgnored private var launchScripts: [String: String] = [:]
     /// 이슈 #23 — 감시자. 훅 두 가지만 넘긴다(수집 계기 · 실제 승인 프롬프트). 앱이 붙여 준다.
     @ObservationIgnored weak var observer: ObserverStore?
-    /// 유닛 테스트 호스트로 떠 있나. 테스트 호스트는 실제 앱을 띄우고 실제 DB 를 연다 — 그때 돌면 안 되는 일
-    /// (앱 시작 복구처럼 실행 중인 진짜 두레의 기록을 바꾸는 것)을 거른다.
-    static var isTestHost: Bool { ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil }
     /// 배분 기록이 바뀔 때 올린다. 대시보드 ④ · 페인 배지가 이걸 본다 (DB 를 관측할 수 없어서).
     private(set) var dispatchVersion = 0
     var selectedWorkspaceID: String? {

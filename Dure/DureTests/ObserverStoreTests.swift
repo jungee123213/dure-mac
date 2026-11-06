@@ -8,6 +8,7 @@ import Testing
 @MainActor
 struct ObserverStoreTests {
 
+
     let db: DatabaseQueue
     let dirs: ObserverDirs
 
@@ -28,19 +29,12 @@ struct ObserverStoreTests {
 
     /// `firstStart` 를 주면 감시자가 그때 처음 켜진 것으로 둔다. 안 주면 checkMerges 가 "지금" 을 첫 시작으로 적는다.
     func store(_ runner: FakeRunner = FakeRunner { _ in FakeRunner.ok("") }, firstStart: Int? = nil) -> ObserverStore {
-        let d = UserDefaults(suiteName: "obsstore-\(UUID().uuidString)")!
+        let d = MemorySettings()
         if let firstStart { d.set(firstStart, forKey: ObserverSettings.firstStartKey) }
         let s = ObserverStore(db: db, runner: runner, resolver: FakeResolver(repos: [:]), defaults: d, dirs: dirs)
         s.now = { Self.today }
         s.reload()
         return s
-    }
-
-    @Test func 테스트_호스트에서는_시작하지_않는다() {
-        let s = store()
-        s.start()
-        #expect(s.ghProblem == nil)
-        #expect(!FileManager.default.fileExists(atPath: dirs.chatSettings.path))
     }
 
     /// 이슈 #35 — 대시보드 사용량이 이 값을 보고 다시 계산한다.
