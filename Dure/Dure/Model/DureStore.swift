@@ -80,9 +80,17 @@ final class DureStore {
             saveContextBeforeLeaving()
         }
         didSet {
+            LastWorkspace.remember(selectedWorkspaceID, in: settings)
             refreshAllGit()
             openWorkspaceFolder()
         }
+    }
+
+    /// 이슈 #38 — 마지막에 보던 워크스페이스를 기억하는 곳. 앱은 `UserDefaults.standard`.
+    @ObservationIgnored private let settings: SettingsStore
+
+    init(settings: SettingsStore = UserDefaults.standard) {
+        self.settings = settings
     }
 
     /// 페인 키 → `DURE_SESSION` (ADR-14). 페인 하나당 UUID 하나.
@@ -139,7 +147,10 @@ final class DureStore {
             ccSessions = try AppDatabase.queue.read {
                 try CCSession.order(Column("started_at")).fetchAll($0)
             }
-            if selectedWorkspaceID == nil { selectedWorkspaceID = ws.first?.id }
+            if selectedWorkspaceID == nil {
+                selectedWorkspaceID = LastWorkspace.pick(saved: LastWorkspace.saved(in: settings),
+                                                         available: ws.map(\.id))
+            }
         } catch {
             NSLog("[Dure] load 실패: \(error)")
         }
@@ -213,7 +224,7 @@ final class DureStore {
             sessionIDs[key] = nil
         }
         if selectedWorkspaceID == workspaceID { selectedWorkspaceID = nil }
-        // 선택이 비었으면 load 가 첫 워크스페이스를 고른다.
+        // 선택이 비었으면 load 가 다시 고른다. 저장값이 지운 워크스페이스라 첫 번째가 된다 (#38).
         load()
     }
 
