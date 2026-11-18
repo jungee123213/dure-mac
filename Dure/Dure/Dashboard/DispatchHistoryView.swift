@@ -92,7 +92,18 @@ struct DispatchHistoryView: View {
                 .font(.caption).buttonStyle(.borderless)
             }
             Text(DispatchPresentation.headline(d)).font(.caption).lineLimit(1)
+            if let g = DispatchPresentation.gitLine(d) {
+                Text(g).font(.caption2).foregroundStyle(.secondary)
+            }
             if expanded.contains(d.id) {
+                if let t = d.issueTitle, !t.isEmpty {
+                    Text("제목").font(.caption2).bold().foregroundStyle(.secondary)
+                    Text(t).font(.caption).textSelection(.enabled)
+                    if let b = d.issueBody, !b.isEmpty {
+                        Text(b).font(.caption2).foregroundStyle(.secondary).textSelection(.enabled)
+                    }
+                    Divider()
+                }
                 Text(d.instruction).font(.caption2).foregroundStyle(.secondary).textSelection(.enabled)
                 if let r = d.result, !r.isEmpty {
                     Divider()
