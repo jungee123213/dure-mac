@@ -50,6 +50,12 @@ struct DureApp: App {
             ObserverView(observer: observer)
         }
         .defaultSize(width: 1100, height: 760)
+
+        // 이슈 #40 — 배분 작업 흐름 안내. 읽기 전용.
+        Window("작업 흐름", id: "workflow") {
+            WorkflowGuideView()
+        }
+        .defaultSize(width: 720, height: 760)
     }
 }
 
@@ -60,6 +66,7 @@ struct ObserverCommands: Commands {
         CommandGroup(after: .windowArrangement) {
             Button("감시자") { openWindow(id: "observer") }
                 .keyboardShortcut("o", modifiers: [.command, .shift])
+            Button("작업 흐름") { openWindow(id: "workflow") }
         }
     }
 }

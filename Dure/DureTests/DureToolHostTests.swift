@@ -157,6 +157,74 @@ struct DureToolHostTests {
         #expect(r.text.contains("#1") && r.text.contains("응답 대기") && r.text.contains("A 로 할까요?"))
     }
 
+    @Test func dispatch_는_새_이슈_칸을_저장한다() throws {
+        let (d, ctx, w) = world()
+        let r = DureToolHost.call(.init(name: "dispatch", arguments: ["repo": "android", "instruction": "x",
+                                  "issue_title": "[FEAT] 공유", "issue_body": "본문"], toolUseId: nil),
+                                  side: .orchestrator, context: ctx, dispatcher: d)
+        #expect(!r.isError)
+        #expect(d.history(workspaceID: "w1").first?.gitMode == .newIssue)
+        _ = w
+    }
+
+    /// 최종 리뷰 — 조율자가 고른 배분 종류가 실제로 그렇게 들어갔는지 답에서 보인다(칸을 빠뜨리면 git 없음으로 떨어진다).
+    @Test func dispatch_답에_배분_종류가_보인다() throws {
+        let (d, ctx, w) = world()
+        let n = DureToolHost.call(.init(name: "dispatch", arguments: ["repo": "android", "instruction": "x",
+                                  "issue_title": "t", "issue_body": "b"], toolUseId: nil),
+                                  side: .orchestrator, context: ctx, dispatcher: d)
+        #expect(!n.isError && n.text.contains("새 이슈"), "\(n.text)")
+        let c = DureToolHost.call(.init(name: "dispatch", arguments: ["repo": "ios", "instruction": "x",
+                                  "issue": "165", "branch": "feat/#165/x"], toolUseId: nil),
+                                  side: .orchestrator, context: ctx, dispatcher: d)
+        #expect(!c.isError && c.text.contains("이어 하기"), "\(c.text)")
+        let g = DureToolHost.call(.init(name: "dispatch", arguments: ["repo": "android", "instruction": "y"], toolUseId: nil),
+                                  side: .orchestrator, context: ctx, dispatcher: d)
+        #expect(!g.isError && g.text.contains("git 없음"), "\(g.text)")
+        _ = w
+    }
+
+    @Test func dispatch_는_제목_없는_이슈_본문을_거절한다() throws {
+        let (d, ctx, _) = world()
+        let r = DureToolHost.call(.init(name: "dispatch", arguments: ["repo": "android", "instruction": "x",
+                                  "issue_body": "본문"], toolUseId: nil),
+                                  side: .orchestrator, context: ctx, dispatcher: d)
+        #expect(r.isError && r.text.contains(DispatchGitError.bodyWithoutTitle.message))
+        #expect(d.history(workspaceID: "w1").isEmpty)
+    }
+
+    @Test func dispatch_는_잘못된_git_칸을_거절하고_기록하지_않는다() throws {
+        let (d, ctx, _) = world()
+        let r = DureToolHost.call(.init(name: "dispatch", arguments: ["repo": "android", "instruction": "x",
+                                  "issue_title": "[FEAT] 공유"], toolUseId: nil),
+                                  side: .orchestrator, context: ctx, dispatcher: d)
+        #expect(r.isError && r.text.contains(DispatchGitError.emptyBody.message))
+        #expect(d.history(workspaceID: "w1").isEmpty)
+    }
+
+    @Test func complete_는_번호와_브랜치를_저장한다() throws {
+        let (d, ctx0, _) = world()
+        _ = DureToolHost.call(.init(name: "dispatch", arguments: ["repo": "android", "instruction": "x",
+                              "issue_title": "t", "issue_body": "b"], toolUseId: nil),
+                              side: .orchestrator, context: ctx0, dispatcher: d)
+        var ctx = ctx0; ctx.repoID = "r1"
+        let r = DureToolHost.call(.init(name: "complete", arguments: ["summary": "끝", "issue": "#165",
+                                  "branch": "feat/#165/x", "pr": "https://github.com/o/r/pull/42"], toolUseId: nil),
+                                  side: .repo, context: ctx, dispatcher: d)
+        #expect(!r.isError)
+        let row = d.history(workspaceID: "w1").first
+        #expect(row?.issueNumber == 165 && row?.branch == "feat/#165/x" && row?.prNumber == 42)
+    }
+
+    @Test func tasks_줄에_git_줄이_붙는다() throws {
+        let (d, ctx, _) = world()
+        _ = DureToolHost.call(.init(name: "dispatch", arguments: ["repo": "android", "instruction": "x",
+                              "issue": "165", "branch": "feat/#165/x"], toolUseId: nil),
+                              side: .orchestrator, context: ctx, dispatcher: d)
+        let r = DureToolHost.call(.init(name: "tasks", arguments: [:], toolUseId: nil), side: .orchestrator, context: ctx, dispatcher: d)
+        #expect(r.text.contains("이어 하기 · 이슈 #165"))
+    }
+
     @Test func 모르는_툴은_에러() throws {
         let (d, ctx, _) = world()
         #expect(DureToolHost.call(.init(name: "nope", arguments: [:], toolUseId: nil), side: .orchestrator, context: ctx, dispatcher: d).isError)

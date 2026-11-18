@@ -48,6 +48,33 @@ struct DispatcherTests {
         func orchIdle() { orch["w1"] = .init(started: true, state: .done, claudeSessionID: "cc-orch") }
     }
 
+    func gitDone(_ w: World, _ c: DispatchCompletion?) throws -> String? {
+        w.idle("r1", session: "cc-a"); w.orchIdle()
+        let git = c == nil ? DispatchGitRequest.none
+            : DispatchGitRequest(mode: .newIssue, issueTitle: "t", issueBody: "b", scope: .commit)
+        _ = try w.d.enqueue(workspaceID: "w1", repo: w.repoA, title: nil, instruction: "x", git: git, toolUseId: nil)
+        _ = try w.d.complete(repoID: "r1", summary: "다 했다", completion: c ?? .init())
+        #expect(try w.db.read { try Dispatch.fetchOne($0) }?.state == .done)
+        return try w.db.read { try Relay.filter(Column("kind") == RelayKind.completion.rawValue).fetchOne($0) }?.body
+    }
+
+    @Test func 완료_보고에_git_메모가_붙는다() throws {
+        let w = try World()
+        let body = try gitDone(w, .init(issueNumber: 165, branch: "feat/#165/x", prNumber: nil))
+        #expect(body == "이슈 #165 · 브랜치 feat/#165/x\n다 했다")
+    }
+
+    @Test func 새_이슈인데_번호_없이_끝나면_경고가_간다() throws {
+        let w = try World()
+        let body = try gitDone(w, .init())
+        #expect(body?.contains("이슈 번호 없음") == true)
+    }
+
+    @Test func git_없음_배분은_보고_본문이_그대로다() throws {
+        let w = try World()
+        #expect(try gitDone(w, nil) == "다 했다")
+    }
+
     @Test func 놀고_있는_페인에는_바로_전달한다() throws {
         let w = try World(); w.idle("r1", session: "cc-a")
         let out = try w.d.enqueue(workspaceID: "w1", repo: w.repoA, title: nil, instruction: "파랑으로", toolUseId: "tu")
@@ -126,6 +153,24 @@ struct DispatcherTests {
         let row = try w.db.read { try Dispatch.filter(Column("seq") == 1).fetchOne($0) }
         #expect(row?.state == .delivered && row?.deliveredSession == "argv")
         #expect(w.d.initialPrompt(forRepo: "r2") == nil)
+    }
+
+    @Test func 안_뜬_페인의_기동_프롬프트에도_이슈_초안이_실린다() throws {
+        let w = try World()
+        let git = DispatchGitRequest(mode: .newIssue, issueTitle: "[FEAT] 공유", issueBody: "본문", scope: .commit)
+        _ = try w.d.enqueue(workspaceID: "w1", repo: w.repoA, title: nil, instruction: "첫", git: git, toolUseId: nil)
+        let p = try #require(w.d.initialPrompt(forRepo: "r1"))
+        #expect(p.contains("## 이슈 초안") && p.contains("제목: [FEAT] 공유"))
+        // v8 이전 꼴(git 칸 없음) 행
+        try w.db.write { db in
+            try db.execute(sql: """
+                INSERT INTO dispatch (id, workspace_id, seq, repo_id, instruction, state, attempts, created_at)
+                VALUES ('old', 'w1', 99, 'r2', '옛 지시', 'queued', 0, 1)
+                """)
+        }
+        let old = try #require(w.d.initialPrompt(forRepo: "r2"))
+        #expect(old.contains("이슈 · 브랜치 · 커밋을 하지 않는다"))
+        #expect(!old.contains("## "))
     }
 
     /// 이슈 #24 — 질문으로 멈춘 턴은 완료가 아니다. 응답 대기로 두고 조율자에게 "끝남" 을 보내지 않는다.

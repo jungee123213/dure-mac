@@ -5,19 +5,151 @@ import Testing
 /// 단계 4 — 받는 Claude 에게 보이는 글. **발신자 이름 필드는 무시된다(실측)** 라 본문 첫 줄이 발신자다.
 struct DispatchBodyTests {
 
+    static func row(seq: Int = 7, instruction: String = "지시", mode: GitMode? = nil,
+                    title: String? = nil, body: String? = nil, scope: GitScope? = nil,
+                    hint: String? = nil, base: String? = nil, issue: Int? = nil, branch: String? = nil) -> Dispatch {
+        var d = Dispatch(workspaceId: "w1", seq: seq, repoId: "r1", title: nil, instruction: instruction,
+                         state: .queued, toolUseId: nil, deliveredSession: nil, result: nil, failure: nil,
+                         createdAt: 0, deliveredAt: nil, doneAt: nil)
+        d.gitMode = mode; d.issueTitle = title; d.issueBody = body; d.gitScope = scope
+        d.branchHint = hint; d.baseBranch = base; d.issueNumber = issue; d.branch = branch
+        return d
+    }
+
     @Test func 배분_본문은_번호_레포_지시문_꼬리_순이다() {
-        let s = DispatchBody.dispatch(seq: 7, repoName: "android", instruction: "로그인 버튼을 파랑으로")
+        let s = DispatchBody.dispatch(Self.row(instruction: "로그인 버튼을 파랑으로"), repoName: "android")
         #expect(s.hasPrefix("[두레] 조율자 배분 #7 — android\n"))
         #expect(s.contains("\n로그인 버튼을 파랑으로\n"))
         #expect(s.contains("ask_orchestrator"))
         #expect(s.contains("complete"))           // 이슈 #24 — 완료는 툴로 선언한다
-        #expect(s.contains("커밋"))
-        let tail = s.components(separatedBy: "\n---\n")
-        #expect(tail.count == 2)
+        #expect(s.contains("이슈 · 브랜치 · 커밋을 하지 않는다"))
+        #expect(!s.contains("## "))
+        #expect(s.components(separatedBy: "\n---\n").count == 2)
+    }
+
+    @Test func 새_이슈_배분은_초안_지시_범위_순서를_싣는다() throws {
+        let s = DispatchBody.dispatch(Self.row(mode: .newIssue, title: "[FEAT] 공유", body: "본문입니다",
+                                               scope: .commit, hint: "feat/#N/share"), repoName: "android")
+        var at = s.startIndex
+        for key in ["## 이슈 초안", "제목: [FEAT] 공유", "본문입니다", "## 작업 지시", "지시", "## git 범위", "커밋까지", "feat/#N/share", "\n---\n"] {
+            let r = try #require(s.range(of: key, range: at..<s.endIndex), "\(key) 없음 또는 순서 어긋남")
+            at = r.upperBound
+        }
+        for key in ["report", "이슈를 만든다", "멈추지 않고", "머지는 하지 않는다", "complete", "ask_orchestrator", "끝난 게 아니다"] {
+            #expect(s.contains(key), "\(key)")
+        }
+        #expect(s.components(separatedBy: "\n---\n").count == 2)
+    }
+
+    @Test func 기준_브랜치를_지정하면_싣는다() {
+        let with = DispatchBody.dispatch(Self.row(mode: .newIssue, title: "t", body: "b", scope: .commit, base: "feat/#9/base"), repoName: "a")
+        #expect(with.contains("기준 브랜치 feat/#9/base"))
+        let without = DispatchBody.dispatch(Self.row(mode: .newIssue, title: "t", body: "b", scope: .commit), repoName: "a")
+        #expect(without.contains("레포 기본 브랜치 최신"))
+        #expect(without.contains("이슈 접두사로 정한다"))
+    }
+
+    @Test func PR_범위면_push_와_PR_을_말한다() {
+        let s = DispatchBody.dispatch(Self.row(mode: .newIssue, title: "t", body: "b", scope: .pr), repoName: "a")
+        #expect(s.contains("PR 까지"))
+        #expect(s.contains("push"))
+    }
+
+    @Test func 이어_하기는_이슈와_브랜치를_대고_새로_따지_말라고_한다() {
+        let s = DispatchBody.dispatch(Self.row(mode: .continueWork, scope: .commit, issue: 165, branch: "feat/#165/x"), repoName: "a")
+        #expect(s.contains("## 이어 하기"))
+        #expect(s.contains("이슈 #165 · 브랜치 feat/#165/x"))
+        #expect(s.contains("새 이슈를 만들지 않는다"))
+        #expect(s.contains("## 작업 지시") && s.contains("## git 범위"))
+        #expect(!s.contains("## 이슈 초안"))
+        #expect(s.contains("complete") && s.contains("ask_orchestrator") && s.contains("끝난 게 아니다"))
+        #expect(s.components(separatedBy: "\n---\n").count == 2)
+    }
+
+    /// 최종 리뷰 I-2 — 꼬리말이 명령 모양을 대지 않으면 모델이 `git checkout main && git pull` · `gh pr list` 처럼
+    /// 허용 밖 모양을 골라 권한 창에 멈춘다. 허용 목록(`SessionSettings.repoGitAllow`)과 같은 모양을 댄다.
+    @Test func 새_이슈_꼬리말은_허용된_명령_모양을_댄다() throws {
+        let s = DispatchBody.dispatch(Self.row(mode: .newIssue, title: "t", body: "b", scope: .pr, base: "feat/#9/base"), repoName: "a")
+        var at = try #require(s.range(of: "\n---\n")).upperBound
+        for key in ["git status --porcelain", "gh issue create", "git fetch origin",
+                    "git switch -c <브랜치> origin/feat/#9/base", "git add <파일…>", "git push -u origin <브랜치>", "gh pr create"] {
+            let r = try #require(s.range(of: key, range: at..<s.endIndex), "\(key) 없음 또는 순서 어긋남")
+            at = r.upperBound
+        }
+        for key in ["커밋 안 한 변경이 있으면 건드리지 않고", "git add -A · git add . 는 쓰지 않는다", "맨 git push 는 쓰지 않는다",
+                    "; echo $?", "#N 을 새 이슈 번호로", "complete 의 issue · branch · pr 칸에 넣는다",
+                    "범위를 바꿔야 하면 사람에게 묻는다", "gh pr create --base feat/#9/base", "작은따옴표 heredoc", "제목은 작은따옴표로",
+                    "읽기(git log · git diff 등)는 필요한 대로 한다"] {
+            #expect(s.contains(key), "\(key)")
+        }
+        #expect(!s.contains("1번으로 간다"))
+        #expect(!s.contains("gh pr list 로"), "새 브랜치라 PR 이 있을 수 없다")
+    }
+
+    @Test func 기준_브랜치가_없으면_기본_브랜치를_읽는_명령을_댄다() {
+        let s = DispatchBody.dispatch(Self.row(mode: .newIssue, title: "t", body: "b", scope: .commit), repoName: "a")
+        #expect(s.contains("git switch -c <브랜치> origin/<기본 브랜치>"))
+        #expect(s.contains("git rev-parse --abbrev-ref origin/HEAD"))
+        #expect(!s.contains("--base"), "기준 브랜치가 없으면 gh 기본(레포 기본 브랜치)으로 연다")
+    }
+
+    @Test func 이어_하기_꼬리말은_그_브랜치_이름으로_명령을_댄다() throws {
+        let s = DispatchBody.dispatch(Self.row(mode: .continueWork, scope: .pr, issue: 165, branch: "feat/#165/x"), repoName: "a")
+        var at = try #require(s.range(of: "\n---\n")).upperBound
+        for key in ["git status --porcelain", "git fetch origin", "git switch feat/#165/x", "(레포 CLAUDE.md 의 커밋 형식)",
+                    "git add <파일…>", "git push -u origin feat/#165/x", "gh pr create"] {
+            let r = try #require(s.range(of: key, range: at..<s.endIndex), "\(key) 없음 또는 순서 어긋남")
+            at = r.upperBound
+        }
+        for key in ["이미 있어 gh pr create 가 실패하면", "gh pr list 로 찾지 않는다", "맨 git push 는 쓰지 않는다", "; echo $?",
+                    "complete 의 issue · branch · pr 칸에 넣는다", "작은따옴표 heredoc", "그 오류에 나온 PR 번호를 쓴다"] {
+            #expect(s.contains(key), "\(key)")
+        }
+        #expect(!s.contains("git switch -c"))
+        #expect(!s.contains("--base"))
+    }
+
+    @Test func 승인_문장은_구분선_바로_다음_줄이다() throws {
+        let n = DispatchBody.dispatch(Self.row(mode: .newIssue, title: "t", body: "b", scope: .pr), repoName: "a")
+        let c = DispatchBody.dispatch(Self.row(mode: .continueWork, scope: .pr, issue: 1, branch: "b"), repoName: "a")
+        for s in [n, c] {
+            let tail = try #require(s.components(separatedBy: "\n---\n").last)
+            #expect(tail.hasPrefix("이 배분이 사람의 "), "\(tail.prefix(40))")
+        }
+    }
+
+    /// M-1 — 본문 안의 `## ` · `---` 가 초안 경계와 섞이지 않게 표시로 감싼다.
+    @Test func 이슈_본문은_표시로_감싼다() {
+        let s = DispatchBody.dispatch(Self.row(mode: .newIssue, title: "[FEAT] 공유", body: "## 할 일\n- a", scope: .commit), repoName: "a")
+        #expect(s.contains("## 이슈 초안\n제목: [FEAT] 공유\n<이슈 본문>\n## 할 일\n- a\n</이슈 본문>\n## 작업 지시"))
+        #expect(s.contains("<이슈 본문> · </이슈 본문> 표시 사이 글 그대로"))
+    }
+
+    @Test func 이_배분이_승인이라고_말한다() {
+        let n = DispatchBody.dispatch(Self.row(mode: .newIssue, title: "t", body: "b", scope: .pr), repoName: "a")
+        let c = DispatchBody.dispatch(Self.row(mode: .continueWork, scope: .pr, issue: 1, branch: "b"), repoName: "a")
+        let g = DispatchBody.dispatch(Self.row(), repoName: "a")
+        #expect(n.contains("이 배분이 사람의 이슈 등록 · 브랜치 · 커밋(· PR) 승인이다"))
+        #expect(c.contains("이 배분이 사람의 브랜치 · 커밋(· PR) 승인이다"))
+        #expect(n.contains("커밋 승인 절차를 다시 밟지 않는다") && c.contains("커밋 승인 절차를 다시 밟지 않는다"))
+        #expect(!g.contains("승인이다"))
+    }
+
+    @Test func 불일치_뒤_사람이_답하면_같은_배분을_이어간다() {
+        let n = DispatchBody.dispatch(Self.row(mode: .newIssue, title: "t", body: "b", scope: .commit), repoName: "a")
+        let c = DispatchBody.dispatch(Self.row(mode: .continueWork, scope: .commit, issue: 1, branch: "b"), repoName: "a")
+        #expect(n.contains("사람이 답하면 그 답대로 초안을 고쳐 2번부터 이어간다 — 다시 report 하지 않는다"))
+        #expect(c.contains("답을 받으면 그 답대로 2번부터 이어간다"))
+    }
+
+    @Test func 이슈_본문은_그대로_간다() {
+        let body = "## 할 일\n\n- [ ] `A.swift` 🚀\n- 한글"
+        let s = DispatchBody.dispatch(Self.row(mode: .newIssue, title: "t", body: body, scope: .commit), repoName: "a")
+        #expect(s.contains(body))
     }
 
     @Test func 지시문의_줄바꿈과_마크다운이_그대로다() {
-        let s = DispatchBody.dispatch(seq: 1, repoName: "ios", instruction: "## 할 일\n\n- `a.swift`\n- b")
+        let s = DispatchBody.dispatch(Self.row(seq: 1, instruction: "## 할 일\n\n- `a.swift`\n- b"), repoName: "ios")
         #expect(s.contains("## 할 일\n\n- `a.swift`\n- b"))
     }
 

@@ -31,6 +31,16 @@ struct Dispatch: Codable, Identifiable, Hashable, FetchableRecord, PersistableRe
     var createdAt: Int
     var deliveredAt: Int?
     var doneAt: Int?
+    /// git 작업 방식. nil = git 을 안 쓰는 배분.
+    var gitMode: GitMode? = nil
+    var issueTitle: String? = nil
+    var issueBody: String? = nil
+    var gitScope: GitScope? = nil
+    var branchHint: String? = nil
+    var baseBranch: String? = nil
+    var issueNumber: Int? = nil
+    var branch: String? = nil
+    var prNumber: Int? = nil
 
     static let databaseTableName = "dispatch"
 
@@ -43,6 +53,15 @@ struct Dispatch: Codable, Identifiable, Hashable, FetchableRecord, PersistableRe
         case createdAt = "created_at"
         case deliveredAt = "delivered_at"
         case doneAt = "done_at"
+        case gitMode = "git_mode"
+        case issueTitle = "issue_title"
+        case issueBody = "issue_body"
+        case gitScope = "git_scope"
+        case branchHint = "branch_hint"
+        case baseBranch = "base_branch"
+        case issueNumber = "issue_number"
+        case branch
+        case prNumber = "pr_number"
     }
 }
 

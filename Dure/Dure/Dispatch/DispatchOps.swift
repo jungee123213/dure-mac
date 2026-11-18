@@ -6,14 +6,17 @@ import GRDB
 enum DispatchOps {
 
     static func enqueue(workspaceID: String, repoID: String, title: String?, instruction: String,
-                        toolUseId: String?, now: Int, in db: Database) throws -> Dispatch {
+                        git: DispatchGitRequest = .none, toolUseId: String?, now: Int, in db: Database) throws -> Dispatch {
         // 같은 트랜잭션 안에서 MAX 를 읽어 번호가 겹치지 않는다 (UNIQUE 가 마지막 방어선).
         let last = try Int.fetchOne(db, sql: "SELECT MAX(seq) FROM dispatch WHERE workspace_id = ?",
                                     arguments: [workspaceID]) ?? 0
-        let d = Dispatch(workspaceId: workspaceID, seq: last + 1, repoId: repoID, title: title,
+        var d = Dispatch(workspaceId: workspaceID, seq: last + 1, repoId: repoID, title: title,
                          instruction: instruction, state: .queued, toolUseId: toolUseId,
                          deliveredSession: nil, result: nil, failure: nil, createdAt: now,
                          deliveredAt: nil, doneAt: nil)
+        d.gitMode = git.mode; d.issueTitle = git.issueTitle; d.issueBody = git.issueBody
+        d.branchHint = git.branchHint; d.baseBranch = git.baseBranch; d.gitScope = git.scope
+        if git.mode == .continueWork { d.issueNumber = git.issueNumber; d.branch = git.branch }
         try d.insert(db)
         return d
     }
@@ -53,9 +56,15 @@ enum DispatchOps {
         try d.update(db)
     }
 
-    static func markDone(_ id: String, result: String?, now: Int, in db: Database) throws {
+    /// `completion` 은 nil 이 아닌 값만 덮는다 — 이어 하기의 이슈 번호가 보고에 없다고 지워지지 않는다.
+    static func markDone(_ id: String, result: String?, completion: DispatchCompletion? = nil, now: Int, in db: Database) throws {
         guard var d = try Dispatch.fetchOne(db, key: id) else { return }
         d.state = .done; d.result = result; d.doneAt = now
+        if let c = completion {
+            if let n = c.issueNumber { d.issueNumber = n }
+            if let b = c.branch { d.branch = b }
+            if let p = c.prNumber { d.prNumber = p }
+        }
         try d.update(db)
     }
 

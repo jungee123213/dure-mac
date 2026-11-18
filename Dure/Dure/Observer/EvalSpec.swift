@@ -8,7 +8,7 @@ nonisolated enum EvalSpec {
     static let tools = "Read,Grep,Glob"
     /// init 줄의 `tools` 는 이 집합의 부분집합이어야 한다. `StructuredOutput` 은 `--json-schema` 가 넣는 내장 툴이다(실측).
     static let allowedTools: Set<String> = ["Read", "Grep", "Glob", "StructuredOutput"]
-    static let promptVersion = 3   // 3: 조율자 턴도 e: 로 인용할 수 있다(최종 리뷰 F3)
+    static let promptVersion = 4   // 3: 조율자 턴도 e: 로 인용할 수 있다(최종 리뷰 F3) · 4: git 은 승인 뒤 에이전트(#40)
 
     /// 셸에 작은따옴표로 넘기므로 작은따옴표를 쓰지 않는다. 자유 서술 리포트는 받지 않는다 — 앱이 검증된 지적으로 렌더한다.
     static let schemaJSON = #"{"type":"object","required":["summary","findings"],"properties":{"summary":{"type":"string"},"notes":{"type":"string"},"findings":{"type":"array","items":{"type":"object","required":["group","kind","key","title","detail","evidence","severity","confidence"],"properties":{"group":{"enum":["dure","habit","tooling"]},"kind":{"enum":["missing_feature","friction","works_well","prompt","workflow","permission","claude_md","skill","mcp","cost"]},"key":{"type":"string"},"title":{"type":"string"},"detail":{"type":"string"},"suggestion":{"type":"string"},"apply_text":{"type":"string"},"evidence":{"type":"array","items":{"type":"object","required":["event","quote"],"properties":{"event":{"type":"string"},"quote":{"type":"string"}}}},"severity":{"enum":[1,2,3]},"confidence":{"enum":["high","low"]}}}}}}"#
@@ -127,7 +127,7 @@ nonisolated enum EvalPrompt {
           allow 규칙은 근거에 **정확한 명령 · 대상 · 서브커맨드**가 있을 때만, 좁게(`Bash(git -C /절대/경로 status *)` 처럼) 제안한다. `Bash(git -C *)` 같은 넓은 규칙은 쓰기까지 연다 — 권하지 않는다.
         - 반복 읽기 · 테스트 실패 · 중단은 자동으로 낭비가 아니다(새 세션 맥락 복구 · TDD red · 방향 수정). 맥락으로 판단한다.
         - 두레가 강제한 절차(조율자의 "진행" 확인 등)를 사람의 습관 문제로 지적하지 않는다 — 그건 dure 지적이다.
-        - 이 사람은 커밋 · push · 브랜치 · 이슈 생성을 직접 한다. 자동화를 권하지 않는다.
+        - git 작업은 사람이 승인하면 에이전트가 한다(배분은 '진행' 이 이슈 등록 · 브랜치 · 커밋 승인을 겸한다). 승인 없이 커밋 · push · 머지 · 배포로 이어지는 자동화만 권하지 않는다.
         - severity: 3 = 이번 작업에서 시간을 크게 잃음 · 2 = 반복되면 아픔 · 1 = 사소. 지적은 많아야 12개, 중요한 순서로.
         - `apply_text` 는 그대로 복사해 쓸 수 있을 때만.
 
