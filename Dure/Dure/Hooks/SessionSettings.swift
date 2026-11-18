@@ -30,10 +30,67 @@ enum SessionSettings {
     /// 단계 4 — 두레 MCP 툴. 없으면 `dispatch` 마다 승인이 뜬다(실측).
     static let mcpAllowRule = "mcp__\(DureTools.serverName)__*"
 
+    /// #40 · 스펙 5-4b — 배분받은 레포 페인이 이슈 등록 · 브랜치 · 커밋 · push · PR 을 승인 창 없이 한다.
+    /// 승인 창이 뜨면 페인이 멈춰 "진행 한 번" 이 깨진다. 모든 레포 페인이 같이 쓰는 파일이라 사람이 직접 친 작업에도 적용된다.
+    ///
+    /// push 는 꼬리말의 유일한 모양 `git push -u origin <브랜치>` 만 연다. 규칙은 지금 브랜치를 못 보므로 `git push *` 를 열면
+    /// `git push origin` · `--no-verify` · `origin @` 처럼 브랜치를 안 적은 push 가 push.default=simple 로 지금 브랜치(develop 등)를
+    /// 승인 없이 밀었다(재리뷰). 막는 목록으로는 다 닫을 수 없어 허용을 좁혔다. 다른 push 모양은 #40 전처럼 묻는다.
+    static let repoGitAllow = [
+        "Bash(gh issue create *)", "Bash(gh pr create *)",
+        "Bash(git fetch)", "Bash(git fetch *)", "Bash(git switch *)", "Bash(git checkout -b *)",
+        "Bash(git add *)", "Bash(git commit *)", "Bash(git push -u origin *)",
+    ]
+
+    /// 되돌리기 어려운 것은 매번 묻는다. Claude Code 는 deny → ask → allow 순으로 보므로 위 allow 보다 이긴다.
+    /// 기본 브랜치는 레포마다 이름이 달라(공용 파일) `main` · `develop` · `master` 를 다 둔다.
+    ///
+    /// 실측(D-43, `claude -p` 2.1.327)으로 더한 것 — 시작값만 두면 아래가 **승인 없이 나갔다**:
+    /// - `git push origin HEAD:main` — `* main` 은 앞에 공백이 있어야 맞는다. 그래서 `*:main` 을 따로 둔다.
+    ///   뒤에 인자가 붙은 `origin main --tags`, 전체 이름 `HEAD:refs/heads/main` 도 따로 둔다
+    /// - 첫 인자가 force 인 `--force-with-lease=<ref> …` · 묶은 `-fu` — `--force *` 는 공백이, `* --force*` 는 앞 인자가 있어야 맞는다.
+    ///   그래서 공백 없는 `--force*` · `-f*` 를 둔다(`-u origin x` 는 안 걸린다, 실측)
+    /// - `git push origin +x`(refspec `+` 는 force) · `git push -d` · `git push origin :x`(삭제) · `--mirror` · `--prune`
+    /// - `git switch -f` · `--discard-changes` · `-C` — 커밋 안 한 작업을 버리거나 브랜치를 덮는다(`git switch *` allow 에 걸린다)
+    ///
+    /// - (최종 리뷰 I-1 · 재리뷰) 승인 없이 도는 push 는 `git push -u origin <브랜치>` 하나뿐이다(allow 를 그 모양으로 좁혔다).
+    ///   그 밖의 push 모양은 allow 에 없어 #40 전처럼 묻는다. 아래는 allow 모양 안에서도 **늘 묻는** 것 — 기본 브랜치 · force · 삭제 —
+    ///   과, allow 가 다시 넓어져도 막히게 남겨 둔 브랜치 없는 push 다: 맨 `git push` · `git push -u origin`(끝 ` *` 는 인자 없는 꼴에도
+    ///   맞는다, 실측) · `* HEAD` · `*--all*` · `*--tags*`(`--follow-tags` 는 `--tags` 를 품지 않는다),
+    ///   콜론 refspec · 전체 이름에 뒤 인자가 붙은 `HEAD:main --tags` · `HEAD:refs/heads/main --tags`
+    ///
+    /// ⚠️ 규칙 끝이 `:*` 면 Claude Code 가 옛 접두 문법으로 읽어 glob 이 아니게 된다(실측: `* :*` 는 `:x` 삭제를 못 잡았다).
+    /// 그래서 `* :**` 로 쓴다. 맨 `git push -f` 같은 인자 없는 모양은 `-f *` 가 잡는다(실측). 대소문자는 가린다(`-c` 는 `-C *` 에 안 걸린다).
+    static let repoGitAsk = [
+        "Bash(git push --force *)", "Bash(git push -f *)", "Bash(git push --force-with-lease *)",
+        "Bash(git push * --force*)", "Bash(git push * -f)", "Bash(git push * -f *)",
+        "Bash(git push --force*)", "Bash(git push -f*)",
+        "Bash(git push * main)", "Bash(git push * develop)", "Bash(git push * master)",
+        "Bash(git push *:main)", "Bash(git push *:develop)", "Bash(git push *:master)",
+        "Bash(git push * main *)", "Bash(git push * develop *)", "Bash(git push * master *)",
+        "Bash(git push *refs/heads/main)", "Bash(git push *refs/heads/develop)",
+        "Bash(git push *refs/heads/master)",
+        "Bash(git push)", "Bash(git push -u origin)", "Bash(git push * HEAD)", "Bash(git push *--all*)", "Bash(git push *--tags*)",
+        "Bash(git push *:main *)", "Bash(git push *:develop *)", "Bash(git push *:master *)",
+        "Bash(git push *refs/heads/main *)", "Bash(git push *refs/heads/develop *)",
+        "Bash(git push *refs/heads/master *)",
+        "Bash(git push * +*)",
+        "Bash(git push --delete *)", "Bash(git push * --delete *)",
+        "Bash(git push -d *)", "Bash(git push * -d *)", "Bash(git push * :**)",
+        "Bash(git push *--mirror*)", "Bash(git push *--prune*)",
+        "Bash(gh pr merge *)", "Bash(git merge *)", "Bash(git rebase *)",
+        "Bash(git reset --hard)", "Bash(git reset --hard *)",
+        "Bash(git branch -d *)", "Bash(git branch -D *)",
+        "Bash(git switch -f*)", "Bash(git switch *--force*)", "Bash(git switch *--discard-changes*)",
+        "Bash(git switch -C *)",
+        "Bash(git commit --amend*)", "Bash(git commit * --amend*)",
+    ]
+
     static func repoPaneJSON() throws -> Data {
         try encode([
             "hooks": HookBridge.hooksObject(),
-            "permissions": ["allow": [mcpAllowRule],
+            "permissions": ["allow": [mcpAllowRule] + repoGitAllow,
+                            "ask": repoGitAsk,
                             "deny": ["SendMessage", "ListAgents"]],
         ])
     }

@@ -24,6 +24,65 @@ struct SessionSettingsTests {
         #expect(deny == ["SendMessage", "ListAgents"])
     }
 
+    /// #40 · 스펙 5-4b — 배분 페인이 이슈 · 브랜치 · 커밋 · push · PR 을 승인 창 없이 하고,
+    /// 되돌리기 어려운 것(force push · 기본 브랜치 push · merge · rebase · reset --hard · 브랜치 삭제 · amend)은 묻는다.
+    /// 규칙이 실제로 맞는지는 유닛 테스트가 아니라 실측(D-43)이 본다.
+    @Test func 레포_페인은_git_쓰기를_허용하고_되돌리기_어려운_것은_묻는다() throws {
+        let p = try #require(try Self.object(try SessionSettings.repoPaneJSON())["permissions"] as? [String: Any])
+        let allow = p["allow"] as? [String] ?? []
+        let ask = p["ask"] as? [String] ?? []
+        #expect(allow == [SessionSettings.mcpAllowRule] + SessionSettings.repoGitAllow)
+        #expect(ask == SessionSettings.repoGitAsk)
+        #expect(ask.contains("Bash(gh pr merge *)"))
+        #expect(ask.contains("Bash(git push --force *)"))
+        #expect(!allow.contains { $0.contains("merge") || $0.contains("--force") || $0.contains("rebase") })
+    }
+
+    /// D-43 실측 — 시작값으로는 승인 없이 나갔던 모양들. 빠지면 다시 뚫린다.
+    @Test func 레포_페인은_실측에서_뚫린_push_모양도_묻는다() {
+        let ask = SessionSettings.repoGitAsk
+        for rule in ["Bash(git push *:main)", "Bash(git push *:develop)", "Bash(git push *:master)",
+                     "Bash(git push * +*)", "Bash(git push -d *)", "Bash(git push * :**)",
+                     "Bash(git push *--mirror*)", "Bash(git switch -f*)", "Bash(git switch -C *)",
+                     // 수정 1회차 — 첫 인자 force(`--force-with-lease=x …` · `-fu`), 뒤 인자 · 전체 이름 기본 브랜치
+                     "Bash(git push --force*)", "Bash(git push -f*)",
+                     "Bash(git push * main *)", "Bash(git push * develop *)", "Bash(git push * master *)",
+                     "Bash(git push *refs/heads/main)", "Bash(git push *refs/heads/develop)",
+                     "Bash(git push *refs/heads/master)"] {
+            #expect(ask.contains(rule), "\(rule)")
+        }
+    }
+
+    /// 최종 리뷰 I-1 — 규칙은 지금 브랜치를 못 본다. 기본 브랜치에 선 페인의 맨 `git push` · `HEAD` · `--all` · `--tags` 가
+    /// 승인 없이 나가면 안 된다(#40 전에는 물었다). 배분 꼬리말은 `git push -u origin <브랜치>` 만 쓰게 한다.
+    @Test func 레포_페인은_브랜치를_못_박은_push_도_묻는다() {
+        let allow = SessionSettings.repoGitAllow
+        let ask = SessionSettings.repoGitAsk
+        #expect(!allow.contains("Bash(git push)"))
+        // 재리뷰 — 막는 목록으로는 `git push origin` · `--no-verify` · `origin @` 같은 브랜치 없는 push 를 다 못 막는다.
+        // 허용을 꼬리말의 유일한 push 모양으로 좁힌다. 나머지 push 는 예전처럼 묻는다.
+        #expect(!allow.contains("Bash(git push *)"))
+        #expect(allow.contains("Bash(git push -u origin *)"))
+        #expect(allow.filter { $0.hasPrefix("Bash(git push") } == ["Bash(git push -u origin *)"])
+        for rule in ["Bash(git push)", "Bash(git push -u origin)", "Bash(git push * HEAD)", "Bash(git push *--all*)", "Bash(git push *--tags*)",
+                     "Bash(git push *:main *)", "Bash(git push *:develop *)", "Bash(git push *:master *)",
+                     "Bash(git push *refs/heads/main *)", "Bash(git push *refs/heads/develop *)",
+                     "Bash(git push *refs/heads/master *)"] {
+            #expect(ask.contains(rule), "\(rule)")
+        }
+    }
+
+    /// 꼬리말이 시키는 읽기 명령(`git status --porcelain`)도 승인 창 없이 돈다(실측).
+    @Test func 레포_페인은_git_status_를_묻지_않는다() {
+        #expect(!SessionSettings.repoGitAsk.contains { $0.contains("git status") })
+    }
+
+    /// 규칙 끝의 `:*` 는 옛 접두 문법으로 읽혀 glob 이 아니게 된다(실측: `Bash(git push * :*)` 가 `:x` 삭제를 못 잡았다).
+    @Test func 레포_페인_규칙은_끝이_콜론_별이_아니다() {
+        let rules = SessionSettings.repoGitAllow + SessionSettings.repoGitAsk
+        #expect(!rules.contains { $0.hasSuffix(":*)") })
+    }
+
     @Test func 레포_페인에도_훅이_들어간다() throws {
         let hooks = try Self.object(try SessionSettings.repoPaneJSON())["hooks"] as? [String: Any]
         #expect(Set(hooks?.keys.map { $0 } ?? []) == Set(HookBridge.hookEvents))
