@@ -133,4 +133,12 @@ struct EvalSpecTests {
         }
         guard case .failure(.badOutput) = EvalSpec.interpret(result(Fx.json(["type": "result"]) + "\n")) else { Issue.record("init 없음 통과"); return }
     }
+
+    /// 이슈 #40 — git 은 이제 사람이 승인하면 에이전트가 한다. 예전 문장은 감시자가 정상 흐름을 지적하게 만든다.
+    @Test func git_규칙은_승인_뒤_에이전트다() {
+        #expect(EvalSpec.promptVersion == 4)
+        let p = EvalPrompt.render(referenceDir: "/r")
+        #expect(p.contains("승인하면 에이전트가 한다"))
+        #expect(!p.contains("자동화를 권하지 않는다."))
+    }
 }

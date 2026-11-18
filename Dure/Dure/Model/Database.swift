@@ -368,6 +368,21 @@ enum AppDatabase {
             try db.create(index: "idx_finding_key", on: "finding", columns: ["backlog_key"])
         }
 
+        m.registerMigration("v8_dispatch_git") { db in
+            // 이슈 기반 배분 — 전부 NULL 허용(옛 행은 git 을 안 쓰는 배분).
+            try db.alter(table: "dispatch") { t in
+                t.add(column: "git_mode", .text)
+                t.add(column: "issue_title", .text)
+                t.add(column: "issue_body", .text)
+                t.add(column: "git_scope", .text)
+                t.add(column: "branch_hint", .text)
+                t.add(column: "base_branch", .text)
+                t.add(column: "issue_number", .integer)
+                t.add(column: "branch", .text)
+                t.add(column: "pr_number", .integer)
+            }
+        }
+
         return m
     }
 }

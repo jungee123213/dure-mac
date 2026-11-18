@@ -25,6 +25,20 @@ enum DispatchPresentation {
         return s
     }
 
+    /// 카드의 git 한 줄. 종류와 있는 값만. git 도 값도 없으면 nil.
+    static func gitLine(_ d: Dispatch) -> String? {
+        var parts: [String] = []
+        switch d.gitMode {
+        case .newIssue: parts.append("새 이슈")
+        case .continueWork: parts.append("이어 하기")
+        case nil: break
+        }
+        if let n = d.issueNumber { parts.append("이슈 #\(n)") }
+        if let b = d.branch { parts.append(b) }
+        if let p = d.prNumber { parts.append("PR #\(p)") }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+
     static func headline(_ d: Dispatch) -> String {
         if let t = d.title, !t.isEmpty { return t }
         let first = d.instruction.split(separator: "\n").first.map(String.init) ?? ""

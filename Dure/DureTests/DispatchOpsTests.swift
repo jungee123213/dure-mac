@@ -17,6 +17,41 @@ struct DispatchOpsTests {
         return q
     }
 
+    static func newIssueReq() -> DispatchGitRequest {
+        DispatchGitRequest(mode: .newIssue, issueTitle: "제목", issueBody: "본문", branchHint: "login", baseBranch: "feat/#9/base", scope: .commit)
+    }
+
+    @Test func 새_이슈_배분은_초안과_범위를_남긴다() throws {
+        let q = try Self.db()
+        let d = try q.write { try DispatchOps.enqueue(workspaceID: "w1", repoID: "r1", title: nil, instruction: "x", git: Self.newIssueReq(), toolUseId: nil, now: 10, in: $0) }
+        let got = try q.read { try Dispatch.fetchOne($0, key: d.id) }
+        #expect(got?.gitMode == .newIssue)
+        #expect(got?.issueTitle == "제목" && got?.issueBody == "본문" && got?.branchHint == "login")
+        #expect(got?.baseBranch == "feat/#9/base")
+        #expect(got?.gitScope == .commit)
+        #expect(got?.issueNumber == nil)
+    }
+
+    static func continueRow(_ q: DatabaseQueue) throws -> Dispatch {
+        let req = DispatchGitRequest(mode: .continueWork, branch: "feat/#165/x", issueNumber: 165, scope: .pr)
+        return try q.write { try DispatchOps.enqueue(workspaceID: "w1", repoID: "r1", title: nil, instruction: "x", git: req, toolUseId: nil, now: 10, in: $0) }
+    }
+
+    @Test func 이어_하기는_이슈와_브랜치를_바로_남긴다() throws {
+        let q = try Self.db()
+        let d = try Self.continueRow(q)
+        let got = try q.read { try Dispatch.fetchOne($0, key: d.id) }
+        #expect(got?.gitMode == .continueWork && got?.issueNumber == 165 && got?.branch == "feat/#165/x")
+    }
+
+    @Test func 완료는_보고된_값만_덮는다() throws {
+        let q = try Self.db()
+        let d = try Self.continueRow(q)
+        try q.write { try DispatchOps.markDone(d.id, result: "끝", completion: .init(issueNumber: nil, branch: "b", prNumber: 42), now: 20, in: $0) }
+        let got = try q.read { try Dispatch.fetchOne($0, key: d.id) }
+        #expect(got?.issueNumber == 165 && got?.branch == "b" && got?.prNumber == 42 && got?.state == .done)
+    }
+
     @Test func 번호는_워크스페이스_안에서_1부터_오른다() throws {
         let q = try Self.db()
         let (a, b) = try q.write { db in

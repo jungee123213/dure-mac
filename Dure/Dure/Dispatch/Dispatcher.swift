@@ -54,10 +54,10 @@ final class Dispatcher {
     // MARK: - 들어오는 것
 
     func enqueue(workspaceID: String, repo: Repo, title: String?, instruction: String,
-                 toolUseId: String?) throws -> EnqueueOutcome {
+                 git: DispatchGitRequest = .none, toolUseId: String?) throws -> EnqueueOutcome {
         let d = try db.write {
             try DispatchOps.enqueue(workspaceID: workspaceID, repoID: repo.id, title: title,
-                                    instruction: instruction, toolUseId: toolUseId, now: now(), in: $0)
+                                    instruction: instruction, git: git, toolUseId: toolUseId, now: now(), in: $0)
         }
         pumpRepo(repo.id)
         let after = try db.read { try Dispatch.fetchOne($0, key: d.id) }
@@ -114,10 +114,11 @@ final class Dispatcher {
 
     /// 레포 에이전트의 `complete`. 하던 배분을 닫고 요약을 조율자에게 올린다. 열린 배분이 없으면 nil.
     /// 다음 배분은 이 턴의 Stop 뒤에 흐른다 — 지금은 그 페인이 아직 이 턴을 돌고 있다.
-    func complete(repoID: String, summary: String) throws -> Int? {
+    func complete(repoID: String, summary: String, completion: DispatchCompletion = .init()) throws -> Int? {
         guard let open = try db.read({ try DispatchOps.outstanding(repoID: repoID, in: $0) }) else { return nil }
-        try db.write { try DispatchOps.markDone(open.id, result: summary, now: now(), in: $0) }
-        try relay(workspaceID: open.workspaceId, dispatchID: open.id, repoID: repoID, kind: .completion, body: summary)
+        try db.write { try DispatchOps.markDone(open.id, result: summary, completion: completion, now: now(), in: $0) }
+        let body = DispatchGit.completionNote(open, completion).map { $0 + "\n" + summary } ?? summary
+        try relay(workspaceID: open.workspaceId, dispatchID: open.id, repoID: repoID, kind: .completion, body: body)
         pumpRepo(repoID)
         return open.seq
     }
@@ -198,7 +199,7 @@ final class Dispatcher {
                   DispatchRules.isIdle(started: pane.started, state: pane.state, hasOutstanding: open != nil),
                   let session = pane.claudeSessionID,
                   let next = try db.read({ try DispatchOps.queued(repoID: repoID, in: $0) }).first else { return }
-            let body = DispatchBody.dispatch(seq: next.seq, repoName: lookups.repoName(repoID), instruction: next.instruction)
+            let body = DispatchBody.dispatch(next, repoName: lookups.repoName(repoID))
             do {
                 try inbox.send(body, toClaudeSession: session)
             } catch {
@@ -243,11 +244,11 @@ final class Dispatcher {
             // 다음 것을 꺼내면 보내지도 않은 배분이 `delivered` 가 된다. 소켓으로 간 것이 열려 있으면 실을 것이 없다.
             if let open = try db.read({ try DispatchOps.outstanding(repoID: repoID, in: $0) }) {
                 guard open.deliveredSession == "argv" else { return nil }
-                return DispatchBody.dispatch(seq: open.seq, repoName: lookups.repoName(repoID), instruction: open.instruction)
+                return DispatchBody.dispatch(open, repoName: lookups.repoName(repoID))
             }
             guard let next = try db.read({ try DispatchOps.queued(repoID: repoID, in: $0) }).first else { return nil }
             try db.write { try DispatchOps.markDelivered(next.id, session: "argv", now: now(), in: $0) }
-            return DispatchBody.dispatch(seq: next.seq, repoName: lookups.repoName(repoID), instruction: next.instruction)
+            return DispatchBody.dispatch(next, repoName: lookups.repoName(repoID))
         } catch { NSLog("[Dure] 기동 프롬프트 실패: \(error)"); return nil }
     }
 

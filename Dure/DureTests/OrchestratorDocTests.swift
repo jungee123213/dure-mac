@@ -25,9 +25,54 @@ struct OrchestratorDocTests {
         #expect(Self.md.contains("git -C '/a/my ios' log"))
     }
 
+    /// 이슈 #40 — 조율자는 여전히 git 에 쓰지 않는다. 이슈도 초안만 쓰고 등록 · 브랜치 · 커밋 · PR 은 레포 페인이 한다.
     @Test func git_쓰기와_cd_형태를_금지한다() {
-        #expect(Self.md.contains("커밋"))
+        #expect(Self.md.contains("초안만"))
         #expect(Self.md.contains("cd"))
+    }
+
+    // MARK: - 작업 흐름 (이슈 #40)
+
+    /// 안내 창과 같은 원본(스펙 5-8) — 지시문과 안내 창이 따로 놀지 않게.
+    @Test func 작업_흐름을_싣는다() {
+        #expect(Self.md.contains(WorkflowGuide.markdown()))
+    }
+
+    /// D-39 변경안 1 — 조율자는 여러 레포를 요약해 보므로 코드 사실을 틀린다.
+    @Test func 확인_안_한_코드_사실을_단정하지_않는다() {
+        #expect(Self.md.contains("동작 수준"))
+        #expect(Self.md.contains("확인한 경로"))
+    }
+
+    /// 열린 배분이 있는 레포에는 다음 배분이 안 들어간다 — 다시 보내면 큐에 막힌다(스펙 2절).
+    @Test func 어긋나면_다시_배분하지_않는다() {
+        #expect(Self.md.contains("다시 dispatch 하지 않는다"))
+        #expect(Self.md.contains("그 페인 터미널"))
+    }
+
+    @Test func 보완은_이어_하기로_보낸다() {
+        #expect(Self.md.contains("이어 하기"))
+        #expect(Self.md.contains("issue_title"))
+        #expect(Self.md.contains("base"))
+        // M-2 — issue_body 를 이어 하기에 주면 거절된다
+        #expect(Self.md.contains("`issue_title` · `issue_body` · `base` 는 주지 않는다"))
+    }
+
+    /// 규칙 5 — 막히는 것은 질문이 아니라 `dispatch` 로 보낸 답이다.
+    @Test func 배분_중_질문의_답은_dispatch_로_가면_막힌다고_적는다() {
+        #expect(Self.md.contains("답을 `dispatch` 로 보내면 그 배분이 닫힐 때까지 전달되지 않는다"))
+    }
+
+    /// "진행" 한 번이 이슈 등록 · 브랜치 · 커밋(· PR) 승인이다 — 사람이 그걸 알고 승인하게 밝힌다.
+    @Test func 진행이_git_승인임을_밝힌다() {
+        #expect(Self.md.contains("이슈 등록 · 브랜치 · 커밋(· PR) 승인"))
+    }
+
+    /// 조율자 자신의 git 쓰기 금지 줄은 남는다 — 이슈 등록을 페인에 넘겼다고 조율자가 하게 되는 게 아니다.
+    @Test func 조율자는_여전히_git_에_쓰지_않는다() {
+        #expect(Self.md.contains("머지"))
+        #expect(!Self.md.contains("이슈는 만들지 않는다. 초안을 추천하고 생성은 사람이 한다"))
+        #expect(!Self.md.contains("커밋·브랜치·push·PR·머지는 하지 않는다. 사람이 한다"))
     }
 
     /// `--output=<파일>` 은 git 이 파일을 쓴다. 설정이 막으므로 에이전트가 시도하지 않게 알린다.

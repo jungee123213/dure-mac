@@ -18,6 +18,22 @@ struct DureToolsTests {
         #expect((d["inputSchema"] as? [String: Any])?["required"] as? [String] == ["summary"])
     }
 
+    @Test func dispatch_에_git_칸이_있다() throws {
+        let d = try #require(DureTools.definitions(for: .orchestrator).first { $0["name"] as? String == "dispatch" })
+        let schema = try #require(d["inputSchema"] as? [String: Any])
+        let keys = Set((schema["properties"] as? [String: Any] ?? [:]).keys)
+        #expect(keys.isSuperset(of: ["issue_title", "issue_body", "issue", "branch", "base", "git_scope"]))
+        #expect(schema["required"] as? [String] == ["repo", "instruction"])
+    }
+
+    @Test func complete_에_결과_칸이_있다() throws {
+        let d = try #require(DureTools.definitions(for: .repo).first { $0["name"] as? String == "complete" })
+        let schema = try #require(d["inputSchema"] as? [String: Any])
+        let keys = Set((schema["properties"] as? [String: Any] ?? [:]).keys)
+        #expect(keys.isSuperset(of: ["issue", "branch", "pr"]))
+        #expect(schema["required"] as? [String] == ["summary"])
+    }
+
     @Test func 정의마다_설명과_스키마가_있다() {
         for side in [DureTools.Side.orchestrator, .repo] {
             for t in DureTools.definitions(for: side) {

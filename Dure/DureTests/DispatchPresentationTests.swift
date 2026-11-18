@@ -58,4 +58,19 @@ struct DispatchPresentationTests {
         #expect(g.byDispatch["d2"]?.map(\.body) == ["e"])
         #expect(g.orphans.map(\.body) == ["b", "d"])
     }
+
+    @Test func git_줄은_종류와_있는_값만() {
+        var d = Self.d(.queued)
+        #expect(DispatchPresentation.gitLine(d) == nil)
+        d.gitMode = .newIssue
+        #expect(DispatchPresentation.gitLine(d) == "새 이슈")
+        d.issueNumber = 165; d.branch = "x"; d.prNumber = 42
+        #expect(DispatchPresentation.gitLine(d) == "새 이슈 · 이슈 #165 · x · PR #42")
+        var c = Self.d(.queued)
+        c.gitMode = .continueWork; c.issueNumber = 165; c.branch = "feat/#165/x"
+        #expect(DispatchPresentation.gitLine(c) == "이어 하기 · 이슈 #165 · feat/#165/x")
+        var n = Self.d(.queued)
+        n.issueNumber = 3
+        #expect(DispatchPresentation.gitLine(n) == "이슈 #3")
+    }
 }

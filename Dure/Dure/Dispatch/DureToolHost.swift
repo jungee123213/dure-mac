@@ -37,19 +37,32 @@ enum DureToolHost {
                 }
                 let instruction = (call.arguments["instruction"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !instruction.isEmpty else { return .init(text: "instruction 이 비었다.", isError: true) }
+                // 기록하기 전에 검증한다 — 거절된 호출은 이력에 남지 않는다.
+                let git: DispatchGitRequest
+                switch DispatchGit.request(from: call.arguments) {
+                case .failure(let e): return .init(text: e.message, isError: true)
+                case .success(let g): git = g
+                }
                 let title = call.arguments["title"].flatMap { $0.isEmpty ? nil : $0 }
                 let out = try d.enqueue(workspaceID: ctx.workspaceID, repo: repo, title: title,
-                                        instruction: instruction, toolUseId: call.toolUseId)
+                                        instruction: instruction, git: git, toolUseId: call.toolUseId)
+                // 배분 종류를 답에 싣는다 — 칸을 빠뜨려 git 없음으로 들어간 것을 조율자가 바로 알아챈다.
+                let kind = switch git.mode {
+                case .newIssue: "새 이슈"
+                case .continueWork: "이어 하기"
+                case nil: "git 없음"
+                }
+                let head = { (n: Int) in "#\(n) · \(repo.displayName) · \(kind)" }
                 switch out {
                 case .delivered(let n):
-                    return .init(text: "#\(n) · \(repo.displayName) · 전달됨. 끝나면 '[두레] ‹\(repo.displayName)› 배분 #\(n) 끝남' 이 온다.")
+                    return .init(text: "\(head(n)) · 전달됨. 끝나면 '[두레] ‹\(repo.displayName)› 배분 #\(n) 끝남' 이 온다.")
                 case .queuedBusy(let n):
-                    return .init(text: "#\(n) · \(repo.displayName) · 큐 대기 — 페인이 일하는 중이라 끝난 뒤 전달된다.")
+                    return .init(text: "\(head(n)) · 큐 대기 — 페인이 일하는 중이라 끝난 뒤 전달된다.")
                 case .queuedNotStarted(let n):
-                    return .init(text: "#\(n) · \(repo.displayName) · 큐 대기 — 페인이 안 떠 있다. 사람이 그 페인을 시작하면 첫 프롬프트로 실린다. 사람에게 알려라.")
+                    return .init(text: "\(head(n)) · 큐 대기 — 페인이 안 떠 있다. 사람이 그 페인을 시작하면 첫 프롬프트로 실린다. 사람에게 알려라.")
                 case .deliveryFailed(let n, let attempts):
                     // 페인은 놀고 있는데 소켓 쓰기만 실패했다. 큐 대기라고 하면 조율자가 오지 않을 Stop 을 기다린다.
-                    return .init(text: "#\(n) · \(repo.displayName) · 전달 실패(\(attempts)회) — 페인 소켓에 쓰지 못했다. 두레가 30초 안에 다시 시도한다. 3회 실패하면 실패로 닫고 알린다.")
+                    return .init(text: "\(head(n)) · 전달 실패(\(attempts)회) — 페인 소켓에 쓰지 못했다. 두레가 30초 안에 다시 시도한다. 3회 실패하면 실패로 닫고 알린다.")
                 }
             case "workspace":
                 var md = ctx.workspaceMarkdown()
@@ -76,7 +89,8 @@ enum DureToolHost {
                     let head = r.title ?? r.instruction.split(separator: "\n").first.map(String.init) ?? ""
                     // 응답 대기는 레포가 사람 답을 기다리는 것 — 조율자가 "끝났다" 로 읽지 않게 풀어 쓴다(이슈 #24).
                     let state = r.state == .waiting ? "waiting(응답 대기)" : r.state.rawValue
-                    return "- #\(r.seq) · \(names[r.repoId] ?? "?") · \(state) · \(head)" + (first.isEmpty ? "" : " → \(first)")
+                    let git = DispatchPresentation.gitLine(r).map { " · \($0)" } ?? ""
+                    return "- #\(r.seq) · \(names[r.repoId] ?? "?") · \(state) · \(head)" + git + (first.isEmpty ? "" : " → \(first)")
                 }
                 if extra > 0 { lines.append("(… 외 \(extra)건 — state 로 거르거나 대시보드에서)") }
                 return .init(text: lines.joined(separator: "\n"))
@@ -86,7 +100,8 @@ enum DureToolHost {
             case "complete":
                 let summary = (call.arguments["summary"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !summary.isEmpty else { return .init(text: "summary 가 비었다.", isError: true) }
-                guard let repoID = ctx.repoID, let seq = try d.complete(repoID: repoID, summary: summary) else {
+                guard let repoID = ctx.repoID, let seq = try d.complete(repoID: repoID, summary: summary,
+                                                                           completion: DispatchGit.completion(from: call.arguments)) else {
                     return .init(text: "닫을 배분이 없다(두레 배분으로 받은 일이 아니거나 이미 닫혔다).", isError: true)
                 }
                 return .init(text: "배분 #\(seq) 을 완료로 닫고 조율자에게 올렸다.")
