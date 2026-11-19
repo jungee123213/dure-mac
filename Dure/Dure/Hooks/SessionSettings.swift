@@ -36,8 +36,11 @@ enum SessionSettings {
     /// push 는 꼬리말의 유일한 모양 `git push -u origin <브랜치>` 만 연다. 규칙은 지금 브랜치를 못 보므로 `git push *` 를 열면
     /// `git push origin` · `--no-verify` · `origin @` 처럼 브랜치를 안 적은 push 가 push.default=simple 로 지금 브랜치(develop 등)를
     /// 승인 없이 밀었다(재리뷰). 막는 목록으로는 다 닫을 수 없어 허용을 좁혔다. 다른 push 모양은 #40 전처럼 묻는다.
+    ///
+    /// #42 — `pr-draft` 스킬이 기준 브랜치 감지 · 열린 PR 확인에 쓰는 읽기 전용 `gh pr list` · `gh pr view` 도 연다(실측: 없으면 창이 떴다).
+    /// `git ls-remote` 는 열지 않는다 — `--upload-pack=<명령>` 으로 임의 프로그램을 돌린다. 스킬은 `git fetch --prune` 뒤 `git branch -r` 로 본다.
     static let repoGitAllow = [
-        "Bash(gh issue create *)", "Bash(gh pr create *)",
+        "Bash(gh issue create *)", "Bash(gh pr create *)", "Bash(gh pr list *)", "Bash(gh pr view *)",
         "Bash(git fetch)", "Bash(git fetch *)", "Bash(git switch *)", "Bash(git checkout -b *)",
         "Bash(git add *)", "Bash(git commit *)", "Bash(git push -u origin *)",
     ]
