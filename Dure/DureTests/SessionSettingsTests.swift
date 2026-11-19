@@ -72,6 +72,15 @@ struct SessionSettingsTests {
         }
     }
 
+    /// #42 — `pr-draft` 스킬의 읽기 전용 `gh pr list` · `gh pr view` 는 열고, 임의 명령을 돌릴 수 있는 `git ls-remote`(`--upload-pack`)는 열지 않는다.
+    @Test func 레포_페인은_PR_조회를_묻지_않고_ls_remote_는_열지_않는다() {
+        let allow = SessionSettings.repoGitAllow
+        #expect(allow.contains("Bash(gh pr list *)"))
+        #expect(allow.contains("Bash(gh pr view *)"))
+        #expect(!allow.contains { $0.contains("ls-remote") })
+        #expect(!allow.contains { $0.hasPrefix("Bash(gh pr") && !["Bash(gh pr create *)", "Bash(gh pr list *)", "Bash(gh pr view *)"].contains($0) })
+    }
+
     /// 꼬리말이 시키는 읽기 명령(`git status --porcelain`)도 승인 창 없이 돈다(실측).
     @Test func 레포_페인은_git_status_를_묻지_않는다() {
         #expect(!SessionSettings.repoGitAsk.contains { $0.contains("git status") })
