@@ -125,8 +125,9 @@ enum DispatchOps {
         }
     }
 
+    /// 최신이 먼저. `created_at` 은 초 단위라 같은 초는 rowid 로 가른다 — 대시보드 카드가 이걸 뒤집어 시간순으로 그린다.
     static func relays(workspaceID: String, in db: Database) throws -> [Relay] {
-        try Relay.filter(Column("workspace_id") == workspaceID).order(Column("created_at").desc).fetchAll(db)
+        try Relay.filter(Column("workspace_id") == workspaceID).order(Column("created_at").desc, Column.rowID.desc).fetchAll(db)
     }
 
     // MARK: - 조율자 답 (v9)

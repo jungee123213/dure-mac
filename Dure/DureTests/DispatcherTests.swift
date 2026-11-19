@@ -500,13 +500,33 @@ struct DispatcherTests {
         #expect(toPane == 2)
         #expect(try w.d.answer(workspaceID: "w1", repo: w.repoA, body: "왼쪽") == .dispatchClosed(seq: 1))
         let a = try #require(w.d.answers(workspaceID: "w1").first)
-        #expect(a.state == .failed)
-        let fail = try w.db.read { try Relay.filter(Column("kind") == RelayKind.answerFailure.rawValue).fetchAll($0) }
-        #expect(fail.count == 1 && fail[0].body.contains("배분 #1 이 이미 닫혀"))
+        #expect(a.state == .failed && a.failure == Dispatcher.answerDispatchClosed)
+        // 그 자리에서 실패한 답은 툴 오류로만 알린다 — relay 를 쓰면 조율자가 같은 실패를 두 번 듣는다(최종 리뷰 1)
+        #expect(try w.db.read { try Relay.filter(Column("kind") == RelayKind.answerFailure.rawValue).fetchCount($0) } == 0)
         #expect(try w.db.read { try Relay.filter(Column("kind") == RelayKind.failure.rawValue).fetchCount($0) } == 0)
         let two = try w.db.read { try Dispatch.filter(Column("seq") == 2).fetchOne($0) }
         #expect(two?.state == .waiting)
         #expect(w.inbox.sent.filter { $0.session == "cc-a" }.count == toPane)
+        #expect(w.d.initialPrompt(forOrchestrator: "w1")?.contains("답 전달 실패") != true)
+        // 실패한 답은 질문을 덮지 않는다 — 다시 불러도 같은 결과
+        #expect(try w.d.answer(workspaceID: "w1", repo: w.repoA, body: "왼쪽") == .dispatchClosed(seq: 1))
+    }
+
+    /// 큐에 있던 답이 나중 펌프에서 닫힌 배분을 만나면 relay 로 알린다 — 그때는 툴 응답이 없다.
+    @Test func 큐의_답이_나중에_닫힌_배분을_만나면_relay_하나로_알린다() throws {
+        let w = try World(); w.idle("r1", session: "cc-a")
+        _ = try w.d.enqueue(workspaceID: "w1", repo: w.repoA, title: nil, instruction: "하나", toolUseId: nil)
+        try w.ask("r1", "어느 쪽?")
+        #expect(try w.d.answer(workspaceID: "w1", repo: w.repoA, body: "왼쪽") == .queuedBusy)   // 배분 #1 턴이 돈다
+        _ = try w.d.complete(repoID: "r1", summary: "알아서 했다")        // complete 의 펌프 → 답이 닫힌 #1 을 만난다
+        w.d.didStop(repoID: "r1", lastMessage: "끝")
+        let a = try #require(w.d.answers(workspaceID: "w1").first)
+        #expect(a.state == .failed && a.failure == Dispatcher.answerDispatchClosed)
+        let fail = try w.db.read { try Relay.filter(Column("kind") == RelayKind.answerFailure.rawValue).fetchAll($0) }
+        #expect(fail.count == 1)
+        #expect(fail.first?.body == "배분 #1 이 이미 닫혀 답을 전하지 못했다. 사람에게 알린다. 사람이 '진행' 하면 질문과 답을 instruction 에 넣어 다시 dispatch 한다(원래 배분 종류대로).")
+        #expect(try w.db.read { try Relay.filter(Column("kind") == RelayKind.failure.rawValue).fetchCount($0) } == 0)
+        #expect(w.inbox.sent.filter { $0.content.contains("조율자 답") }.isEmpty)
         // 조율자가 받는 글 — 배분 #1 자체가 실패한 것처럼 읽히지 않는다
         let toOrch = try #require(w.d.initialPrompt(forOrchestrator: "w1"))
         #expect(toOrch.contains("[두레] ‹android› 답 전달 실패 (배분 #1, "))
@@ -614,6 +634,26 @@ struct DispatcherTests {
         let w = try World(); w.idle("r1", session: "cc-a")
         #expect(try w.d.answer(workspaceID: "w1", repo: w.repoA, body: "왼쪽") == .noQuestion)
         #expect(w.d.answers(workspaceID: "w1").isEmpty)
+        #expect(w.inbox.sent.isEmpty)
+    }
+
+    /// 카드는 이력을 뒤집어 오래된 것부터 그린다(최종 리뷰 4) — 같은 초의 relay 도 들어온 순서의 반대(최신이 먼저)여야 한다.
+    @Test func relay_이력은_같은_초면_나중_것이_먼저다() throws {
+        let w = try World()
+        for i in 1...5 {
+            try w.d.relay(workspaceID: "w1", dispatchID: nil, repoID: "r1", kind: .report, body: "\(i)")
+        }
+        #expect(w.d.relays(workspaceID: "w1").map(\.body) == ["5", "4", "3", "2", "1"])
+    }
+
+    /// 미답 질문은 없지만 보낼 답이 큐에 있다 — `noQuestion`("dispatch 를 쓴다") 이 아니라 `answerPending`. 아무것도 쓰지 않는다(최종 리뷰 2).
+    @Test func 보낼_답이_큐에_있으면_answerPending() throws {
+        let w = try World(); w.busy("r1")
+        try w.ask("r1", "어느 쪽?")
+        #expect(try w.d.answer(workspaceID: "w1", repo: w.repoA, body: "왼쪽") == .queuedBusy)
+        #expect(try w.d.answer(workspaceID: "w1", repo: w.repoA, body: "오른쪽") == .answerPending)
+        let rows = w.d.answers(workspaceID: "w1")
+        #expect(rows.count == 1 && rows[0].body == "왼쪽" && rows[0].state == .queued)
         #expect(w.inbox.sent.isEmpty)
     }
 }

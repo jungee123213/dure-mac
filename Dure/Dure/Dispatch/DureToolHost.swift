@@ -74,6 +74,8 @@ enum DureToolHost {
                 switch try d.answer(workspaceID: ctx.workspaceID, repo: repo, body: answer) {
                 case .noQuestion:
                     return .init(text: "답할 질문이 없다. 일을 시키려면 dispatch 를 쓴다.", isError: true)
+                case .answerPending:
+                    return .init(text: "이미 보낼 답이 큐에 있다(아직 안 감). 고치려면 사람이 그 페인 터미널에서 직접 답한다.", isError: true)
                 case .delivered:
                     return .init(text: "\(name) 에 답을 전달했다.")
                 case .queuedBusy:
@@ -83,7 +85,8 @@ enum DureToolHost {
                 case .deliveryFailed(let attempts):
                     return .init(text: "\(name) 에 답 전달 실패(\(attempts)회) — 페인 소켓에 쓰지 못했다. 두레가 30초 안에 다시 시도한다. 3회 실패하면 실패로 닫고 알린다.")
                 case .dispatchClosed(let seq):
-                    return .init(text: "배분 #\(seq) 이 이미 닫혀 답을 전하지 못했다. 사람에게 알려라. 계속할 일이면 질문과 답을 instruction 에 넣어 dispatch 이어 하기로 보낸다.", isError: true)
+                    // 툴 오류가 곧 보고다 — 이 실패는 relay 로 다시 오지 않는다.
+                    return .init(text: "배분 #\(seq) 이 이미 닫혀 답을 전하지 못했다. 사람에게 알려라. 사람이 '진행' 하면 질문과 답을 instruction 에 넣어 다시 dispatch 한다(원래 배분 종류대로).", isError: true)
                 }
             case "workspace":
                 var md = ctx.workspaceMarkdown()

@@ -86,6 +86,37 @@ enum DispatchPresentation {
         return (by, orphans)
     }
 
+    /// 배분 카드 밑의 한 줄 — 레포가 올린 relay 또는 조율자가 보낸 답.
+    enum CardRow: Identifiable, Equatable {
+        case relay(Relay), answer(Answer)
+        var id: String {
+            switch self {
+            case .relay(let r): "r:\(r.id)"
+            case .answer(let a): "a:\(a.id)"
+            }
+        }
+        var createdAt: Int {
+            switch self {
+            case .relay(let r): r.createdAt
+            case .answer(let a): a.createdAt
+            }
+        }
+    }
+
+    /// 카드 밑 줄 — relay 와 답을 오래된 것부터 한 목록으로(설계 6절 "질문 relay 다음에"). 답을 모든 relay 밑에 따로 두면
+    /// 질문 · 답 · 완료 보고가 질문 · 완료 보고 · 답으로 읽힌다.
+    /// 같은 초면 relay 가 먼저다 — 답은 질문 뒤에야 생긴다(`created_at` 은 초 단위). 그 밖의 같은 초는 각 목록의 순서를 지킨다.
+    /// 정렬의 안정성은 문서로 보장되지 않으므로 색인을 같이 비교한다.
+    static func cardRows(relays: [Relay], answers: [Answer]) -> [CardRow] {
+        let rows = relays.map(CardRow.relay) + answers.map(CardRow.answer)
+        func rank(_ r: CardRow) -> Int { if case .relay = r { 0 } else { 1 } }
+        return rows.enumerated().sorted { a, b in
+            if a.element.createdAt != b.element.createdAt { return a.element.createdAt < b.element.createdAt }
+            if rank(a.element) != rank(b.element) { return rank(a.element) < rank(b.element) }
+            return a.offset < b.offset
+        }.map(\.element)
+    }
+
     static func waitingHint(queueCount: Int, firstSeq: Int?) -> String? {
         guard queueCount > 0, let n = firstSeq else { return nil }
         return queueCount == 1 ? "시작하면 #\(n) 을 싣습니다" : "시작하면 #\(n) 을 싣습니다 (대기 \(queueCount))"

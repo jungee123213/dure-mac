@@ -128,17 +128,17 @@ struct DispatchHistoryView: View {
                     Text(r).font(.caption2).textSelection(.enabled)
                 }
             }
-            ForEach(relays) { r in
+            // 이력은 최신이 먼저 온다 — 뒤집어 오래된 것부터 섞는다. 답이 그 질문 바로 다음에 놓인다(설계 6절).
+            ForEach(DispatchPresentation.cardRows(relays: relays.reversed(), answers: answers.reversed())) { row in
                 HStack(alignment: .top, spacing: 4) {
-                    Text("↳ \(DispatchPresentation.relayLabel(r))").font(.caption2).foregroundStyle(.secondary)
-                    Text(r.body).font(.caption2).lineLimit(expanded.contains(d.id) ? nil : 1)
-                }
-                .padding(.leading, 8)
-            }
-            ForEach(answers) { a in
-                HStack(alignment: .top, spacing: 4) {
-                    Text("↳ \(DispatchPresentation.answerLabel(a))").font(.caption2).foregroundStyle(.secondary)
-                    Text(a.body).font(.caption2).lineLimit(expanded.contains(d.id) ? nil : 1)
+                    switch row {
+                    case .relay(let r):
+                        Text("↳ \(DispatchPresentation.relayLabel(r))").font(.caption2).foregroundStyle(.secondary)
+                        Text(r.body).font(.caption2).lineLimit(expanded.contains(d.id) ? nil : 1)
+                    case .answer(let a):
+                        Text("↳ \(DispatchPresentation.answerLabel(a))").font(.caption2).foregroundStyle(.secondary)
+                        Text(a.body).font(.caption2).lineLimit(expanded.contains(d.id) ? nil : 1)
+                    }
                 }
                 .padding(.leading, 8)
             }

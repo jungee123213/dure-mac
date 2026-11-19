@@ -95,4 +95,28 @@ struct DispatchPresentationTests {
         #expect(g.byDispatch["d1"]?.map(\.id) == ["a", "c"])
         #expect(g.orphans.map(\.id) == ["b", "d"])
     }
+
+    private static func rel(_ id: String, _ kind: RelayKind, at t: Int) -> Relay {
+        Relay(id: id, workspaceId: "w", dispatchId: "d1", repoId: "r", kind: kind, body: id, state: .delivered, createdAt: t, deliveredAt: nil)
+    }
+
+    private static func ans(_ id: String, at t: Int) -> Answer {
+        Answer(id: id, workspaceId: "w", repoId: "r", dispatchId: "d1", questionId: nil, body: id, state: .delivered,
+               failure: nil, attempts: 0, createdAt: t, deliveredAt: nil)
+    }
+
+    /// 설계 6절 — 카드에서 답은 모든 relay 밑이 아니라 시간순으로 질문 바로 다음에 놓인다(최종 리뷰 4).
+    @Test func 카드_줄은_relay_와_답을_시간순으로_섞는다() {
+        let rows = DispatchPresentation.cardRows(relays: [Self.rel("q", .question, at: 10), Self.rel("c", .completion, at: 30)],
+                                                 answers: [Self.ans("a", at: 20)])
+        #expect(rows.map(\.id) == ["r:q", "a:a", "r:c"])
+    }
+
+    @Test func 카드_줄은_같은_초면_relay_가_먼저고_각_목록의_순서를_지킨다() {
+        let rows = DispatchPresentation.cardRows(relays: [Self.rel("q1", .question, at: 10), Self.rel("q2", .question, at: 10)],
+                                                 answers: [Self.ans("a1", at: 10), Self.ans("a2", at: 10)])
+        #expect(rows.map(\.id) == ["r:q1", "r:q2", "a:a1", "a:a2"])
+        let one = DispatchPresentation.cardRows(relays: [Self.rel("q", .question, at: 10)], answers: [Self.ans("a", at: 10)])
+        #expect(one.map(\.id) == ["r:q", "a:a"])
+    }
 }

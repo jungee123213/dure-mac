@@ -171,7 +171,7 @@ struct DureToolHostTests {
     }
 
     @Test func answer_는_질문의_배분이_닫혔으면_에러로_말한다() throws {
-        let (d, ctx, _) = world()
+        let (d, ctx, w) = world()
         _ = DureToolHost.call(.init(name: "dispatch", arguments: ["repo": "android", "instruction": "하나"], toolUseId: nil),
                               side: .orchestrator, context: ctx, dispatcher: d)
         askVia("r1", ctx, d)
@@ -181,7 +181,21 @@ struct DureToolHostTests {
         d.didStop(repoID: "r1", lastMessage: "하나 끝")
         d.didStop(repoID: "r1", lastMessage: "물었다")
         let r = DureToolHost.call(answerCall("android", "왼쪽"), side: .orchestrator, context: ctx, dispatcher: d)
-        #expect(r.isError && r.text.contains("배분 #1 이 이미 닫혀") && r.text.contains("사람에게 알려라"))
+        #expect(r.isError)
+        #expect(r.text == "배분 #1 이 이미 닫혀 답을 전하지 못했다. 사람에게 알려라. 사람이 '진행' 하면 질문과 답을 instruction 에 넣어 다시 dispatch 한다(원래 배분 종류대로).")
+        // 툴 오류로 이미 알렸다 — 같은 실패를 relay 로 또 보내지 않는다(최종 리뷰 1)
+        #expect(try w.db.read { try Relay.filter(Column("kind") == RelayKind.answerFailure.rawValue).fetchCount($0) } == 0)
+    }
+
+    @Test func answer_는_보낼_답이_큐에_있으면_에러로_말하고_아무것도_안_쓴다() throws {
+        let (d, ctx, w) = world()
+        w.busy("r1")
+        askVia("r1", ctx, d)
+        #expect(!DureToolHost.call(answerCall("android", "왼쪽"), side: .orchestrator, context: ctx, dispatcher: d).isError)
+        let r = DureToolHost.call(answerCall("android", "오른쪽"), side: .orchestrator, context: ctx, dispatcher: d)
+        #expect(r.isError)
+        #expect(r.text == "이미 보낼 답이 큐에 있다(아직 안 감). 고치려면 사람이 그 페인 터미널에서 직접 답한다.")
+        #expect(d.answers(workspaceID: "w1").map(\.body) == ["왼쪽"])
     }
 
     @Test func ask_orchestrator_응답은_조율자가_사람_승인을_받아_답한다고_말한다() throws {

@@ -69,6 +69,9 @@ struct OrchestratorDocTests {
     @Test func 답_전달_실패는_사람에게_알리고_자동으로_다시_보내지_않는다() {
         #expect(Self.md.contains("답 전달 실패"))
         #expect(Self.md.contains("자동으로 다시 보내지 않는다"))
+        // 최종 리뷰 3 — 배분이 닫혀 못 간 답은 사람 '진행' 뒤에만, 원래 배분 종류대로 다시 보낸다. 이어 하기를 강요하지 않는다
+        #expect(Self.md.contains("사람이 '진행' 하면 질문과 답을 instruction 에 넣어 다시 `dispatch` 한다(원래 배분 종류대로)"))
+        #expect(!Self.md.contains("dispatch 이어 하기로 보낸다"))
     }
 
     /// "진행" 한 번이 이슈 등록 · 브랜치 · 커밋(· PR) 승인이다 — 사람이 그걸 알고 승인하게 밝힌다.
