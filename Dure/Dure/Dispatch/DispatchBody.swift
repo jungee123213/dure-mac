@@ -105,7 +105,8 @@ enum DispatchBody {
         let head: String
         switch kind {
         case .completion: head = "배분 #\(seq ?? 0) 끝남 (\(time))"
-        case .failure:    head = "배분 #\(seq ?? 0) 실패 (\(time))"
+        case .failure:    head = seq.map { "배분 #\($0) 실패 (\(time))" } ?? "실패 (\(time))"
+        case .answerFailure: head = seq.map { "답 전달 실패 (배분 #\($0), \(time))" } ?? "답 전달 실패 (\(time))"
         case .report:     head = seq.map { "보고 (배분 #\($0), \(time))" } ?? "보고 (\(time))"
         case .question:   head = seq.map { "질문 (배분 #\($0), \(time))" } ?? "질문 (\(time))"
         }

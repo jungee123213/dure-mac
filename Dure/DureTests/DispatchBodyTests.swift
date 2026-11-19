@@ -170,6 +170,15 @@ struct DispatchBodyTests {
         #expect(DispatchBody.relay(.failure, seq: 3, repoName: "a", body: "b", time: "t").hasPrefix("[두레] ‹a› 배분 #3 실패 (t)"))
     }
 
+    @Test func 답_전달_실패는_배분_실패와_다른_머리말이다() {
+        #expect(DispatchBody.relay(.answerFailure, seq: 3, repoName: "a", body: "b", time: "t") == "[두레] ‹a› 답 전달 실패 (배분 #3, t)\nb")
+        #expect(DispatchBody.relay(.answerFailure, seq: nil, repoName: "a", body: "b", time: "t") == "[두레] ‹a› 답 전달 실패 (t)\nb")
+    }
+
+    @Test func 배분_번호_없는_실패는_배분_0_으로_쓰지_않는다() {
+        #expect(DispatchBody.relay(.failure, seq: nil, repoName: "a", body: "b", time: "t") == "[두레] ‹a› 실패 (t)\nb")
+    }
+
     @Test func 묶음은_구분선으로_잇는다() {
         #expect(DispatchBody.bundle(["하나", "둘"]) == "하나\n\n---\n\n둘")
         #expect(DispatchBody.bundle(["하나"]) == "하나")

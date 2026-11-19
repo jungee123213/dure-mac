@@ -68,6 +68,8 @@ struct Dispatch: Codable, Identifiable, Hashable, FetchableRecord, PersistableRe
 /// 레포 페인(또는 앱)에서 조율자로 올라가는 메시지. 완료 · 보고 · 질문 · 실패.
 enum RelayKind: String, Codable {
     case completion, report, question, failure
+    /// 조율자 답을 페인에 못 전했다(이슈 #43) — 배분 자체의 실패(`failure`)와 구별한다. TEXT 칸이라 마이그레이션이 없다.
+    case answerFailure
 }
 
 enum RelayState: String, Codable {

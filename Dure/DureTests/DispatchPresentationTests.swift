@@ -45,6 +45,8 @@ struct DispatchPresentationTests {
     @Test func 조율자행_라벨() {
         let r = Relay(workspaceId: "w", dispatchId: nil, repoId: nil, kind: .question, body: "b", state: .queued, createdAt: 0, deliveredAt: nil)
         #expect(DispatchPresentation.relayLabel(r) == "질문")
+        var f = r; f.kind = .answerFailure
+        #expect(DispatchPresentation.relayLabel(f) == "답 전달 실패")
     }
 
     /// I-3 — 배분 밖의 보고 · 지워진 배분을 가리키는 relay 도 화면에 남는다.

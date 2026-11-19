@@ -32,6 +32,15 @@ final class Dispatcher {
         case deliveryFailed(seq: Int, attempts: Int)
     }
 
+    /// 조율자 `answer` 의 결과(이슈 #43). `EnqueueOutcome` 과 같은 결에 둘을 더했다 —
+    /// 질문이 나온 배분이 이미 닫혀 못 보냄(`dispatchClosed`), 답할 질문이 없어 아무것도 안 씀(`noQuestion`).
+    enum AnswerOutcome: Equatable {
+        case delivered, queuedBusy, queuedNotStarted
+        case deliveryFailed(attempts: Int)
+        case dispatchClosed(seq: Int)
+        case noQuestion
+    }
+
     private let db: DatabaseQueue
     private let inbox: InboxSending
     let lookups: Lookups
@@ -66,6 +75,23 @@ final class Dispatcher {
             return .deliveryFailed(seq: d.seq, attempts: after.attempts)
         }
         return lookups.repoPane(repo.id).started ? .queuedBusy(seq: d.seq) : .queuedNotStarted(seq: d.seq)
+    }
+
+    /// 조율자의 답(이슈 #43). 그 레포의 미답 질문이 없으면 아무것도 쓰지 않는다 — 답이 "큐를 건너뛰는 배분" 이 되면 안 된다.
+    /// 결과는 `enqueue` 와 같은 결로 흘린 뒤의 답 상태에서 정한다.
+    func answer(workspaceID: String, repo: Repo, body: String) throws -> AnswerOutcome {
+        guard let a = try db.write({
+            try DispatchOps.enqueueAnswer(workspaceID: workspaceID, repoID: repo.id, body: body, now: now(), in: $0)
+        }) else { return .noQuestion }
+        pumpRepo(repo.id)
+        let after = try db.read { try Answer.fetchOne($0, key: a.id) }
+        if after?.state == .delivered { return .delivered }
+        if let after, after.state == .failed, after.failure == Self.answerDispatchClosed,
+           let id = after.dispatchId, let seq = try db.read({ try Dispatch.fetchOne($0, key: id)?.seq }) {
+            return .dispatchClosed(seq: seq)
+        }
+        if let after, after.attempts > 0 { return .deliveryFailed(attempts: after.attempts) }
+        return lookups.repoPane(repo.id).started ? .queuedBusy : .queuedNotStarted
     }
 
     func relay(workspaceID: String, dispatchID: String?, repoID: String?, kind: RelayKind, body: String) throws {
@@ -181,8 +207,10 @@ final class Dispatcher {
             let (repos, workspaces) = try db.read { db -> (Set<String>, Set<String>) in
                 let d = try Dispatch.filter(Column("state") == DispatchState.queued.rawValue && Column("attempts") > 0)
                     .fetchAll(db)
+                let a = try Answer.filter(Column("state") == AnswerState.queued.rawValue && Column("attempts") > 0)
+                    .fetchAll(db)
                 let r = try Relay.filter(Column("state") == RelayState.queued.rawValue).fetchAll(db)
-                return (Set(d.map(\.repoId)), Set(r.map(\.workspaceId)))
+                return (Set(d.map(\.repoId) + a.map(\.repoId)), Set(r.map(\.workspaceId)))
             }
             for id in repos.sorted() { pumpRepo(id) }
             for id in workspaces.sorted() { pumpOrchestrator(id) }
@@ -191,10 +219,15 @@ final class Dispatcher {
 
     // MARK: - 흐름
 
+    /// 답(이슈 #43)이 배분보다 먼저다. 큐에 답이 있으면 그것만 다루고 돌아간다 — 지금 못 보내면 배분도 보내지 않는다.
     func pumpRepo(_ repoID: String) {
         do {
             let pane = lookups.repoPane(repoID)
             let open = try db.read { try DispatchOps.outstanding(repoID: repoID, in: $0) }
+            if let next = try db.read({ try DispatchOps.queuedAnswers(repoID: repoID, in: $0) }).first {
+                try pumpAnswer(next, repoID: repoID, pane: pane, open: open)
+                return
+            }
             guard !repoAwaitingStop.contains(repoID),
                   DispatchRules.isIdle(started: pane.started, state: pane.state, hasOutstanding: open != nil),
                   let session = pane.claudeSessionID,
@@ -221,6 +254,50 @@ final class Dispatcher {
         } catch { NSLog("[Dure] 배분 전달 실패: \(error)") }
     }
 
+    /// `answer.failure` — 질문이 나온 배분이 보내기 전에 닫혔다. `answer(...)` 가 이 이유로 `dispatchClosed` 를 가린다.
+    static let answerDispatchClosed = "배분이 닫힘"
+
+    /// 큐 맨 앞의 답 하나(설계 3절). 실패로 닫으면 `pumpRepo` 를 다시 불러 다음 답이나 배분으로 넘어간다.
+    /// 보내면 한 턴에 하나 — `repoAwaitingStop` 에 넣고, 묶인 배분이 응답 대기면 다시 일하는 중(`delivered`)으로 되돌린다.
+    private func pumpAnswer(_ a: Answer, repoID: String, pane: PaneView, open: Dispatch?) throws {
+        // 답은 질문이 나온 배분에 묶여 있다. 그 배분이 닫혔으면 지금 열린 다른 배분에 붙이지 않는다(검토 1).
+        let bound = try a.dispatchId.flatMap { id in try db.read { try Dispatch.fetchOne($0, key: id) } }
+        if let bound, !DispatchOps.openStates.contains(bound.state.rawValue) {
+            try db.write { try DispatchOps.markAnswerFailed(a.id, reason: Self.answerDispatchClosed, in: $0) }
+            try relay(workspaceID: a.workspaceId, dispatchID: bound.id, repoID: repoID, kind: .answerFailure,
+                      body: "배분 #\(bound.seq) 이 이미 닫혀 답을 전하지 못했다. 사람에게 알린다. 계속할 일이면 질문과 답을 instruction 에 넣어 dispatch 이어 하기로 보낸다.")
+            pumpRepo(repoID)
+            return
+        }
+        // 열린 배분이 `delivered` 면 그 턴(argv 첫 턴 포함)이 아직 돈다 — `canAnswer` 가 막는다(검토 2).
+        guard !repoAwaitingStop.contains(repoID),
+              DispatchRules.canAnswer(started: pane.started, state: pane.state, open: open?.state),
+              let session = pane.claudeSessionID else { return }
+        let question = try a.questionId.flatMap { id in try db.read { try Relay.fetchOne($0, key: id)?.body } }
+        let body = DispatchBody.answer(seq: bound?.seq, question: question, body: a.body)
+        do {
+            try inbox.send(body, toClaudeSession: session)
+        } catch {
+            let n = try db.write { try DispatchOps.bumpAnswerAttempts(a.id, in: $0) }
+            NSLog("[Dure] 조율자 답 전달 실패 \(n)회: \(error)")
+            if DispatchRules.givesUp(afterAttempts: n) {
+                try db.write { try DispatchOps.markAnswerFailed(a.id, reason: "전달 실패 \(n)회", in: $0) }
+                try relay(workspaceID: a.workspaceId, dispatchID: a.dispatchId, repoID: repoID, kind: .answerFailure,
+                          body: "조율자 답을 소켓에 \(n)번 쓰지 못했다. 페인이 메시지를 받는 상태인지 확인하라.")
+                pumpRepo(repoID)   // 다음 것을 시도한다
+            }
+            return
+        }
+        repoAwaitingStop.insert(repoID)
+        // 보낸 뒤의 기록 실패는 "안 보냄" 이 아니다 — 같은 답이 두 번 가지 않게 로그만 남긴다.
+        do {
+            try db.write { db in
+                try DispatchOps.markAnswerDelivered(a.id, now: now(), in: db)
+                if let bound { try DispatchOps.reopen(bound.id, in: db) }
+            }
+        } catch { NSLog("[Dure] 조율자 답 보냈지만 기록 실패: \(error)") }
+    }
+
     func pumpOrchestrator(_ workspaceID: String) {
         do {
             let pane = lookups.orchestratorPane(workspaceID)
@@ -238,6 +315,7 @@ final class Dispatcher {
 
     // MARK: - 기동 프롬프트
 
+    /// 배분만 싣는다. 조율자 답은 싣지 않는다 — 새 세션은 질문의 맥락이 없다(설계 3절). 답은 `SessionStart` 뒤 `pumpRepo` 로 간다.
     func initialPrompt(forRepo repoID: String) -> String? {
         do {
             // 뷰가 다시 그려지며 두 번 불릴 수 있다. 이미 argv 로 실은 것이 열려 있으면 같은 것을 다시 준다 —
@@ -305,5 +383,9 @@ final class Dispatcher {
 
     func relays(workspaceID: String) -> [Relay] {
         (try? db.read { try DispatchOps.relays(workspaceID: workspaceID, in: $0) }) ?? []
+    }
+
+    func answers(workspaceID: String) -> [Answer] {
+        (try? db.read { try DispatchOps.answers(workspaceID: workspaceID, in: $0) }) ?? []
     }
 }

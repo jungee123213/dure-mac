@@ -51,6 +51,7 @@ enum DispatchPresentation {
         case .report: "보고"
         case .question: "질문"
         case .failure: "실패"
+        case .answerFailure: "답 전달 실패"
         }
     }
 
