@@ -536,6 +536,12 @@ final class DureStore {
         return dispatcher.relays(workspaceID: ws)
     }
 
+    func answerHistory() -> [Answer] {
+        _ = dispatchVersion
+        guard let ws = selectedWorkspaceID else { return [] }
+        return dispatcher.answers(workspaceID: ws)
+    }
+
     func cancelDispatch(_ id: String) {
         guard let ws = selectedWorkspaceID else { return }
         _ = try? dispatcher.cancel(.id(id), workspaceID: ws)

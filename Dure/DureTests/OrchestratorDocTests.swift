@@ -58,9 +58,17 @@ struct OrchestratorDocTests {
         #expect(Self.md.contains("`issue_title` · `issue_body` · `base` 는 주지 않는다"))
     }
 
-    /// 규칙 5 — 막히는 것은 질문이 아니라 `dispatch` 로 보낸 답이다.
-    @Test func 배분_중_질문의_답은_dispatch_로_가면_막힌다고_적는다() {
-        #expect(Self.md.contains("답을 `dispatch` 로 보내면 그 배분이 닫힐 때까지 전달되지 않는다"))
+    /// 질문의 답은 `answer` 로 — 열린 배분이 큐를 막으니 `dispatch` 로 답하지 않는다. 사람이 터미널에 전하라는 옛 안내는 없다.
+    @Test func 질문의_답은_answer_로_보내고_dispatch_로_답하지_않는다() {
+        #expect(Self.md.contains("`answer`"))
+        #expect(Self.md.contains("`dispatch` 로 답하지 않는다"))
+        #expect(!Self.md.contains("사람이 그 페인 터미널에 전한다"))
+        #expect(!Self.md.contains("`dispatch` 로 답한다"))
+    }
+
+    @Test func 답_전달_실패는_사람에게_알리고_자동으로_다시_보내지_않는다() {
+        #expect(Self.md.contains("답 전달 실패"))
+        #expect(Self.md.contains("자동으로 다시 보내지 않는다"))
     }
 
     /// "진행" 한 번이 이슈 등록 · 브랜치 · 커밋(· PR) 승인이다 — 사람이 그걸 알고 승인하게 밝힌다.
@@ -96,7 +104,10 @@ struct OrchestratorDocTests {
 
     /// 최종 리뷰 T10 — 질문에 대한 답도 배분이다. 규칙 5 가 규칙 2 의 예외로 읽히면 안 된다.
     @Test func 질문의_답도_사람_승인_뒤에_보낸다() {
-        #expect(Self.md.contains("이때도 규칙 2 를 지킨다 — 답을 `dispatch` 로 보내기 전에 사람에게 보여주고 '진행' 을 받는다."))
+        let rule5 = Self.md.components(separatedBy: "\n").filter { $0.contains("`answer` 로 보낸다") }.joined()
+        #expect(rule5.contains("'진행'"))
+        #expect(rule5.contains("규칙 2"))
+        #expect(Self.md.contains("`answer` 로 보낸다"))
     }
 
     @Test func 큐와_폴더_없는_레포를_적는다() {

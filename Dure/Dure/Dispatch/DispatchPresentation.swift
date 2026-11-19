@@ -67,6 +67,25 @@ enum DispatchPresentation {
         return (by, orphans)
     }
 
+    /// 조율자가 보낸 답의 행 라벨. 실패 사유는 저장된 글을 그대로 보인다.
+    static func answerLabel(_ a: Answer) -> String {
+        switch a.state {
+        case .queued: "답 · 대기"
+        case .delivered: "답"
+        case .failed: a.failure.map { "답 · 실패: \($0)" } ?? "답 · 실패"
+        }
+    }
+
+    /// `group(relays:)` 와 같은 묶음 — 답이 열린 배분이 아니라 **질문이 나온 배분**에 붙는다.
+    static func group(answers: [Answer], dispatchIDs: Set<String>) -> (byDispatch: [String: [Answer]], orphans: [Answer]) {
+        var by: [String: [Answer]] = [:]
+        var orphans: [Answer] = []
+        for a in answers {
+            if let id = a.dispatchId, dispatchIDs.contains(id) { by[id, default: []].append(a) } else { orphans.append(a) }
+        }
+        return (by, orphans)
+    }
+
     static func waitingHint(queueCount: Int, firstSeq: Int?) -> String? {
         guard queueCount > 0, let n = firstSeq else { return nil }
         return queueCount == 1 ? "시작하면 #\(n) 을 싣습니다" : "시작하면 #\(n) 을 싣습니다 (대기 \(queueCount))"

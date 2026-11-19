@@ -36,4 +36,9 @@ struct WorkflowGuideTests {
         #expect(step("검증").contains("터미널"))
         #expect(step("PR").contains("머지"))
     }
+
+    @Test func 질문과_답_흐름을_적는다() {
+        #expect(WorkflowGuide.markdown().contains("answer"))
+        #expect(WorkflowGuide.questionNote.contains("answer"))
+    }
 }

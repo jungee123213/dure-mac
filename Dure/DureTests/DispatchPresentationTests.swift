@@ -75,4 +75,24 @@ struct DispatchPresentationTests {
         n.issueNumber = 3
         #expect(DispatchPresentation.gitLine(n) == "이슈 #3")
     }
+
+    private static func ans(_ id: String, _ dispatch: String?, _ state: AnswerState, failure: String? = nil) -> Answer {
+        Answer(id: id, workspaceId: "w", repoId: "r", dispatchId: dispatch, questionId: nil, body: id, state: state,
+               failure: failure, attempts: 0, createdAt: 0, deliveredAt: nil)
+    }
+
+    @Test func 답_라벨() {
+        #expect(DispatchPresentation.answerLabel(Self.ans("a", nil, .queued)) == "답 · 대기")
+        #expect(DispatchPresentation.answerLabel(Self.ans("a", nil, .delivered)) == "답")
+        #expect(DispatchPresentation.answerLabel(Self.ans("a", nil, .failed, failure: "배분이 닫힘")) == "답 · 실패: 배분이 닫힘")
+    }
+
+    @Test func 답_묶음은_카드로_없으면_고아로() {
+        let g = DispatchPresentation.group(
+            answers: [Self.ans("a", "d1", .delivered), Self.ans("b", nil, .queued), Self.ans("c", "d1", .queued),
+                      Self.ans("d", "gone", .delivered)],
+            dispatchIDs: ["d1"])
+        #expect(g.byDispatch["d1"]?.map(\.id) == ["a", "c"])
+        #expect(g.orphans.map(\.id) == ["b", "d"])
+    }
 }
