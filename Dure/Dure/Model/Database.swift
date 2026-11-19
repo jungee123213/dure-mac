@@ -383,6 +383,27 @@ enum AppDatabase {
             }
         }
 
+        m.registerMigration("v9_answer") { db in
+            try db.create(table: "answer") { t in
+                t.primaryKey("id", .text)
+                t.column("workspace_id", .text).notNull()
+                    .references("workspace", onDelete: .cascade)
+                t.column("repo_id", .text).notNull()
+                    .references("repo", onDelete: .cascade)
+                t.column("dispatch_id", .text)
+                    .references("dispatch", onDelete: .setNull)
+                t.column("question_id", .text)
+                    .references("relay", onDelete: .setNull)
+                t.column("body", .text).notNull()
+                t.column("state", .text).notNull()
+                t.column("failure", .text)
+                t.column("attempts", .integer).notNull().defaults(to: 0)
+                t.column("created_at", .integer).notNull()
+                t.column("delivered_at", .integer)
+            }
+            try db.create(index: "idx_answer_repo_state", on: "answer", columns: ["repo_id", "state"])
+        }
+
         return m
     }
 }

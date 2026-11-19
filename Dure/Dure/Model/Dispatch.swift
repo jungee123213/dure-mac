@@ -97,3 +97,36 @@ struct Relay: Codable, Identifiable, Hashable, FetchableRecord, PersistableRecor
         case deliveredAt = "delivered_at"
     }
 }
+
+/// 조율자가 레포 페인의 질문에 한 답. `relay`(페인 → 조율자)와 방향이 반대라 따로 둔다 (v9, 설계 2절).
+enum AnswerState: String, Codable {
+    case queued, delivered, failed
+}
+
+struct Answer: Codable, Identifiable, Hashable, FetchableRecord, PersistableRecord {
+    var id: String = UUID().uuidString
+    var workspaceId: String
+    var repoId: String
+    /// 질문이 나온 배분. 지금 열린 배분이 아니다.
+    var dispatchId: String?
+    /// 답하는 질문(그 레포의 가장 최근 미답 질문).
+    var questionId: String?
+    var body: String
+    var state: AnswerState
+    var failure: String?
+    var attempts: Int = 0
+    var createdAt: Int
+    var deliveredAt: Int?
+
+    static let databaseTableName = "answer"
+
+    enum CodingKeys: String, CodingKey {
+        case id, body, state, failure, attempts
+        case workspaceId = "workspace_id"
+        case repoId = "repo_id"
+        case dispatchId = "dispatch_id"
+        case questionId = "question_id"
+        case createdAt = "created_at"
+        case deliveredAt = "delivered_at"
+    }
+}

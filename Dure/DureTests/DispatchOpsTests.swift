@@ -170,4 +170,93 @@ struct DispatchOpsTests {
         try q.write { _ = try DispatchOps.enqueue(workspaceID: "w1", repoID: "r1", title: nil, instruction: "x", toolUseId: nil, now: 10, in: $0) }
         #expect(try q.read { try WorkspaceOps.impact(of: "w1", in: $0) } == .init(repos: 2, sessions: 0, dispatches: 1))
     }
+
+    // MARK: - 조율자 답 (v9)
+
+    static func ask(_ q: DatabaseQueue, dispatch: String? = nil, repo: String = "r1", now: Int) throws -> Relay {
+        try q.write { try DispatchOps.enqueueRelay(workspaceID: "w1", dispatchID: dispatch, repoID: repo, kind: .question, body: "질문 \(now)", now: now, in: $0) }
+    }
+
+    @Test func 미답_질문이_없으면_답을_만들지_않는다() throws {
+        let q = try Self.db()
+        let a = try q.write { try DispatchOps.enqueueAnswer(workspaceID: "w1", repoID: "r1", body: "답", now: 10, in: $0) }
+        #expect(a == nil)
+        #expect(try q.read { try Answer.fetchCount($0) } == 0)
+    }
+
+    @Test func 답은_가장_최근_미답_질문과_그_배분에_묶인다() throws {
+        let q = try Self.db()
+        let d = try q.write { try DispatchOps.enqueue(workspaceID: "w1", repoID: "r1", title: nil, instruction: "x", toolUseId: nil, now: 1, in: $0) }
+        _ = try Self.ask(q, dispatch: d.id, now: 2)
+        let second = try Self.ask(q, dispatch: d.id, now: 3)
+        let a = try q.write { try DispatchOps.enqueueAnswer(workspaceID: "w1", repoID: "r1", body: "답", now: 4, in: $0) }
+        #expect(a?.questionId == second.id)
+        #expect(a?.dispatchId == d.id)
+        #expect(try q.read { try DispatchOps.unansweredQuestions(repoID: "r1", in: $0) }.isEmpty)
+    }
+
+    @Test func 답_뒤에_온_질문은_다시_미답이다() throws {
+        let q = try Self.db()
+        _ = try Self.ask(q, now: 1)
+        _ = try q.write { try DispatchOps.enqueueAnswer(workspaceID: "w1", repoID: "r1", body: "답", now: 2, in: $0) }
+        let later = try Self.ask(q, now: 3)
+        let open = try q.read { try DispatchOps.unansweredQuestions(repoID: "r1", in: $0) }
+        #expect(open.map(\.id) == [later.id])
+    }
+
+    @Test func 같은_초의_질문과_답도_순서를_가린다() throws {
+        let q = try Self.db()
+        _ = try Self.ask(q, now: 10)
+        _ = try q.write { try DispatchOps.enqueueAnswer(workspaceID: "w1", repoID: "r1", body: "답", now: 10, in: $0) }
+        let third = try Self.ask(q, now: 10)
+        let open = try q.read { try DispatchOps.unansweredQuestions(repoID: "r1", in: $0) }
+        #expect(open.map(\.id) == [third.id])
+    }
+
+    @Test func 실패한_답은_질문을_덮지_않는다() throws {
+        let q = try Self.db()
+        let question = try Self.ask(q, now: 1)
+        let a = try q.write { try DispatchOps.enqueueAnswer(workspaceID: "w1", repoID: "r1", body: "답", now: 2, in: $0) }
+        try q.write { try DispatchOps.markAnswerFailed(a!.id, reason: "닫힘", in: $0) }
+        let open = try q.read { try DispatchOps.unansweredQuestions(repoID: "r1", in: $0) }
+        #expect(open.map(\.id) == [question.id])
+        #expect(try q.read { try Answer.fetchOne($0, key: a!.id) }?.failure == "닫힘")
+    }
+
+    @Test func 다른_레포의_질문은_섞이지_않는다() throws {
+        let q = try Self.db()
+        _ = try Self.ask(q, repo: "r2", now: 1)
+        #expect(try q.read { try DispatchOps.unansweredQuestions(repoID: "r1", in: $0) }.isEmpty)
+    }
+
+    @Test func 답의_전달_표시와_시도_횟수와_큐_조회() throws {
+        let q = try Self.db()
+        _ = try Self.ask(q, now: 1)
+        let a = try q.write { try DispatchOps.enqueueAnswer(workspaceID: "w1", repoID: "r1", body: "답", now: 2, in: $0) }!
+        #expect(try q.read { try DispatchOps.queuedAnswers(repoID: "r1", in: $0) }.map(\.id) == [a.id])
+        #expect(try q.write { try DispatchOps.bumpAnswerAttempts(a.id, in: $0) } == 1)
+        try q.write { try DispatchOps.markAnswerDelivered(a.id, now: 5, in: $0) }
+        let got = try q.read { try Answer.fetchOne($0, key: a.id) }
+        #expect(got?.state == .delivered && got?.deliveredAt == 5)
+        #expect(try q.read { try DispatchOps.queuedAnswers(repoID: "r1", in: $0) }.isEmpty)
+        #expect(try q.read { try DispatchOps.answers(workspaceID: "w1", in: $0) }.count == 1)
+    }
+
+    @Test func reopen_은_응답_대기만_되돌린다() throws {
+        let q = try Self.db()
+        let w = try q.write { try DispatchOps.enqueue(workspaceID: "w1", repoID: "r1", title: nil, instruction: "x", toolUseId: nil, now: 1, in: $0) }
+        let d = try q.write { try DispatchOps.enqueue(workspaceID: "w1", repoID: "r2", title: nil, instruction: "y", toolUseId: nil, now: 1, in: $0) }
+        try q.write {
+            try DispatchOps.markWaiting(w.id, lastMessage: "마지막 말", in: $0)
+            try DispatchOps.markDone(d.id, result: "끝", now: 5, in: $0)
+            try DispatchOps.reopen(w.id, in: $0)
+            try DispatchOps.reopen(d.id, in: $0)
+        }
+        let gw = try q.read { try Dispatch.fetchOne($0, key: w.id) }
+        let gd = try q.read { try Dispatch.fetchOne($0, key: d.id) }
+        #expect(gw?.state == .delivered)
+        #expect(gw?.result == "마지막 말")
+        #expect(gd?.state == .done)
+        #expect(gd?.result == "끝")
+    }
 }
