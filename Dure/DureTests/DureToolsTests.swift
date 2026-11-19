@@ -5,8 +5,14 @@ import Testing
 /// 단계 4 — 소켓이 곧 신원이라 **조율자와 레포 페인이 다른 툴을 본다.**
 struct DureToolsTests {
 
-    @Test func 조율자_툴_넷() {
-        #expect(DureTools.names(for: .orchestrator) == ["dispatch", "workspace", "tasks", "cancel"])
+    @Test func 조율자_툴_다섯() {
+        #expect(DureTools.names(for: .orchestrator) == ["dispatch", "workspace", "tasks", "cancel", "answer"])
+    }
+
+    @Test func answer_는_조율자에만_있고_repo_와_answer_가_필수다() throws {
+        #expect(!DureTools.names(for: .repo).contains("answer"))
+        let d = try #require(DureTools.definitions(for: .orchestrator).first { $0["name"] as? String == "answer" })
+        #expect((d["inputSchema"] as? [String: Any])?["required"] as? [String] == ["repo", "answer"])
     }
 
     @Test func 레포_툴_셋() {

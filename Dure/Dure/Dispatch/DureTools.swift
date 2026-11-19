@@ -39,6 +39,11 @@ enum DureTools {
                 tool("cancel",
                      "아직 큐에 있는 배분을 취소한다. 이미 전달된 것은 취소할 수 없다.",
                      props: ["id": "배분 번호(#7 또는 7) 또는 id"], required: ["id"]),
+                tool("answer",
+                     "`[두레] ‹레포› 질문` 에 답한다. **사람에게 답을 보여주고 '진행' 을 받은 뒤에만** 부른다. 그 레포에 열린 배분이 있으면 페인이 그 배분을 이어 간다. 일을 새로 시킬 때는 `dispatch` 를 쓴다.",
+                     props: ["repo": "레포 이름(workspace 툴에 나온 이름) 또는 경로",
+                             "answer": "답 전문. 받는 쪽은 질문 첫 줄과 이 글만 본다"],
+                     required: ["repo", "answer"]),
             ]
         case .repo:
             return [

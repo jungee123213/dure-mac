@@ -100,6 +100,98 @@ struct DureToolHostTests {
         #expect(w.inbox.sent.last?.session == "cc-orch" && w.inbox.sent.last?.content.contains("‹android› 질문 (배분 #1, ") == true)
     }
 
+    // MARK: - answer (이슈 #43)
+
+    private func answerCall(_ repo: String, _ answer: String) -> MCPToolCall {
+        .init(name: "answer", arguments: ["repo": repo, "answer": answer], toolUseId: nil)
+    }
+
+    private func askVia(_ repoID: String, _ ctx0: DureToolHost.Context, _ d: Dispatcher) {
+        var ctx = ctx0; ctx.repoID = repoID
+        _ = DureToolHost.call(.init(name: "ask_orchestrator", arguments: ["question": "어느 쪽?"], toolUseId: nil),
+                              side: .repo, context: ctx, dispatcher: d)
+    }
+
+    @Test func 질문이_없으면_answer_는_에러고_아무것도_안_쓴다() throws {
+        let (d, ctx, w) = world()
+        let r = DureToolHost.call(answerCall("android", "왼쪽"), side: .orchestrator, context: ctx, dispatcher: d)
+        #expect(r.isError && r.text.contains("dispatch"))
+        #expect(d.answers(workspaceID: "w1").isEmpty)
+        #expect(w.inbox.sent.isEmpty)
+    }
+
+    @Test func answer_는_레포_소켓에서_거부된다() throws {
+        let (d, ctx0, _) = world()
+        var ctx = ctx0; ctx.repoID = "r1"
+        #expect(DureToolHost.call(answerCall("android", "왼쪽"), side: .repo, context: ctx, dispatcher: d).isError)
+    }
+
+    @Test func answer_는_없는_레포와_빈_답을_거부한다() throws {
+        let (d, ctx, _) = world()
+        askVia("r1", ctx, d)
+        let bad = DureToolHost.call(answerCall("backend", "왼쪽"), side: .orchestrator, context: ctx, dispatcher: d)
+        #expect(bad.isError && bad.text.contains("android (/a/android)"))
+        #expect(DureToolHost.call(answerCall("android", "  "), side: .orchestrator, context: ctx, dispatcher: d).isError)
+        #expect(d.answers(workspaceID: "w1").isEmpty)
+    }
+
+    @Test func answer_는_페인이_쉬면_전달했다고_말한다() throws {
+        let (d, ctx, w) = world()
+        _ = DureToolHost.call(.init(name: "dispatch", arguments: ["repo": "android", "instruction": "파랑"], toolUseId: nil),
+                              side: .orchestrator, context: ctx, dispatcher: d)
+        d.didStop(repoID: "r1", lastMessage: "조율자에게 물었다")
+        askVia("r1", ctx, d)
+        let r = DureToolHost.call(answerCall("android", "왼쪽"), side: .orchestrator, context: ctx, dispatcher: d)
+        #expect(!r.isError && r.text.contains("전달했다"))
+        #expect(w.inbox.sent.last?.content.contains("왼쪽") == true)
+    }
+
+    @Test func answer_는_턴_중이면_이_턴이_끝나면_이라고_말한다() throws {
+        let (d, ctx, _) = world()
+        _ = DureToolHost.call(.init(name: "dispatch", arguments: ["repo": "android", "instruction": "파랑"], toolUseId: nil),
+                              side: .orchestrator, context: ctx, dispatcher: d)
+        askVia("r1", ctx, d)
+        let r = DureToolHost.call(answerCall("android", "왼쪽"), side: .orchestrator, context: ctx, dispatcher: d)
+        #expect(!r.isError && r.text.contains("이 턴이 끝나면"))
+    }
+
+    @Test func answer_는_안_뜬_페인이면_사람에게_알리라고_말한다() throws {
+        let (d, ctx, _) = world()
+        askVia("r2", ctx, d)
+        let r = DureToolHost.call(answerCall("ios", "왼쪽"), side: .orchestrator, context: ctx, dispatcher: d)
+        #expect(!r.isError && r.text.contains("사람에게 알려라"))
+    }
+
+    @Test func answer_는_전달에_실패하면_다시_시도한다고_말한다() throws {
+        let (d, ctx, w) = world()
+        askVia("r1", ctx, d)
+        w.inbox.failNext = 1
+        let r = DureToolHost.call(answerCall("android", "왼쪽"), side: .orchestrator, context: ctx, dispatcher: d)
+        #expect(!r.isError && r.text.contains("전달 실패(1회)") && r.text.contains("다시 시도"))
+    }
+
+    @Test func answer_는_질문의_배분이_닫혔으면_에러로_말한다() throws {
+        let (d, ctx, _) = world()
+        _ = DureToolHost.call(.init(name: "dispatch", arguments: ["repo": "android", "instruction": "하나"], toolUseId: nil),
+                              side: .orchestrator, context: ctx, dispatcher: d)
+        askVia("r1", ctx, d)
+        _ = try d.complete(repoID: "r1", summary: "알아서 했다")
+        _ = DureToolHost.call(.init(name: "dispatch", arguments: ["repo": "android", "instruction": "둘"], toolUseId: nil),
+                              side: .orchestrator, context: ctx, dispatcher: d)
+        d.didStop(repoID: "r1", lastMessage: "하나 끝")
+        d.didStop(repoID: "r1", lastMessage: "물었다")
+        let r = DureToolHost.call(answerCall("android", "왼쪽"), side: .orchestrator, context: ctx, dispatcher: d)
+        #expect(r.isError && r.text.contains("배분 #1 이 이미 닫혀") && r.text.contains("사람에게 알려라"))
+    }
+
+    @Test func ask_orchestrator_응답은_조율자가_사람_승인을_받아_답한다고_말한다() throws {
+        let (d, ctx0, _) = world()
+        var ctx = ctx0; ctx.repoID = "r1"
+        let r = DureToolHost.call(.init(name: "ask_orchestrator", arguments: ["question": "어느 API?"], toolUseId: nil),
+                                  side: .repo, context: ctx, dispatcher: d)
+        #expect(r.text.contains("조율자가 사람 승인을 받아 답한다"))
+    }
+
     @Test func tasks_는_이력을_상태로_거른다() throws {
         let (d, ctx, _) = world()
         _ = DureToolHost.call(.init(name: "dispatch", arguments: ["repo": "android", "instruction": "a"], toolUseId: nil), side: .orchestrator, context: ctx, dispatcher: d)
