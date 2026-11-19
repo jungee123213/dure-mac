@@ -45,6 +45,8 @@ struct DispatchPresentationTests {
     @Test func 조율자행_라벨() {
         let r = Relay(workspaceId: "w", dispatchId: nil, repoId: nil, kind: .question, body: "b", state: .queued, createdAt: 0, deliveredAt: nil)
         #expect(DispatchPresentation.relayLabel(r) == "질문")
+        var f = r; f.kind = .answerFailure
+        #expect(DispatchPresentation.relayLabel(f) == "답 전달 실패")
     }
 
     /// I-3 — 배분 밖의 보고 · 지워진 배분을 가리키는 relay 도 화면에 남는다.
@@ -72,5 +74,49 @@ struct DispatchPresentationTests {
         var n = Self.d(.queued)
         n.issueNumber = 3
         #expect(DispatchPresentation.gitLine(n) == "이슈 #3")
+    }
+
+    private static func ans(_ id: String, _ dispatch: String?, _ state: AnswerState, failure: String? = nil) -> Answer {
+        Answer(id: id, workspaceId: "w", repoId: "r", dispatchId: dispatch, questionId: nil, body: id, state: state,
+               failure: failure, attempts: 0, createdAt: 0, deliveredAt: nil)
+    }
+
+    @Test func 답_라벨() {
+        #expect(DispatchPresentation.answerLabel(Self.ans("a", nil, .queued)) == "답 · 대기")
+        #expect(DispatchPresentation.answerLabel(Self.ans("a", nil, .delivered)) == "답")
+        #expect(DispatchPresentation.answerLabel(Self.ans("a", nil, .failed, failure: "배분이 닫힘")) == "답 · 실패: 배분이 닫힘")
+    }
+
+    @Test func 답_묶음은_카드로_없으면_고아로() {
+        let g = DispatchPresentation.group(
+            answers: [Self.ans("a", "d1", .delivered), Self.ans("b", nil, .queued), Self.ans("c", "d1", .queued),
+                      Self.ans("d", "gone", .delivered)],
+            dispatchIDs: ["d1"])
+        #expect(g.byDispatch["d1"]?.map(\.id) == ["a", "c"])
+        #expect(g.orphans.map(\.id) == ["b", "d"])
+    }
+
+    private static func rel(_ id: String, _ kind: RelayKind, at t: Int) -> Relay {
+        Relay(id: id, workspaceId: "w", dispatchId: "d1", repoId: "r", kind: kind, body: id, state: .delivered, createdAt: t, deliveredAt: nil)
+    }
+
+    private static func ans(_ id: String, at t: Int) -> Answer {
+        Answer(id: id, workspaceId: "w", repoId: "r", dispatchId: "d1", questionId: nil, body: id, state: .delivered,
+               failure: nil, attempts: 0, createdAt: t, deliveredAt: nil)
+    }
+
+    /// 설계 6절 — 카드에서 답은 모든 relay 밑이 아니라 시간순으로 질문 바로 다음에 놓인다(최종 리뷰 4).
+    @Test func 카드_줄은_relay_와_답을_시간순으로_섞는다() {
+        let rows = DispatchPresentation.cardRows(relays: [Self.rel("q", .question, at: 10), Self.rel("c", .completion, at: 30)],
+                                                 answers: [Self.ans("a", at: 20)])
+        #expect(rows.map(\.id) == ["r:q", "a:a", "r:c"])
+    }
+
+    @Test func 카드_줄은_같은_초면_relay_가_먼저고_각_목록의_순서를_지킨다() {
+        let rows = DispatchPresentation.cardRows(relays: [Self.rel("q1", .question, at: 10), Self.rel("q2", .question, at: 10)],
+                                                 answers: [Self.ans("a1", at: 10), Self.ans("a2", at: 10)])
+        #expect(rows.map(\.id) == ["r:q1", "r:q2", "a:a1", "a:a2"])
+        let one = DispatchPresentation.cardRows(relays: [Self.rel("q", .question, at: 10)], answers: [Self.ans("a", at: 10)])
+        #expect(one.map(\.id) == ["r:q", "a:a"])
     }
 }

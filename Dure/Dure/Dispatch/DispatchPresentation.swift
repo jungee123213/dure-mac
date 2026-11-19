@@ -51,6 +51,7 @@ enum DispatchPresentation {
         case .report: "보고"
         case .question: "질문"
         case .failure: "실패"
+        case .answerFailure: "답 전달 실패"
         }
     }
 
@@ -64,6 +65,56 @@ enum DispatchPresentation {
             if let id = r.dispatchId, dispatchIDs.contains(id) { by[id, default: []].append(r) } else { orphans.append(r) }
         }
         return (by, orphans)
+    }
+
+    /// 조율자가 보낸 답의 행 라벨. 실패 사유는 저장된 글을 그대로 보인다.
+    static func answerLabel(_ a: Answer) -> String {
+        switch a.state {
+        case .queued: "답 · 대기"
+        case .delivered: "답"
+        case .failed: a.failure.map { "답 · 실패: \($0)" } ?? "답 · 실패"
+        }
+    }
+
+    /// `group(relays:)` 와 같은 묶음 — 답이 열린 배분이 아니라 **질문이 나온 배분**에 붙는다.
+    static func group(answers: [Answer], dispatchIDs: Set<String>) -> (byDispatch: [String: [Answer]], orphans: [Answer]) {
+        var by: [String: [Answer]] = [:]
+        var orphans: [Answer] = []
+        for a in answers {
+            if let id = a.dispatchId, dispatchIDs.contains(id) { by[id, default: []].append(a) } else { orphans.append(a) }
+        }
+        return (by, orphans)
+    }
+
+    /// 배분 카드 밑의 한 줄 — 레포가 올린 relay 또는 조율자가 보낸 답.
+    enum CardRow: Identifiable, Equatable {
+        case relay(Relay), answer(Answer)
+        var id: String {
+            switch self {
+            case .relay(let r): "r:\(r.id)"
+            case .answer(let a): "a:\(a.id)"
+            }
+        }
+        var createdAt: Int {
+            switch self {
+            case .relay(let r): r.createdAt
+            case .answer(let a): a.createdAt
+            }
+        }
+    }
+
+    /// 카드 밑 줄 — relay 와 답을 오래된 것부터 한 목록으로(설계 6절 "질문 relay 다음에"). 답을 모든 relay 밑에 따로 두면
+    /// 질문 · 답 · 완료 보고가 질문 · 완료 보고 · 답으로 읽힌다.
+    /// 같은 초면 relay 가 먼저다 — 답은 질문 뒤에야 생긴다(`created_at` 은 초 단위). 그 밖의 같은 초는 각 목록의 순서를 지킨다.
+    /// 정렬의 안정성은 문서로 보장되지 않으므로 색인을 같이 비교한다.
+    static func cardRows(relays: [Relay], answers: [Answer]) -> [CardRow] {
+        let rows = relays.map(CardRow.relay) + answers.map(CardRow.answer)
+        func rank(_ r: CardRow) -> Int { if case .relay = r { 0 } else { 1 } }
+        return rows.enumerated().sorted { a, b in
+            if a.element.createdAt != b.element.createdAt { return a.element.createdAt < b.element.createdAt }
+            if rank(a.element) != rank(b.element) { return rank(a.element) < rank(b.element) }
+            return a.offset < b.offset
+        }.map(\.element)
     }
 
     static func waitingHint(queueCount: Int, firstSeq: Int?) -> String? {

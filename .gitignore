@@ -28,6 +28,7 @@ xcuserdata/
 *.ipa
 *.dSYM
 *.dSYM.zip
+*.profraw
 timeline.xctimeline
 playground.xcworkspace
 

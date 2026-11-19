@@ -46,6 +46,11 @@ struct DispatcherTests {
         }
         func busy(_ repo: String) { repoPanes[repo] = .init(started: true, state: .running, claudeSessionID: "cc") }
         func orchIdle() { orch["w1"] = .init(started: true, state: .done, claudeSessionID: "cc-orch") }
+        /// 레포 페인의 `ask_orchestrator` — 그 페인의 열린 배분에 묶인 질문 relay.
+        func ask(_ repo: String, _ text: String) throws {
+            try d.relay(workspaceID: "w1", dispatchID: d.outstandingDispatchID(repoID: repo), repoID: repo,
+                        kind: .question, body: text)
+        }
     }
 
     func gitDone(_ w: World, _ c: DispatchCompletion?) throws -> String? {
@@ -406,5 +411,249 @@ struct DispatcherTests {
         let id = try #require(try w.db.read { try Dispatch.fetchOne($0) }?.id)
         #expect(try w.d.cancel(.id(id), workspaceID: "w2") == false)
         #expect(try w.db.read { try Dispatch.fetchOne($0) }?.state == .queued)
+    }
+
+    // MARK: - 조율자 답 (이슈 #43)
+
+    @Test func 열린_배분이_응답_대기면_답이_바로_간다() throws {
+        let w = try World(); w.idle("r1", session: "cc-a")
+        _ = try w.d.enqueue(workspaceID: "w1", repo: w.repoA, title: nil, instruction: "x", toolUseId: nil)
+        w.d.didStop(repoID: "r1", lastMessage: "조율자에게 물었다")
+        try w.ask("r1", "API 는 v2 로?")
+        #expect(try w.d.answer(workspaceID: "w1", repo: w.repoA, body: "v2 로 간다") == .delivered)
+        let last = try #require(w.inbox.sent.last)
+        #expect(last.session == "cc-a" && last.content.hasPrefix("[두레] 조율자 답 (배분 #1)"))
+        #expect(last.content.contains("질문: API 는 v2 로?\nv2 로 간다"))
+        #expect(try w.db.read { try Dispatch.fetchOne($0) }?.state == .delivered)   // 페인이 그 배분을 다시 하는 중
+        #expect(w.d.answers(workspaceID: "w1").first?.state == .delivered)
+    }
+
+    @Test func 답이_간_뒤에도_큐의_다음_배분은_막힌다() throws {
+        let w = try World(); w.idle("r1", session: "cc-a")
+        _ = try w.d.enqueue(workspaceID: "w1", repo: w.repoA, title: nil, instruction: "하나", toolUseId: nil)
+        #expect(try w.d.enqueue(workspaceID: "w1", repo: w.repoA, title: nil, instruction: "둘", toolUseId: nil) == .queuedBusy(seq: 2))
+        w.d.didStop(repoID: "r1", lastMessage: "물었다")
+        try w.ask("r1", "어느 쪽?")
+        #expect(try w.d.answer(workspaceID: "w1", repo: w.repoA, body: "왼쪽") == .delivered)
+        let two = try w.db.read { try Dispatch.filter(Column("seq") == 2).fetchOne($0) }
+        #expect(two?.state == .queued)
+        #expect(w.inbox.sent.count == 2)    // 배분 #1 + 답
+    }
+
+    @Test func 턴이_도는_중이면_답은_Stop_뒤에_배분보다_먼저_간다() throws {
+        let w = try World(); w.idle("r1", session: "cc-a")
+        _ = try w.d.enqueue(workspaceID: "w1", repo: w.repoA, title: nil, instruction: "하나", toolUseId: nil)
+        try w.ask("r1", "어느 쪽?")                                   // 배분 #1 의 턴 한가운데서 물었다
+        #expect(try w.d.answer(workspaceID: "w1", repo: w.repoA, body: "왼쪽") == .queuedBusy)
+        #expect(w.inbox.sent.count == 1)
+        #expect(try w.d.enqueue(workspaceID: "w1", repo: w.repoA, title: nil, instruction: "둘", toolUseId: nil) == .queuedBusy(seq: 2))
+        w.d.didStop(repoID: "r1", lastMessage: "답을 기다린다")
+        #expect(w.inbox.sent.count == 2)
+        #expect(w.inbox.sent.last?.content.hasPrefix("[두레] 조율자 답 (배분 #1)") == true)
+        let rows = try w.db.read { try Dispatch.order(Column("seq")).fetchAll($0) }
+        #expect(rows[0].state == .delivered && rows[1].state == .queued)
+    }
+
+    @Test func argv_첫_턴_중에는_답이_끼어들지_않는다() throws {
+        let w = try World()
+        _ = try w.d.enqueue(workspaceID: "w1", repo: w.repoA, title: nil, instruction: "첫", toolUseId: nil)
+        _ = try #require(w.d.initialPrompt(forRepo: "r1"))
+        w.repoPanes["r1"] = .init(started: true, state: .started, claudeSessionID: "cc-new")
+        w.d.didStart(repoID: "r1", session: "cc-new", source: "startup")
+        try w.ask("r1", "어느 쪽?")
+        #expect(try w.d.answer(workspaceID: "w1", repo: w.repoA, body: "왼쪽") == .queuedBusy)
+        #expect(w.inbox.sent.isEmpty)
+        #expect(w.d.answers(workspaceID: "w1").first?.state == .queued)
+    }
+
+    @Test func 배분_밖_질문의_답은_배분_상태를_바꾸지_않는다() throws {
+        let w = try World(); w.idle("r1", session: "cc-a")
+        try w.ask("r1", "이 레포 규칙이 뭐지?")                         // 열린 배분 없음
+        let before = try w.db.read { try Dispatch.fetchAll($0) }
+        #expect(try w.d.answer(workspaceID: "w1", repo: w.repoA, body: "README 를 봐라") == .delivered)
+        #expect(w.inbox.sent.last?.content.hasPrefix("[두레] 조율자 답 (배분 없음)") == true)
+        #expect(try w.db.read { try Dispatch.fetchAll($0) } == before)
+        #expect(w.d.answers(workspaceID: "w1").first?.dispatchId == nil)
+    }
+
+    /// 배분 밖 질문 → 그 뒤 배분이 열림 → 답은 그 배분이 응답 대기일 때만 가고, 그 배분을 되돌리지 않는다.
+    @Test func 배분_밖_질문의_답은_나중에_열린_배분을_되돌리지_않는다() throws {
+        let w = try World(); w.idle("r1", session: "cc-a")
+        try w.ask("r1", "이 레포 규칙이 뭐지?")
+        _ = try w.d.enqueue(workspaceID: "w1", repo: w.repoA, title: nil, instruction: "x", toolUseId: nil)
+        #expect(try w.d.answer(workspaceID: "w1", repo: w.repoA, body: "README") == .queuedBusy)   // 배분 #1 턴이 돈다
+        #expect(w.inbox.sent.count == 1)
+        w.d.didStop(repoID: "r1", lastMessage: "물었다")                 // 배분 #1 응답 대기 → 답이 간다
+        #expect(w.inbox.sent.count == 2 && w.inbox.sent[1].content.hasPrefix("[두레] 조율자 답 (배분 없음)"))
+        #expect(try w.db.read { try Dispatch.fetchOne($0) }?.state == .waiting)
+    }
+
+    @Test func 질문의_배분이_닫히면_답은_새_배분에_붙지_않고_실패한다() throws {
+        let w = try World(); w.idle("r1", session: "cc-a")
+        _ = try w.d.enqueue(workspaceID: "w1", repo: w.repoA, title: nil, instruction: "하나", toolUseId: nil)
+        try w.ask("r1", "어느 쪽?")
+        _ = try w.d.complete(repoID: "r1", summary: "알아서 했다")
+        _ = try w.d.enqueue(workspaceID: "w1", repo: w.repoA, title: nil, instruction: "둘", toolUseId: nil)
+        w.d.didStop(repoID: "r1", lastMessage: "하나 끝")                // #2 전달
+        w.d.didStop(repoID: "r1", lastMessage: "물었다")                 // #2 응답 대기
+        let toPane = w.inbox.sent.filter { $0.session == "cc-a" }.count
+        #expect(toPane == 2)
+        #expect(try w.d.answer(workspaceID: "w1", repo: w.repoA, body: "왼쪽") == .dispatchClosed(seq: 1))
+        let a = try #require(w.d.answers(workspaceID: "w1").first)
+        #expect(a.state == .failed && a.failure == Dispatcher.answerDispatchClosed)
+        // 그 자리에서 실패한 답은 툴 오류로만 알린다 — relay 를 쓰면 조율자가 같은 실패를 두 번 듣는다(최종 리뷰 1)
+        #expect(try w.db.read { try Relay.filter(Column("kind") == RelayKind.answerFailure.rawValue).fetchCount($0) } == 0)
+        #expect(try w.db.read { try Relay.filter(Column("kind") == RelayKind.failure.rawValue).fetchCount($0) } == 0)
+        let two = try w.db.read { try Dispatch.filter(Column("seq") == 2).fetchOne($0) }
+        #expect(two?.state == .waiting)
+        #expect(w.inbox.sent.filter { $0.session == "cc-a" }.count == toPane)
+        #expect(w.d.initialPrompt(forOrchestrator: "w1")?.contains("답 전달 실패") != true)
+        // 실패한 답은 질문을 덮지 않는다 — 다시 불러도 같은 결과
+        #expect(try w.d.answer(workspaceID: "w1", repo: w.repoA, body: "왼쪽") == .dispatchClosed(seq: 1))
+    }
+
+    /// 큐에 있던 답이 나중 펌프에서 닫힌 배분을 만나면 relay 로 알린다 — 그때는 툴 응답이 없다.
+    @Test func 큐의_답이_나중에_닫힌_배분을_만나면_relay_하나로_알린다() throws {
+        let w = try World(); w.idle("r1", session: "cc-a")
+        _ = try w.d.enqueue(workspaceID: "w1", repo: w.repoA, title: nil, instruction: "하나", toolUseId: nil)
+        try w.ask("r1", "어느 쪽?")
+        #expect(try w.d.answer(workspaceID: "w1", repo: w.repoA, body: "왼쪽") == .queuedBusy)   // 배분 #1 턴이 돈다
+        _ = try w.d.complete(repoID: "r1", summary: "알아서 했다")        // complete 의 펌프 → 답이 닫힌 #1 을 만난다
+        w.d.didStop(repoID: "r1", lastMessage: "끝")
+        let a = try #require(w.d.answers(workspaceID: "w1").first)
+        #expect(a.state == .failed && a.failure == Dispatcher.answerDispatchClosed)
+        let fail = try w.db.read { try Relay.filter(Column("kind") == RelayKind.answerFailure.rawValue).fetchAll($0) }
+        #expect(fail.count == 1)
+        #expect(fail.first?.body == "배분 #1 이 이미 닫혀 답을 전하지 못했다. 사람에게 알린다. 사람이 '진행' 하면 질문과 답을 instruction 에 넣어 다시 dispatch 한다(원래 배분 종류대로).")
+        #expect(try w.db.read { try Relay.filter(Column("kind") == RelayKind.failure.rawValue).fetchCount($0) } == 0)
+        #expect(w.inbox.sent.filter { $0.content.contains("조율자 답") }.isEmpty)
+        // 조율자가 받는 글 — 배분 #1 자체가 실패한 것처럼 읽히지 않는다
+        let toOrch = try #require(w.d.initialPrompt(forOrchestrator: "w1"))
+        #expect(toOrch.contains("[두레] ‹android› 답 전달 실패 (배분 #1, "))
+        #expect(!toOrch.contains("배분 #1 실패") && !toOrch.contains("배분 #0"))
+    }
+
+    @Test func 소켓_실패가_반복되면_실패로_닫고_다음으로_넘어간다() throws {
+        let w = try World(); w.idle("r1", session: "cc-a")
+        w.inbox.failNext = 3
+        try w.ask("r1", "어느 쪽?")
+        #expect(try w.d.answer(workspaceID: "w1", repo: w.repoA, body: "왼쪽") == .deliveryFailed(attempts: 1))
+        w.busy("r1")                                                   // 배분만 큐에 넣는다(시도 없이)
+        #expect(try w.d.enqueue(workspaceID: "w1", repo: w.repoA, title: nil, instruction: "다음", toolUseId: nil) == .queuedBusy(seq: 1))
+        w.idle("r1", session: "cc-a")
+        w.d.retryPending()          // 2회
+        #expect(w.inbox.sent.isEmpty)   // 답이 먼저다 — 배분이 앞지르지 않는다
+        w.d.retryPending()          // 3회 → 포기, 다음 것(배분 #1)으로
+        let a = try #require(w.d.answers(workspaceID: "w1").first)
+        #expect(a.state == .failed && a.attempts == 3)
+        let fail = try w.db.read { try Relay.filter(Column("kind") == RelayKind.answerFailure.rawValue).fetchAll($0) }
+        #expect(fail.count == 1 && fail[0].body.contains("3번") && fail[0].dispatchId == nil)
+        let toOrch = try #require(w.d.initialPrompt(forOrchestrator: "w1"))
+        #expect(toOrch.contains("[두레] ‹android› 답 전달 실패 ("))     // 배분 밖 답
+        #expect(!toOrch.contains("배분 #0"))
+        #expect(w.inbox.sent.count == 1 && w.inbox.sent[0].content.hasPrefix("[두레] 조율자 배분 #1"))
+        w.d.retryPending()          // 더 밀 것이 없다
+        #expect(w.inbox.sent.count == 1)
+    }
+
+    @Test func retryPending_은_시도한_답이_있는_레포를_민다() throws {
+        let w = try World(); w.idle("r1", session: "cc-a")
+        w.inbox.failNext = 1
+        try w.ask("r1", "어느 쪽?")
+        #expect(try w.d.answer(workspaceID: "w1", repo: w.repoA, body: "왼쪽") == .deliveryFailed(attempts: 1))
+        #expect(w.inbox.sent.isEmpty)
+        w.d.retryPending()
+        #expect(w.inbox.sent.count == 1 && w.inbox.sent[0].content.hasPrefix("[두레] 조율자 답"))
+        #expect(w.d.answers(workspaceID: "w1").first?.state == .delivered)
+    }
+
+    @Test func 페인이_안_떠_있으면_argv_로_싣지_않는다() throws {
+        let w = try World()
+        try w.ask("r1", "어느 쪽?")
+        #expect(try w.d.answer(workspaceID: "w1", repo: w.repoA, body: "왼쪽") == .queuedNotStarted)
+        #expect(w.d.initialPrompt(forRepo: "r1")?.contains("조율자 답") != true)
+        w.idle("r1", session: "cc-new")
+        w.d.didStart(repoID: "r1", session: "cc-new", source: "startup")
+        #expect(w.inbox.sent.count == 1 && w.inbox.sent[0].session == "cc-new")
+        #expect(w.inbox.sent.first?.content.hasPrefix("[두레] 조율자 답 (배분 없음)\n질문: 어느 쪽?\n왼쪽") == true)
+    }
+
+    /// 지금 정한 동작(Task 3 리뷰): 큐에 배분도 있으면 argv 로는 배분이 먼저 실리고, 답은 그 배분의 첫 Stop 뒤에 간다.
+    @Test func 페인이_안_떠_있으면_argv_배분이_먼저고_답은_첫_Stop_뒤에_간다() throws {
+        let w = try World()
+        try w.ask("r1", "어느 쪽?")
+        #expect(try w.d.answer(workspaceID: "w1", repo: w.repoA, body: "왼쪽") == .queuedNotStarted)
+        #expect(try w.d.enqueue(workspaceID: "w1", repo: w.repoA, title: nil, instruction: "첫", toolUseId: nil) == .queuedNotStarted(seq: 1))
+        let prompt = try #require(w.d.initialPrompt(forRepo: "r1"))
+        #expect(prompt.contains("배분 #1 — android\n첫") && !prompt.contains("조율자 답"))
+        w.idle("r1", session: "cc-new")
+        w.d.didStart(repoID: "r1", session: "cc-new", source: "startup")
+        #expect(w.inbox.sent.isEmpty)                                   // argv 첫 턴이 돈다
+        w.d.didStop(repoID: "r1", lastMessage: "물었다")                 // 배분 #1 응답 대기
+        #expect(w.inbox.sent.count == 1 && w.inbox.sent[0].session == "cc-new")
+        #expect(w.inbox.sent.first?.content.hasPrefix("[두레] 조율자 답 (배분 없음)\n질문: 어느 쪽?\n왼쪽") == true)
+        #expect(try w.db.read { try Dispatch.fetchOne($0) }?.state == .waiting)   // 배분 밖 답은 되돌리지 않는다
+    }
+
+    @Test func 큐의_답_둘은_한_턴에_하나씩_간다() throws {
+        let w = try World(); w.busy("r1")
+        try w.ask("r1", "첫 질문")
+        #expect(try w.d.answer(workspaceID: "w1", repo: w.repoA, body: "첫 답") == .queuedBusy)
+        try w.ask("r1", "둘째 질문")
+        #expect(try w.d.answer(workspaceID: "w1", repo: w.repoA, body: "둘째 답") == .queuedBusy)
+        w.idle("r1", session: "cc-a")
+        w.d.didStop(repoID: "r1", lastMessage: "x")                     // Stop #1
+        #expect(w.inbox.sent.count == 1 && w.inbox.sent[0].content.contains("질문: 첫 질문\n첫 답"))
+        w.d.didStop(repoID: "r1", lastMessage: "y")                     // Stop #2
+        #expect(w.inbox.sent.count == 2 && w.inbox.sent[1].content.contains("질문: 둘째 질문\n둘째 답"))
+        w.d.didStop(repoID: "r1", lastMessage: "z")
+        #expect(w.inbox.sent.count == 2)
+        #expect(w.d.answers(workspaceID: "w1").allSatisfy { $0.state == .delivered })
+    }
+
+    /// 닫힌 배분에 묶인 답이 실패로 닫히면 같은 펌프에서 다음 답으로 넘어간다.
+    /// `didDie` 는 펌프하지 않으므로 두 답이 한 펌프(둘째 `answer`)에서 만난다.
+    @Test func 닫힌_배분의_답이_실패하면_같은_펌프에서_다음_답으로_넘어간다() throws {
+        let w = try World(); w.idle("r1", session: "cc-a")
+        _ = try w.d.enqueue(workspaceID: "w1", repo: w.repoA, title: nil, instruction: "하나", toolUseId: nil)
+        try w.ask("r1", "배분 안의 질문")
+        #expect(try w.d.answer(workspaceID: "w1", repo: w.repoA, body: "첫 답") == .queuedBusy)
+        w.d.didDie(repoID: "r1")                                         // 배분 #1 실패로 닫힘, 펌프 없음
+        w.idle("r1", session: "cc-b")
+        try w.ask("r1", "배분 밖 질문")
+        #expect(try w.d.answer(workspaceID: "w1", repo: w.repoA, body: "둘째 답") == .delivered)
+        let sentToPane = w.inbox.sent.filter { $0.session == "cc-b" }
+        #expect(sentToPane.count == 1 && sentToPane[0].content.hasPrefix("[두레] 조율자 답 (배분 없음)\n질문: 배분 밖 질문\n둘째 답"))
+        let rows = w.d.answers(workspaceID: "w1")                        // 최신이 먼저
+        #expect(rows.map(\.state) == [.delivered, .failed])
+        #expect(rows.last?.failure == Dispatcher.answerDispatchClosed)
+        #expect(try w.db.read { try Relay.filter(Column("kind") == RelayKind.answerFailure.rawValue).fetchCount($0) } == 1)
+    }
+
+    @Test func 답할_질문이_없으면_noQuestion() throws {
+        let w = try World(); w.idle("r1", session: "cc-a")
+        #expect(try w.d.answer(workspaceID: "w1", repo: w.repoA, body: "왼쪽") == .noQuestion)
+        #expect(w.d.answers(workspaceID: "w1").isEmpty)
+        #expect(w.inbox.sent.isEmpty)
+    }
+
+    /// 카드는 이력을 뒤집어 오래된 것부터 그린다(최종 리뷰 4) — 같은 초의 relay 도 들어온 순서의 반대(최신이 먼저)여야 한다.
+    @Test func relay_이력은_같은_초면_나중_것이_먼저다() throws {
+        let w = try World()
+        for i in 1...5 {
+            try w.d.relay(workspaceID: "w1", dispatchID: nil, repoID: "r1", kind: .report, body: "\(i)")
+        }
+        #expect(w.d.relays(workspaceID: "w1").map(\.body) == ["5", "4", "3", "2", "1"])
+    }
+
+    /// 미답 질문은 없지만 보낼 답이 큐에 있다 — `noQuestion`("dispatch 를 쓴다") 이 아니라 `answerPending`. 아무것도 쓰지 않는다(최종 리뷰 2).
+    @Test func 보낼_답이_큐에_있으면_answerPending() throws {
+        let w = try World(); w.busy("r1")
+        try w.ask("r1", "어느 쪽?")
+        #expect(try w.d.answer(workspaceID: "w1", repo: w.repoA, body: "왼쪽") == .queuedBusy)
+        #expect(try w.d.answer(workspaceID: "w1", repo: w.repoA, body: "오른쪽") == .answerPending)
+        let rows = w.d.answers(workspaceID: "w1")
+        #expect(rows.count == 1 && rows[0].body == "왼쪽" && rows[0].state == .queued)
+        #expect(w.inbox.sent.isEmpty)
     }
 }

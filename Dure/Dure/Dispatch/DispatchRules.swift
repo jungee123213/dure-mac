@@ -18,6 +18,18 @@ enum DispatchRules {
         }
     }
 
+    /// 조율자의 답을 지금 페인에 넣어도 되나(이슈 #43). `isIdle` 과 달리 열린 배분이 `waiting` 이어도 보낸다 —
+    /// 그 배분의 질문에 대한 답이기 때문이다. `.delivered` 는 argv 첫 턴이 아직 안 끝난 것이라 안 된다.
+    /// `repoAwaitingStop` 은 `Dispatcher` 가 따로 본다.
+    static func canAnswer(started: Bool, state: AgentState?, open: DispatchState?) -> Bool {
+        guard started else { return false }
+        switch state {
+        case .started, .done: break
+        case .running, .waiting, .dead, nil: return false
+        }
+        return open == nil || open == .waiting
+    }
+
     static func givesUp(afterAttempts n: Int) -> Bool { n >= maxAttempts }
 
     /// 이슈 #24 — 열린 배분이 있는 레포 페인에 `SessionStart` 가 왔을 때.

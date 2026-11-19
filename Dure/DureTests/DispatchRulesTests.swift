@@ -59,4 +59,21 @@ struct DispatchRulesTests {
         let s = DispatchRules.clock(0)
         #expect(s.count == 5 && s.contains(":"))
     }
+
+    // MARK: - 조율자 답을 보내도 되나
+
+    @Test func 놀고_열린_배분이_없거나_waiting_이면_답을_보낸다() {
+        #expect(DispatchRules.canAnswer(started: true, state: .done, open: nil))
+        #expect(DispatchRules.canAnswer(started: true, state: .done, open: .waiting))
+        #expect(DispatchRules.canAnswer(started: true, state: .started, open: nil))
+    }
+
+    @Test func 배분이_첫_턴이거나_일하는_중이면_답을_보내지_않는다() {
+        #expect(!DispatchRules.canAnswer(started: true, state: .started, open: .delivered))   // argv 첫 턴
+        #expect(!DispatchRules.canAnswer(started: true, state: .running, open: nil))
+        #expect(!DispatchRules.canAnswer(started: true, state: .waiting, open: nil))
+        #expect(!DispatchRules.canAnswer(started: true, state: .dead, open: nil))
+        #expect(!DispatchRules.canAnswer(started: true, state: nil, open: nil))
+        #expect(!DispatchRules.canAnswer(started: false, state: .done, open: nil))
+    }
 }

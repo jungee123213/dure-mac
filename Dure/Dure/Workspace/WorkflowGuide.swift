@@ -52,11 +52,14 @@ enum WorkflowGuide {
               git: "없음. 코드를 바꿔야 할 것 같으면 사람에게 묻는다"),
     ]
 
+    /// 질문 → 답. 단계 밖의 곁가지라 단계 목록이 아니라 설명으로 붙는다.
+    static let questionNote = "레포 페인이 사람 대신 조율자에게 묻는 질문은 조율자가 사람에게 올리고, 사람이 \"진행\" 하면 answer 로 그 페인에 답한다 — 같은 배분을 이어간다. 답은 배분 큐를 거치지 않는다."
+
     /// 단계 번호 목록 + 종류 표. 조율자 지시문에 그대로 들어간다.
     static func markdown() -> String {
         var out = steps.map { "\($0.id). **\($0.title)** (\($0.who)) — \($0.detail)" }.joined(separator: "\n")
         out += "\n\n| 배분 | 언제 | 페인이 하는 git |\n|---|---|---|\n"
         out += kinds.map { "| **\($0.name)** | \($0.when) | \($0.git) |" }.joined(separator: "\n")
-        return out + "\n"
+        return out + "\n\n" + questionNote + "\n"
     }
 }

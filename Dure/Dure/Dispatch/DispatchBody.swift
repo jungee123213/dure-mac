@@ -105,11 +105,26 @@ enum DispatchBody {
         let head: String
         switch kind {
         case .completion: head = "배분 #\(seq ?? 0) 끝남 (\(time))"
-        case .failure:    head = "배분 #\(seq ?? 0) 실패 (\(time))"
+        case .failure:    head = seq.map { "배분 #\($0) 실패 (\(time))" } ?? "실패 (\(time))"
+        case .answerFailure: head = seq.map { "답 전달 실패 (배분 #\($0), \(time))" } ?? "답 전달 실패 (\(time))"
         case .report:     head = seq.map { "보고 (배분 #\($0), \(time))" } ?? "보고 (\(time))"
         case .question:   head = seq.map { "질문 (배분 #\($0), \(time))" } ?? "질문 (\(time))"
         }
         return "[두레] ‹\(repoName)› \(head)\n\(body)"
+    }
+
+    /// 조율자의 답을 레포 페인이 받는 글로. 질문은 첫 줄만, 120자까지.
+    static func answer(seq: Int?, question: String?, body: String) -> String {
+        var lines = ["[두레] 조율자 답 (\(seq.map { "배분 #\($0)" } ?? "배분 없음"))"]
+        if let q = question {
+            let first = q.split(separator: "\n", omittingEmptySubsequences: false).first.map(String.init) ?? ""
+            lines.append("질문: " + (first.count > 120 ? String(first.prefix(120)) + "…" : first))
+        }
+        lines.append(body)
+        lines.append("")
+        if let seq { lines.append("이 답대로 배분 #\(seq) 을 이어 간다. 다 끝나면 complete 를 부른다.") }
+        lines.append("사람이 이 터미널에서 이미 다르게 답했으면 사람의 답을 따르고, 어긋난다고 짧게 알린다.")
+        return lines.joined(separator: "\n")
     }
 
     /// 조율자가 안 떠 있는 동안 쌓인 것을 첫 프롬프트 하나로.

@@ -170,8 +170,54 @@ struct DispatchBodyTests {
         #expect(DispatchBody.relay(.failure, seq: 3, repoName: "a", body: "b", time: "t").hasPrefix("[두레] ‹a› 배분 #3 실패 (t)"))
     }
 
+    @Test func 답_전달_실패는_배분_실패와_다른_머리말이다() {
+        #expect(DispatchBody.relay(.answerFailure, seq: 3, repoName: "a", body: "b", time: "t") == "[두레] ‹a› 답 전달 실패 (배분 #3, t)\nb")
+        #expect(DispatchBody.relay(.answerFailure, seq: nil, repoName: "a", body: "b", time: "t") == "[두레] ‹a› 답 전달 실패 (t)\nb")
+    }
+
+    @Test func 배분_번호_없는_실패는_배분_0_으로_쓰지_않는다() {
+        #expect(DispatchBody.relay(.failure, seq: nil, repoName: "a", body: "b", time: "t") == "[두레] ‹a› 실패 (t)\nb")
+    }
+
     @Test func 묶음은_구분선으로_잇는다() {
         #expect(DispatchBody.bundle(["하나", "둘"]) == "하나\n\n---\n\n둘")
         #expect(DispatchBody.bundle(["하나"]) == "하나")
+    }
+
+    // MARK: - 조율자 답
+
+    @Test func 답_본문은_머리말_질문_첫줄_답_꼬리_순이다() {
+        let s = DispatchBody.answer(seq: 3, question: "API 이름은?\n둘째 줄", body: "fetchUser 로")
+        #expect(s == """
+        [두레] 조율자 답 (배분 #3)
+        질문: API 이름은?
+        fetchUser 로
+
+        이 답대로 배분 #3 을 이어 간다. 다 끝나면 complete 를 부른다.
+        사람이 이 터미널에서 이미 다르게 답했으면 사람의 답을 따르고, 어긋난다고 짧게 알린다.
+        """)
+    }
+
+    @Test func 배분이_없으면_이어_간다_줄이_없다() {
+        let s = DispatchBody.answer(seq: nil, question: "Q", body: "A")
+        #expect(s.hasPrefix("[두레] 조율자 답 (배분 없음)\n"))
+        #expect(!s.contains("이어 간다"))
+        #expect(s.hasSuffix("사람이 이 터미널에서 이미 다르게 답했으면 사람의 답을 따르고, 어긋난다고 짧게 알린다."))
+    }
+
+    @Test func 질문_첫줄이_120자를_넘으면_자른다() {
+        let long = String(repeating: "가", count: 121)
+        let cut = DispatchBody.answer(seq: 1, question: long, body: "A")
+        #expect(cut.contains("질문: " + String(repeating: "가", count: 120) + "…\n"))
+        let exact = String(repeating: "가", count: 120)
+        let kept = DispatchBody.answer(seq: 1, question: exact, body: "A")
+        #expect(kept.contains("질문: " + exact + "\n"))
+        #expect(!kept.contains("…"))
+    }
+
+    @Test func 질문이_없으면_질문_줄이_없다() {
+        let s = DispatchBody.answer(seq: 2, question: nil, body: "A")
+        #expect(!s.contains("질문:"))
+        #expect(s.hasPrefix("[두레] 조율자 답 (배분 #2)\nA\n"))
     }
 }
