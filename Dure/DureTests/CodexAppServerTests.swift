@@ -101,6 +101,62 @@ struct CodexAppServerTests {
         #expect(parse("Restored session: zshrc noise") == nil)
     }
 
+    // MARK: - 2단계 — 주소 보충 · 멈춘 큐 (docs/spikes/2026-11-19-codex/g-stage2.md 3 · 4절)
+
+    @Test func initialize_는_experimentalApi_를_켠다() {
+        // thread/queue/start 는 실험 API — 없으면 -32600 "requires experimentalApi capability"(queue/list 로 실측)
+        let o = object(CodexAppServer.initialize(id: 1))
+        let caps = (o["params"] as? [String: Any])?["capabilities"] as? [String: Any]
+        #expect(caps?["experimentalApi"] as? Bool == true)
+        #expect(((o["params"] as? [String: Any])?["clientInfo"] as? [String: Any])?["name"] as? String == "dure")
+    }
+
+    @Test func 주소_보충과_큐_깨우기_요청() {
+        let list = object(CodexAppServer.loadedThreads(id: 2))
+        #expect(list["id"] as? Int == 2)
+        #expect(list["method"] as? String == "thread/loaded/list")
+        #expect((list["params"] as? [String: Any])?.isEmpty == true)
+
+        let read = object(CodexAppServer.readThread(id: 3, threadID: "01a1f69c-71cb"))
+        #expect(read["method"] as? String == "thread/read")
+        #expect((read["params"] as? [String: Any])?["threadId"] as? String == "01a1f69c-71cb")
+
+        let start = object(CodexAppServer.startQueue(id: 9, threadID: "01a1f6a3-0796"))
+        #expect(start["id"] as? Int == 9)
+        #expect(start["method"] as? String == "thread/queue/start")
+        #expect(start["params"] as? [String: String] == ["threadId": "01a1f6a3-0796"])
+    }
+
+    @Test func loaded_list_응답을_해석한다() {
+        // Task 1 실물 — id 만 준다
+        #expect(parse(#"{"id":2,"result":{"data":["01a1f69c-71cb-7983-abce-e8a60ecf7f9e"],"nextCursor":null}}"#)
+                == .loadedThreads(id: 2, threadIDs: ["01a1f69c-71cb-7983-abce-e8a60ecf7f9e"]))
+        // /new 직후 — 옛 · 새 둘 다
+        #expect(parse(#"{"id":5,"result":{"data":["01a1f6a3-a","01a1f6a5-b"],"nextCursor":null}}"#)
+                == .loadedThreads(id: 5, threadIDs: ["01a1f6a3-a", "01a1f6a5-b"]))
+        #expect(parse(#"{"id":6,"result":{"data":[]}}"#) == .loadedThreads(id: 6, threadIDs: []))
+        // 훅 목록 응답(항목이 객체)은 loaded list 가 아니다
+        #expect(parse(#"{"id":7,"result":{"data":[{"cwd":"/r","hooks":[]}]}}"#) == .response(id: 7, ok: true))
+    }
+
+    @Test func thread_read_응답을_해석한다() {
+        // Task 1 실물(r1) — environments · gitInfo 등은 버리고 id · cwd · ephemeral · status 만
+        let json = #"""
+        {"id":3,"result":{"thread":{"id":"01a1f69c-71cb-7983-abce-e8a60ecf7f9e","environments":[{"environmentId":"local","cwd":"/Users/x/work/repo","runtimeWorkspaceRoots":["/Users/x/work/repo"]}],"extra":null,"sessionId":"01a1f69c-71cb-7983-abce-e8a60ecf7f9e","forkedFromId":null,"parentThreadId":null,"preview":"Call the `report` tool","ephemeral":false,"model":"gpt-6-astra","reasoningEffort":"medium","createdAt":1795138810,"updatedAt":1795138819,"recencyAt":1795138810,"status":{"type":"active","activeFlags":[]},"path":"/h/sessions/2026/11/20/rollout.jsonl","cwd":"/Users/x/work/repo","cliVersion":"0.167.0","originator":"dure","source":"vscode","canAcceptDirectInput":true,"threadSource":"user","gitInfo":{"sha":"281fc70f","branch":"main","originUrl":null},"name":null,"turns":[]},"readState":{"firstUnread":null,"revision":"initial:01a1f69c"}}}
+        """#
+        #expect(parse(json) == .threadRead(id: 3, threadID: "01a1f69c-71cb-7983-abce-e8a60ecf7f9e",
+                                           cwd: "/Users/x/work/repo", ephemeral: false, status: "active"))
+        // 첫 턴 전 스레드(r2) — readState null, status idle
+        let fresh = #"{"id":4,"result":{"thread":{"id":"t2","cwd":"/r","ephemeral":false,"status":{"type":"idle"},"turns":[]},"readState":null}}"#
+        #expect(parse(fresh) == .threadRead(id: 4, threadID: "t2", cwd: "/r", ephemeral: false, status: "idle"))
+    }
+
+    @Test func queue_start_응답은_성공_응답이다() {
+        #expect(parse(#"{"id":9,"result":{"turn":{"id":"u1","status":"inProgress","items":[]}}}"#) == .response(id: 9, ok: true))
+        #expect(parse(#"{"id":9,"error":{"code":-32600,"message":"thread/queue/start requires experimentalApi capability"}}"#)
+                == .response(id: 9, ok: false))
+    }
+
     // MARK: - hooks/list
 
     /// 진짜 home stdio hooks/list 의 모양(M1): 사용자 hooks.json 훅 2개 trusted, 플러그인 훅 2개 modified.

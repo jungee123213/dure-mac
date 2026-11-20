@@ -169,6 +169,23 @@ struct InboxTests {
         #expect(runner.calls.count == 1)
     }
 
+    /// 멈춘 큐 깨우기(2단계 Task 4) — Codex 전달이 **성공했을 때만** 스토어에 알린다(그 페인 런타임이 5초를 잰다).
+    @Test @MainActor func Codex_전달이_성공하면_전달_알림을_부른다() throws {
+        let resolver = Self.resolver(CodexToolchain(codexPath: "/c", path: "/p"))
+        resolver.start(); resolver.queue.sync {}
+        let seen = LockedBox<[String]>([])
+        var out = LivePaneMessaging(codexToolchain: resolver, runner: CodexQueueSenderTests.FakeArgvRunner())
+        out.onCodexDelivered = { socket, thread in seen.mutate { $0.append("\(socket) \(thread)") } }
+        try out.send("일", to: .codex(socket: "/s.sock", thread: "T1"))
+        #expect(seen.value == ["/s.sock T1"])
+
+        var failing = LivePaneMessaging(codexToolchain: resolver,
+                                        runner: CodexQueueSenderTests.FakeArgvRunner(.init(status: 1, stderr: "x", timedOut: false)))
+        failing.onCodexDelivered = { socket, thread in seen.mutate { $0.append("\(socket) \(thread)") } }
+        #expect(throws: CodexQueueSender.Problem.self) { try failing.send("일", to: .codex(socket: "/s.sock", thread: "T2")) }
+        #expect(seen.value == ["/s.sock T1"])
+    }
+
     @Test func 주소의_세션_열쇠는_Claude_세션이나_Codex_스레드다() {
         #expect(PaneAddress.claude(session: "cc-a").sessionKey == "cc-a")
         #expect(PaneAddress.codex(socket: "/s", thread: "T1").sessionKey == "T1")

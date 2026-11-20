@@ -53,8 +53,11 @@ final class DureStore {
     /// Codex 2단계 — `codex queue` 에 쓸 `codex` 경로 · 로그인 PATH. 첫 Codex 페인을 띄울 때 메인 밖에서 한 번 구한다.
     @ObservationIgnored private let codexToolchain = CodexToolchainResolver()
     /// 단계 4 — 배분 흐름. 스토어 상태는 클로저로 넘긴다(테스트 가능성). 출구는 받는 페인 종류로 고른다.
+    /// Codex 전달이 성공하면 그 페인 런타임이 멈춘 큐를 지켜본다(`codexDelivered`) — Dispatcher 는 런타임을 모른다.
     @ObservationIgnored private(set) lazy var dispatcher = Dispatcher(
-        db: AppDatabase.queue, messaging: LivePaneMessaging(codexToolchain: codexToolchain),
+        db: AppDatabase.queue,
+        messaging: LivePaneMessaging(codexToolchain: codexToolchain,
+                                     onCodexDelivered: { [unowned self] in self.codexDelivered(socket: $0, thread: $1) }),
         lookups: .init(
             // 레포 **id** 를 받는다. 모르는 id 면 "안 뜬 페인" 으로 답해 큐에 남긴다.
             repoPane: { [unowned self] id in
@@ -530,9 +533,11 @@ final class DureStore {
 
     private func paneView(_ target: PaneTarget) -> Dispatcher.PaneView {
         let session = sessionIDs[target.key]
-        // Codex — 주소(서버 소켓 + 스레드 id) 연결은 2단계 Task 4. 그때까지는 주소가 없어 큐에 남는다(1단계 동작).
+        // Codex — 주소는 그 페인 전용 서버 소켓 + 지금 스레드. 스레드를 아직 모르면 nil 이라 큐에 남는다 —
+        // 스레드가 잡히면(`thread/started` · 보충) `startCodex` 의 알림이 큐를 흘린다.
         if agentKind(for: target) == .codex {
-            return .init(started: hasStarted(target), state: state(for: target), address: nil)
+            return .init(started: hasStarted(target), state: state(for: target),
+                         address: codexPanes[target.key]?.address)
         }
         return .init(started: hasStarted(target), state: state(for: target),
                      address: session.flatMap { currentSession(for: $0)?.ccSessionId }.map { .claude(session: $0) })
@@ -684,8 +689,10 @@ final class DureStore {
         if terminalEndRequests.contains(target.key) { terminalEndRequests.clear(target.key) }
         // Codex — 서버는 비동기로 뜬다. 페인은 지금처럼 바로 출발한다(TUI 스크립트가 소켓을 기다린다).
         // 전달에 쓸 `codex` 경로 · PATH 도 이때 구하기 시작한다(앱 세션마다 한 번, 메인 밖). 스레드가 잡히기 전에 끝난다.
-        if agentKind(for: target) == .codex { codexToolchain.start() }
-        if agentKind(for: target) == .codex { startCodex(target, sessionID: sessionID) }
+        if agentKind(for: target) == .codex {
+            codexToolchain.start()
+            startCodex(target, sessionID: sessionID)
+        }
         startedPanes.insert(target.key)
         // "지금 페인이 열려 있음" 이 지도에 반영돼야 한다.
         refreshWorkspaceDoc(for: target.workspaceID)
@@ -741,12 +748,27 @@ final class DureStore {
                                        launcher: LiveCodexProcessLauncher(), threadName: facts.name,
                                        mcpSocket: mcpSocketPath(for: target))
         codexPanes[key] = runtime
-        runtime.start(onThreadStarted: { thread in
-            // 단계 1 은 기록만. 전달 주소로 쓰는 것은 단계 2.
+        runtime.start(onThreadStarted: { [weak self, weak runtime] thread in
             NSLog("[Dure] Codex 페인 \(key) 스레드 \(thread)")
+            // 주소가 생겼다(새 스레드 · 보충) — 기다리던 배분 · 답 · relay 를 그 페인으로 흘린다.
+            // 그 사이 페인이 다시 떴으면(다른 런타임 · 세션) 옛 알림이라 버린다.
+            guard let self, let runtime, self.codexPanes[key] === runtime, self.sessionIDs[key] == sessionID else { return }
+            switch target {
+            case .repo(let r): self.dispatcher.pumpRepo(r.id)
+            case .orchestrator(let ws): self.dispatcher.pumpOrchestrator(ws)
+            }
+            self.dispatchVersion += 1
         }, onServerExit: { [weak self] in
             self?.codexServerExited(key: key, sessionID: sessionID)
         })
+    }
+
+    /// Codex 전달(`codex queue`) 성공 직후 — 받은 페인 런타임이 5초 안에 턴이 안 서면 멈춘 큐를 깨운다.
+    /// 출구는 페인 키를 모른다 — 소켓은 페인마다 달라 소켓으로 찾는다. 그 사이 스레드가 바뀌었으면 깨우지 않는다.
+    private func codexDelivered(socket: String, thread: String) {
+        guard let runtime = codexPanes.values.first(where: { $0.paths.socket == socket }),
+              runtime.threadID == thread else { return }
+        runtime.nudgeQueue()
     }
 
     /// 서버가 TUI 보다 먼저 끝났다. 뷰만 빼면 "Reconnecting…" 의 TUI 가 보이지 않게 남는다(`PaneTermination`) —
@@ -782,15 +804,23 @@ final class DureStore {
     func launchScript(for target: PaneTarget, sessionID: String) -> String {
         // 뷰가 그릴 때마다 불린다. 기동 프롬프트는 큐에서 꺼내는 일이라 페인당 한 번만 만든다.
         if let cached = launchScripts[target.key] { return cached }
-        // Codex — TUI 는 전용 서버 소켓에 붙는다. 단계 1 은 첫 프롬프트를 싣지 않는다(큐를 꺼내지 않는다).
+        // Codex — TUI 는 전용 서버 소켓에 붙는다. 첫 프롬프트는 Claude 와 같은 결 — 큐 맨 앞을 argv 로 싣고
+        // `"argv"` 로 기록한다(첫 SessionStart 가 그 스레드로 받아들인다).
         if agentKind(for: target) == .codex {
             let facts = codexFacts(for: target)
             let paths = codexPanes[target.key]?.paths
                 ?? CodexPaneRuntime.Paths.paths(forSession: sessionID, paneKey: target.key)
+            let prompt: String?
+            switch target {
+            case .repo(let r): prompt = dispatcher.initialPrompt(forRepo: r.id)
+            case .orchestrator(let ws): prompt = dispatcher.initialPrompt(forOrchestrator: ws)
+            }
             let script = CodexLaunch.tuiScript(cwd: facts.cwd, sessionID: sessionID, socket: paths.socket,
                                                failMarker: paths.failMarker, log: paths.log,
-                                               profile: facts.profile, initialPrompt: nil)
+                                               profile: facts.profile, initialPrompt: prompt)
             launchScripts[target.key] = script
+            // Claude 가지와 같은 이유로 다음 런루프에(뷰의 body 안에서 불린다).
+            if prompt != nil { DispatchQueue.main.async { [weak self] in self?.dispatchVersion += 1 } }
             return script
         }
         let wsName = workspaceName(id: target.workspaceID)

@@ -123,6 +123,9 @@ struct LivePaneMessaging: PaneMessaging {
     var inbox = LiveInbox()
     let codexToolchain: CodexToolchainResolver
     var runner: ArgvRunning = LiveArgvRunner()
+    /// Codex 전달(`codex queue` 종료 0)이 끝난 직후 (서버 소켓, 스레드). 스토어가 그 페인 런타임의 `nudgeQueue()` 를 건다 —
+    /// 종료 0 이 턴 시작을 보장하지 않아서다(멈춘 큐). 배분 흐름은 Codex 런타임을 모른 채 둔다.
+    var onCodexDelivered: ((_ socket: String, _ thread: String) -> Void)?
 
     func send(_ content: String, to address: PaneAddress) throws {
         switch address {
@@ -136,6 +139,7 @@ struct LivePaneMessaging: PaneMessaging {
                                  environment: toolchain.map { CodexQueueSender.environment(loginPath: $0.path) } ?? [:],
                                  runner: runner)
                 .send(content, socket: socket, thread: thread)
+            onCodexDelivered?(socket, thread)
         }
     }
 }
