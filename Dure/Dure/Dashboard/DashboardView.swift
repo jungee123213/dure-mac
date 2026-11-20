@@ -100,6 +100,11 @@ struct DashboardView: View {
                 }
                 Text("사용량 · 툴 에러는 감시자 수집 기준 — 이 워크스페이스 레포에서 일어난 것(터미널 포함)")
                     .font(.caption2).foregroundStyle(.secondary)
+                if let limit = CodexLimitText.line(store.codexLimit.limits, blocked: store.codexLimit.isBlocked) {
+                    Text(limit)
+                        .font(.caption)
+                        .foregroundStyle(store.codexLimit.isBlocked ? Color.orange : Color.secondary)
+                }
                 // 조율자는 레포가 없어도 있다 — 지도 맨 위에 상태를 보인다.
                 if let ws = store.selectedWorkspaceID {
                     let orch = PaneTarget.orchestrator(workspaceID: ws)
