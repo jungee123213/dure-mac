@@ -147,6 +147,21 @@ struct DispatcherTests {
         #expect(try w.db.read { try Relay.fetchCount($0) } == 0)   // 배분 아닌 턴의 Stop 은 보고하지 않는다
     }
 
+    /// Codex 단계 1 Review Focus 5 — Codex 페인은 `claudeSessionID: nil` 로 보인다. 떠 있고 놀고 있어도
+    /// 소켓 주소가 없으니 큐에 남아야 한다(전달은 단계 2). 이 테스트는 지금 코드로도 통과한다 — 고정 테스트다.
+    @Test func 시작했지만_CLI_세션_주소가_없는_페인으로는_배분이_나가지_않는다() throws {
+        let w = try World()
+        w.repoPanes["r1"] = .init(started: true, state: .started, claudeSessionID: nil)
+        let out = try w.d.enqueue(workspaceID: "w1", repo: w.repoA, title: nil, instruction: "x", toolUseId: nil)
+        #expect(out == .queuedBusy(seq: 1))
+        #expect(w.inbox.sent.isEmpty)
+        #expect(try w.db.read { try Dispatch.fetchOne($0) }?.state == .queued)
+        w.repoPanes["r1"] = .init(started: true, state: .done, claudeSessionID: nil)
+        w.d.didStop(repoID: "r1", lastMessage: "끝")
+        #expect(w.inbox.sent.isEmpty)
+        #expect(w.d.queueCount(repoID: "r1") == 1)
+    }
+
     @Test func 안_뜬_페인은_큐에_두고_시작할_때_싣는다() throws {
         let w = try World()
         #expect(try w.d.enqueue(workspaceID: "w1", repo: w.repoA, title: nil, instruction: "첫", toolUseId: nil) == .queuedNotStarted(seq: 1))

@@ -60,6 +60,8 @@ struct ContentView: View {
         .onReceive(NotificationCenter.default.publisher(
             for: NSApplication.willTerminateNotification)) { _ in
             store.saveContextBeforeLeaving()
+            // Codex 페인의 전용 서버는 두레가 띄운 `Process` 라 PTY 와 함께 닫히지 않는다.
+            store.stopAllCodexServers()
         }
         // 이슈 #30 — iTerm 에서 직접 닫은 창은 두레로 돌아올 때 `열기` 로 되돌린다. 폴링하지 않는다.
         .onReceive(NotificationCenter.default.publisher(
@@ -263,7 +265,8 @@ struct ContentView: View {
             let sessionID = store.sessionID(for: target)
             TerminalPane(script: store.launchScript(for: target, sessionID: sessionID),
                          isActive: isActive && !showingDashboard,
-                         onExit: { _ in store.markDead(sessionID) })
+                         onExit: { _ in store.markDead(sessionID) },
+                         terminateRequested: store.isTerminalEndRequested(target))
         } else {
             waitingToStart(target)
         }
