@@ -189,4 +189,36 @@ struct CodexLimitStateTests {
         let secondary = rows.first { $0.window == "secondary" }
         #expect(secondary?.seenAt == 20 && secondary?.usedPercent == 8 && secondary?.planType == "plus")
     }
+
+    /// 통째 값(`read`)에 없는 창은 표에서 지운다. 합치는 값(`updated`)의 null 창은 "모름" 이라 지우지 않는다.
+    @Test func absentWindowsOnlyOnReplace() {
+        let onlyPrimary = CodexRateLimits(primary: W(usedPercent: 5, resetsAt: 1000))
+        #expect(RateLimitWindow.absentWindows(onlyPrimary, replaces: true) == ["secondary"])
+        #expect(RateLimitWindow.absentWindows(onlyPrimary, replaces: false).isEmpty)
+        #expect(RateLimitWindow.absentWindows(CodexRateLimits(), replaces: true) == ["primary", "secondary"])
+        let both = CodexRateLimits(primary: W(usedPercent: 5), secondary: W(usedPercent: 6))
+        #expect(RateLimitWindow.absentWindows(both, replaces: true).isEmpty)
+    }
+
+    /// 스토어와 같은 순서(지우기 → 쓰기)로 표에 적용하면 통째 값에 없는 창이 남지 않는다.
+    @Test func replaceDropsAbsentWindowFromTable() throws {
+        let q = try DatabaseQueue()
+        try AppDatabase.migrator.migrate(q)
+        func store(_ l: CodexRateLimits, replaces: Bool, seenAt: Int) throws {
+            try q.write { db in
+                for name in RateLimitWindow.absentWindows(l, replaces: replaces) {
+                    _ = try RateLimitWindow.deleteOne(db, key: ["kind": RateLimitWindow.codexKind, "window": name])
+                }
+                for r in RateLimitWindow.rows(l, merged: l, seenAt: seenAt) { try r.insert(db) }
+            }
+        }
+        try store(CodexRateLimits(primary: W(usedPercent: 42, resetsAt: 1000), secondary: W(usedPercent: 7, resetsAt: 5000)),
+                  replaces: true, seenAt: 1)
+        try store(CodexRateLimits(primary: W(usedPercent: 43, resetsAt: 1000)), replaces: false, seenAt: 2)
+        #expect(try q.read { try RateLimitWindow.fetchAll($0) }.count == 2)
+        try store(CodexRateLimits(primary: W(usedPercent: 44, resetsAt: 1000)), replaces: true, seenAt: 3)
+        let rows = try q.read { try RateLimitWindow.fetchAll($0) }
+        #expect(rows.map(\.window) == ["primary"])
+        #expect(rows.first?.usedPercent == 44)
+    }
 }

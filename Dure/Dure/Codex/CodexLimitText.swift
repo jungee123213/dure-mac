@@ -2,9 +2,19 @@ import Foundation
 
 /// 대시보드 지도 머리의 Codex 한도 한 줄. 순수 함수 — `blocked` 는 호출 쪽이 `CodexLimitState.isBlocked` 로 준다
 /// (저장된 `reachedType` 은 앱 기동 뒤 첫 읽기 전까지 낡았을 수 있어 여기서 판정하지 않는다).
+/// 리셋 시각이 이미 지난 창은 그리지 않는다 — 그 값은 리셋 전의 것이라 낡았다(다음 읽기까지 모른다).
 nonisolated enum CodexLimitText {
-    static func line(_ l: CodexRateLimits?, blocked: Bool, timeZone: TimeZone = .current) -> String? {
-        guard let l else { return blocked ? "한도 참 — Codex" : nil }
+    static func line(_ stored: CodexRateLimits?, blocked: Bool, now: Int = Int(Date().timeIntervalSince1970),
+                     timeZone: TimeZone = .current) -> String? {
+        guard let stored else { return blocked ? "한도 참 — Codex" : nil }
+        func fresh(_ w: CodexRateLimits.Window?) -> CodexRateLimits.Window? {
+            guard let w else { return nil }
+            if let reset = w.resetsAt, reset < now { return nil }
+            return w
+        }
+        var l = stored
+        l.primary = fresh(stored.primary)
+        l.secondary = fresh(stored.secondary)
         var parts: [String] = []
         if let p = l.primary { parts.append("\(label(p.windowMinutes, fallback: "5시간")) \(p.usedPercent)%") }
         if let s = l.secondary { parts.append("\(label(s.windowMinutes, fallback: "주간")) \(s.usedPercent)%") }

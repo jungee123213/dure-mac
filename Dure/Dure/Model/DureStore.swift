@@ -555,8 +555,11 @@ final class DureStore {
         // 스레드가 잡히면(`thread/started` · 보충) `startCodex` 의 알림이 큐를 흘린다.
         if agentKind(for: target) == .codex {
             // 계정 한도로 막혀 있으면 Dispatcher 가 이 페인으로 아무것도 보내지 않는다(큐에 남김).
+            // 턴이 도는 중인가는 서버의 스레드 상태로 — 훅 파일로 오는 칩 상태는 소켓 메시지와 순서가 엇갈릴 수 있다.
+            let runtime = codexPanes[target.key]
             return .init(started: hasStarted(target), state: state(for: target),
-                         address: codexPanes[target.key]?.address, kind: .codex, limitedUntil: codexLimit.blockedUntil)
+                         address: runtime?.address, kind: .codex, limitedUntil: codexLimit.blockedUntil,
+                         turnActive: runtime?.isTurnActive ?? false)
         }
         return .init(started: hasStarted(target), state: state(for: target),
                      address: session.flatMap { currentSession(for: $0)?.ccSessionId }.map { .claude(session: $0) })
@@ -787,10 +790,12 @@ final class DureStore {
             // 계정 값이라 어느 페인에서 왔든 같다.
             self?.codexRateLimitsSeen(limits, replaces: replaces)
         }, onUsageLimit: { [weak self, weak runtime] thread in
-            // 지금 스레드의 턴만 — 서브에이전트 스레드나 `/new` 앞의 옛 스레드면 이 페인의 배분 턴이 끊긴 게 아니다.
-            guard let self, let runtime, self.codexPanes[key] === runtime, self.sessionIDs[key] == sessionID,
-                  thread == runtime.threadID else { return }
-            self.codexUsageLimitHit(target, sessionID: sessionID)
+            guard let self else { return }
+            // 계정 상태는 어느 스레드에서 왔든 막는다(같은 로그인). 페인 칩 · 배분은 지금 스레드의 턴만 —
+            // 서브에이전트 스레드나 `/new` 앞의 옛 스레드면 이 페인의 배분 턴이 끊긴 게 아니다.
+            let current = runtime.map { self.codexPanes[key] === $0 && self.sessionIDs[key] == sessionID
+                && thread == $0.threadID } ?? false
+            self.codexUsageLimitHit(target, sessionID: sessionID, paneTurn: current)
         })
     }
 
@@ -803,6 +808,10 @@ final class DureStore {
         if let merged = codexLimit.limits {
             do {
                 try AppDatabase.queue.write { db in
+                    // 통째 값(`read`)에 없는 창은 이제 없는 창이다 — 표에 남기면 다음 기동 때 되살아난다.
+                    for name in RateLimitWindow.absentWindows(l, replaces: replaces) {
+                        _ = try RateLimitWindow.deleteOne(db, key: ["kind": RateLimitWindow.codexKind, "window": name])
+                    }
                     for row in RateLimitWindow.rows(l, merged: merged, seenAt: nowSeconds()) { try row.insert(db) }
                 }
             } catch { NSLog("[Dure] Codex 한도 저장 실패: \(error)") }
@@ -810,14 +819,15 @@ final class DureStore {
         applyLimitChange(change, dureSession: nil)
     }
 
-    /// 재시도 없는 `usageLimitExceeded` — 그 페인의 턴이 한도로 끊겼다. 그 턴에는 Stop 훅이 없다(j-stage4 2절):
+    /// 재시도 없는 `usageLimitExceeded`(또는 지금 스레드의 429) — 계정이 막혔다. 계정 상태는 늘 바꾼다.
+    /// `paneTurn` 이면(그 페인 지금 스레드의 턴) 그 턴이 한도로 끊겼다. 그 턴에는 Stop 훅이 없다(j-stage4 2절):
     /// 턴은 끝났으니 Stop 이 하는 일 중 칩만 `done` 으로 바꾼다. `Dispatcher.didStop` 은 부르지 않는다 — 배분을 응답 대기로 돌리지 않는다.
     /// 레포 페인인지 조율자인지는 런타임이 모른다 — 페인 키(`target`)로 가른다.
-    private func codexUsageLimitHit(_ target: PaneTarget, sessionID: String) {
-        setState(.done, for: sessionID)
+    private func codexUsageLimitHit(_ target: PaneTarget, sessionID: String, paneTurn: Bool) {
+        if paneTurn { setState(.done, for: sessionID) }
         let announce = !codexLimit.isQuiet(now: nowSeconds())
         applyLimitChange(codexLimit.usageLimitHit(now: nowSeconds()), dureSession: sessionID)
-        guard let until = codexLimit.blockedUntil else { return }
+        guard paneTurn, let until = codexLimit.blockedUntil else { return }
         switch target {
         case .repo(let r): dispatcher.didHitUsageLimit(repoID: r.id, workspaceID: r.workspaceId, until: until, announce: announce)
         case .orchestrator(let ws): dispatcher.didHitUsageLimit(repoID: nil, workspaceID: ws, until: until, announce: announce)

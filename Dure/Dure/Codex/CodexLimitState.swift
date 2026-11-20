@@ -106,6 +106,15 @@ extension RateLimitWindow {
     }
 }
 
+extension RateLimitWindow {
+    /// 표에서 지울 창 이름. 통째 값(`read` 응답, `replaces`)에 없는 창은 이제 없는 창이다 — 남겨 두면 대시보드 · 다음 기동의
+    /// 값이 그 창을 되살린다. 합치는 값(`updated` 알림)의 null 창은 "모름" 이라 지우지 않는다.
+    nonisolated static func absentWindows(_ incoming: CodexRateLimits, replaces: Bool) -> [String] {
+        guard replaces else { return [] }
+        return [("primary", incoming.primary), ("secondary", incoming.secondary)].compactMap { $1 == nil ? $0 : nil }
+    }
+}
+
 extension CodexRateLimits {
     /// 앱 시작 때 표에서 읽은 마지막 값. Codex 행이 없으면 nil. `ordinaryUsageAllowed` 는 저장하지 않는다(`read` 에만 있다).
     nonisolated init?(windows: [RateLimitWindow]) {

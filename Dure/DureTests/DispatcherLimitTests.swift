@@ -194,17 +194,62 @@ struct DispatcherLimitTests {
         #expect(try w.db.read { try Dispatch.fetchOne($0) }?.state == .waiting)
     }
 
-    /// 풀릴 때 사람이 그 페인에서 턴을 돌리고 있으면 끼어들지 않는다.
+    /// 풀릴 때 사람이 그 페인에서 턴을 돌리고 있으면(서버 스레드 상태 `active`) 끼어들지 않는다.
     @Test func runningPaneAtReleaseIsNotResumed() throws {
         let w = try World(); codex(w); w.orchIdle()
         _ = try dispatch(w, w.repoA, "일")
         codex(w, until: 5000)
         w.d.didHitUsageLimit(repoID: "r1", workspaceID: "w1", until: 5000)
-        w.repoPanes["r1"] = .init(started: true, state: .running, address: .codex(socket: "/s", thread: "T1"), kind: .codex)
+        // 칩은 아직 done(훅이 늦음)이어도 서버가 턴이 돈다고 하면 그것이 맞다.
+        w.repoPanes["r1"] = .init(started: true, state: .done, address: .codex(socket: "/s", thread: "T1"), kind: .codex,
+                                  turnActive: true)
         w.d.didReleaseUsageLimit()
         #expect(toPane(w).count == 1)
         w.d.didReleaseUsageLimit()
         #expect(toPane(w).count == 1)
+    }
+
+    /// Codex 는 훅 칩이 아니라 서버 스레드 상태로 본다 — 칩이 `running` 으로 남아 있어도(훅 · 소켓 엇갈림) 턴이 안 돌면 이어 한다.
+    @Test func staleRunningChipDoesNotBlockResume() throws {
+        let w = try World(); codex(w); w.orchIdle()
+        _ = try dispatch(w, w.repoA, "일")
+        codex(w, until: 5000)
+        w.d.didHitUsageLimit(repoID: "r1", workspaceID: "w1", until: 5000)
+        w.repoPanes["r1"] = .init(started: true, state: .running, address: .codex(socket: "/s", thread: "T1"), kind: .codex,
+                                  turnActive: false)
+        w.d.didReleaseUsageLimit()
+        #expect(toPane(w).count == 2)
+        #expect(toPane(w)[1].content.hasPrefix("[두레] 배분 #1 이어 하기"))
+    }
+
+    /// 이어 하기는 배분마다 `maxResumes` 번까지. 그 뒤로는 보내지 않고 배분을 열어 둔 채 조율자에게 한 번만 알린다.
+    @Test func resumeIsCappedPerDispatch() throws {
+        let w = try World(); codex(w); w.orchIdle()
+        _ = try dispatch(w, w.repoA, "일")
+        let id = try #require(w.d.outstandingDispatchID(repoID: "r1"))
+        func cycle() {
+            codex(w, until: 5000)
+            w.d.didHitUsageLimit(repoID: "r1", workspaceID: "w1", until: 5000)
+            codex(w, until: nil)
+            w.d.didReleaseUsageLimit()
+        }
+        for _ in 0..<Dispatcher.maxResumes { cycle() }
+        #expect(Dispatcher.maxResumes == 3)
+        #expect(toPane(w).count == 1 + 3)
+        func gaveUp() throws -> [Relay] {
+            try limitRelays(w).filter { $0.body == Dispatcher.resumeGivenUp(1) }
+        }
+        #expect(try gaveUp().isEmpty)
+        cycle()
+        #expect(toPane(w).count == 4)
+        #expect(try gaveUp().count == 1)
+        #expect(try gaveUp().first?.dispatchId == id)
+        #expect(try w.db.read { try Dispatch.fetchOne($0, key: id) }?.state == .delivered)   // 열어 둔다
+        cycle()
+        #expect(toPane(w).count == 4)
+        #expect(try gaveUp().count == 1)
+        let body = Dispatcher.resumeGivenUp(7)
+        #expect(body.contains("#7") && !body.contains("$(") && !body.contains("<<"))
     }
 
     /// 풀린 직후 다시 막힘 — 막기만 하고 조율자에게 다시 알리지 않는다(풀림 안내도 없음). 끊긴 배분은 그래도 이어 한다.

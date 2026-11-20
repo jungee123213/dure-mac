@@ -949,22 +949,70 @@ struct CodexPaneRuntimeTests {
         #expect(await eventually { threads == ["t9"] })
     }
 
+    /// 지금 스레드의 재시도 없는 429 는 모양(`codexErrorInfo`)과 상관없이 한도 초과다 — 막힘 콜백을 한 번 부르고 한도도 다시 읽는다.
     @Test func http429FailureRereadsLimits() async throws {
         let f = try fixture(); defer { try? fm.removeItem(at: f.base) }
         let conn = FakeConnection()
-        var limitCalls = 0
+        var threads: [String] = []
         let rt = make(f, launcher: FakeLauncher(), connection: conn)
-        rt.start(onThreadStarted: { _ in }, onServerExit: {}, onUsageLimit: { _ in limitCalls += 1 })
+        rt.start(onThreadStarted: { _ in }, onServerExit: {}, onUsageLimit: { threads.append($0) })
         await rt.startup?.value
         try await initialize(conn)
+        conn.deliver(threadStarted("t1"))
+        #expect(await eventually { rt.threadID == "t1" })
         #expect(conn.ids("account/rateLimits/read").count == 1)
-        // 429 지만 재시도 중이면 읽지 않는다
+        // 429 지만 재시도 중이면 읽지도 막지도 않는다
         conn.deliver(errorJSON("{\"responseTooManyFailedAttempts\":{\"httpStatusCode\":429}}", willRetry: true))
         try? await Task.sleep(for: .milliseconds(50))
         #expect(conn.ids("account/rateLimits/read").count == 1)
+        #expect(threads.isEmpty)
         conn.deliver(errorJSON("{\"responseTooManyFailedAttempts\":{\"httpStatusCode\":429}}", willRetry: false))
         #expect(await eventually { conn.ids("account/rateLimits/read").count == 2 })
-        #expect(limitCalls == 0)                // usageLimitExceeded 가 아니므로 막힘 콜백은 아니다
+        #expect(threads == ["t1"])
+        // 다른 모양의 429 도 같다
+        conn.deliver(errorJSON("{\"httpConnectionFailed\":{\"httpStatusCode\":429}}", willRetry: false))
+        #expect(await eventually { conn.ids("account/rateLimits/read").count == 3 })
+        #expect(threads == ["t1", "t1"])
+    }
+
+    /// 지금 스레드가 아닌 429(서브에이전트 · `/new` 앞의 옛 스레드)는 이 페인의 턴이 끊긴 게 아니다 — 다시 읽기만 한다.
+    @Test func http429OnOtherThreadOnlyRereads() async throws {
+        let f = try fixture(); defer { try? fm.removeItem(at: f.base) }
+        let conn = FakeConnection()
+        var threads: [String] = []
+        let rt = make(f, launcher: FakeLauncher(), connection: conn)
+        rt.start(onThreadStarted: { _ in }, onServerExit: {}, onUsageLimit: { threads.append($0) })
+        await rt.startup?.value
+        try await initialize(conn)
+        conn.deliver(threadStarted("t1"))
+        #expect(await eventually { rt.threadID == "t1" })
+        conn.deliver(errorJSON("{\"responseTooManyFailedAttempts\":{\"httpStatusCode\":429}}", willRetry: false, thread: "sub"))
+        #expect(await eventually { conn.ids("account/rateLimits/read").count == 2 })
+        try? await Task.sleep(for: .milliseconds(30))
+        #expect(threads.isEmpty)
+    }
+
+    /// 턴이 도는 중인가는 서버의 스레드 상태로 안다 — 지금 스레드의 `active` 일 때만.
+    @Test func turnActiveFollowsThreadStatus() async throws {
+        let f = try fixture(); defer { try? fm.removeItem(at: f.base) }
+        let conn = FakeConnection()
+        let rt = await connected(f, conn)
+        #expect(!rt.isTurnActive)
+        conn.deliver(threadStarted("t1"))
+        #expect(await eventually { rt.threadID == "t1" })
+        #expect(!rt.isTurnActive)
+        conn.deliver(status("t1", "active"))
+        #expect(await eventually { rt.isTurnActive })
+        conn.deliver(status("other", "idle"))           // 다른 스레드는 상관없다
+        try? await Task.sleep(for: .milliseconds(30))
+        #expect(rt.isTurnActive)
+        conn.deliver(status("t1", "idle"))
+        #expect(await eventually { !rt.isTurnActive })
+        conn.deliver(status("t1", "active"))
+        #expect(await eventually { rt.isTurnActive })
+        conn.deliver(threadStarted("t2"))               // /new — 새 스레드는 아직 상태를 모른다
+        #expect(await eventually { rt.threadID == "t2" })
+        #expect(!rt.isTurnActive)
     }
 
     @Test func readRateLimitsWithoutConnectionReturnsFalse() async throws {

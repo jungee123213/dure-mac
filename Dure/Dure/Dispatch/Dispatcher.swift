@@ -24,6 +24,9 @@ final class Dispatcher {
         var kind: AgentKind = .claude
         /// Codex 계정 한도로 막혀 있으면 다시 볼 시각. 스토어가 Codex 페인 · Codex 조율자에만 채운다 — Claude 는 늘 nil.
         var limitedUntil: Int? = nil
+        /// Codex 만 — 서버의 스레드 상태로 본 "지금 스레드에서 턴이 도는 중". 한도가 풀릴 때 사람이 친 턴에 끼어들지 않는 판정에
+        /// 쓴다(훅 파일로 오는 `state` 는 소켓 메시지와 순서가 엇갈릴 수 있다). Claude 는 쓰지 않는다 — `state` 로 본다.
+        var turnActive: Bool = false
     }
 
     struct Lookups {
@@ -77,6 +80,12 @@ final class Dispatcher {
     /// 한도로 끊긴 조율자 턴에서 큐로 되돌린 relay. 다음 묶음이 이것을 실으면 "다시 보낸다" 한 줄을 앞에 붙인다(조율자가
     /// 일부를 이미 읽고 dispatch · answer 했을 수 있다). 실어 보내면 지운다.
     private var resentRelays: Set<String> = []
+    /// 배분마다 이번 실행에서 보낸 이어 하기 수. `maxResumes` 를 채운 배분은 더 이어 하지 않고 조율자에게 한 번 알린다 —
+    /// 풀림 → 이어 하기 → 곧바로 한도 실패가 끝없이 되풀이되지 않게. 메모리에만(앱을 다시 켜면 열린 배분은 닫힌다).
+    private var resumeCounts: [String: Int] = [:]
+    /// 이어 하기를 그만뒀다고 이미 알린 배분.
+    private var resumeGaveUp: Set<String> = []
+    static let maxResumes = 3
 
     init(db: DatabaseQueue, messaging: PaneMessaging, lookups: Lookups,
          now: @escaping () -> Int = { Int(Date().timeIntervalSince1970) }) {
@@ -334,11 +343,22 @@ final class Dispatcher {
             return
         }
         // 사람이 이미 그 페인에서 턴을 돌리고 있다 — 끼어들지 않는다. 그 턴의 Stop 이 Stop 대기를 풀고 보통 흐름으로 간다.
-        if pane.state == .running { return }
+        // Codex 는 서버의 스레드 상태로 본다 — 훅 칩(`state`)은 늦게 오거나 엇갈려 페인이 멈춘 채 남을 수 있다.
+        if pane.kind == .codex ? pane.turnActive : (pane.state == .running) { return }
         // 그 사이 새 스레드를 열었으면(`/new`) 그 스레드는 배분의 맥락이 없다 — 새 스레드의 SessionStart 가 배분을 닫는다.
         if case .codex? = pane.address, let delivered = d.deliveredSession, delivered != "argv",
            delivered != pane.address?.sessionKey {
             repoAwaitingStop.remove(repoID)
+            return
+        }
+        // 이어 하기가 되풀이해 한도로 끊겼다 — 더 보내지 않는다. 배분은 열어 둔다(사람 · 조율자가 정한다). 끊긴 턴의 Stop 은
+        // 오지 않으니 Stop 대기를 푼다.
+        if resumeCounts[d.id, default: 0] >= Self.maxResumes {
+            repoAwaitingStop.remove(repoID)
+            if resumeGaveUp.insert(d.id).inserted {
+                try relay(workspaceID: d.workspaceId, dispatchID: d.id, repoID: repoID, kind: .limit,
+                          body: Self.resumeGivenUp(d.seq))
+            }
             return
         }
         guard let address = pane.address else {
@@ -356,6 +376,7 @@ final class Dispatcher {
                       body: Self.resumeNotSent(d.seq))
             return
         }
+        resumeCounts[d.id, default: 0] += 1
         repoAwaitingStop.insert(repoID)
         // 끊긴 뒤 사람이 친 턴이 Stop 으로 응답 대기를 만들었을 수 있다 — 다시 일하는 중으로.
         do { try db.write { try DispatchOps.reopen(d.id, in: $0) } } catch {
@@ -365,6 +386,11 @@ final class Dispatcher {
 
     static func resumeNotSent(_ seq: Int) -> String {
         "배분 #\(seq) 을 이어 하라고 그 페인에 보내지 못했다. 배분은 열려 있다 — 사람에게 그 페인에서 이어 가게 하라고 알린다."
+    }
+
+    static func resumeGivenUp(_ seq: Int) -> String {
+        "배분 #\(seq) 은 이어 하기가 \(maxResumes)번 모두 한도로 끊겨 더 이어 하라고 보내지 않았다. 배분은 열려 있다 — "
+            + "사람에게 그 페인에서 이어 가게 하거나 배분을 닫으라고 알린다."
     }
 
     // MARK: - 흐름
