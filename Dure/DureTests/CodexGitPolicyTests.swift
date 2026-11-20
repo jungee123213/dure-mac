@@ -263,7 +263,9 @@ struct CodexGitPolicyTests {
     @Test func 안쪽을_볼_수_없는_꼴은_위험_낱말이_있을_때만_막는다() {
         #expect(!CodexGitPolicy.opaqueDangerWords.isEmpty)
         for w in CodexGitPolicy.opaqueDangerWords {
-            #expect(isDeny(CodexGitPolicy.gateDecision("bash -c 'x \(w) y'")), "\(w)")
+            #expect(isDeny(CodexGitPolicy.gateDecision("bash -c 'git x \(w) y'")), "\(w)")
+            #expect(isDeny(CodexGitPolicy.gateDecision("bash -c 'gh x \(w) y'")), "\(w)")
+            #expect(CodexGitPolicy.gateDecision("bash -c 'x \(w) y'") == .pass, "\(w)")   // git · gh 가 없으면 무관하다(최종 리뷰 4)
         }
         #expect(isDeny(CodexGitPolicy.gateDecision("git push -u origin $(git branch --show-current)")))
         #expect(isDeny(CodexGitPolicy.gateDecision("(git push -f origin b)")))
@@ -411,5 +413,149 @@ struct CodexGitPolicyTests {
     func Claude_allow_의_대표_모양은_위험이_아니다(_ c: String) throws {
         let segs = try argvs(c)
         #expect(!isDangerous(CodexGitPolicy.risk(segs[0])))
+    }
+
+    // MARK: - 최종 리뷰 3 · 4
+
+    /// git 전역 `-c` · `--config` · `--config-env` · `--exec-path` 는 키를 가리지 않고 막는다 — 명령을 돌리는 설정 키가 많다.
+    @Test(arguments: ["git -c gpg.program=./x -c commit.gpgsign=true commit -m x", "git -c core.pager=x log", "git --exec-path=./x fetch",
+                      "git --exec-path ./x fetch origin", "git -c user.name=x status", "git -cuser.name=x status",
+                      "git --config-env=user.name=X status", "git --config-env user.name=X status", "git --config=user.name=x status",
+                      "git --config user.name=x status", "git -C . -c diff.external=./x diff", "git --no-pager -c core.pager=x log"])
+    func git_전역_설정_옵션은_키와_상관없이_막는다(_ c: String) {
+        guard case .deny(let why) = CodexGitPolicy.gateDecision(c) else {
+            Issue.record("pass: \(c)"); return
+        }
+        #expect(why.contains("정형 모양"))
+        #expect(why.contains("없이 git <하위 명령>"))
+        #expect(!why.hasSuffix("."))
+        let segs = (try? argvs(c)) ?? []
+        #expect(isDangerous(CodexGitPolicy.risk(segs.first ?? [])))
+    }
+
+    @Test(arguments: ["git -C . status", "git -C ../r log --oneline -3", "git --no-pager log", "git -C . diff --stat"])
+    func git_C_경로는_막지_않는다(_ c: String) throws {
+        #expect(CodexGitPolicy.gateDecision(c) == .pass)
+        #expect(!isDangerous(CodexGitPolicy.risk(try argvs(c)[0])))
+    }
+
+    /// 안쪽을 볼 수 없는 꼴이어도 git · gh 와 무관한 위험 낱말로는 막지 않는다.
+    @Test(arguments: ["grep -n switch $(git ls-files)", "for f in *; do grep reset \"$f\"; done", "echo $(git log --oneline -1)",
+                      "rg -n branch $(git ls-files '*.swift')", "cat \"$HOME/push.txt\"", "echo $(digit push)", "ls `pwd`/github-merge"])
+    func 무관한_위험_낱말은_안쪽을_볼_수_없어도_통과한다(_ c: String) {
+        #expect(CodexGitPolicy.hasOpaqueShell(c), "\(c)")
+        #expect(CodexGitPolicy.gateDecision(c) == .pass, "\(c)")
+    }
+
+    @Test(arguments: ["bash -c \"git push -f origin b\"", "echo $(git push -f origin b)", "x=push; git $x -f origin b",
+                      "for s in push; do git $s -f origin b; done", "sh -c 'g\"\"it push -f origin b'", "echo `/usr/bin/git reset --hard x`",
+                      "bash -c 'gh pr merge 3'", "G=git; $G push -f origin b"])
+    func git_gh_가_든_안쪽을_볼_수_없는_꼴은_위험_낱말로_막는다(_ c: String) {
+        guard case .deny(let why) = CodexGitPolicy.gateDecision(c) else {
+            Issue.record("pass: \(c)"); return
+        }
+        #expect(!why.hasSuffix("."))
+    }
+
+    // MARK: - 최종 리뷰 5 — 실제 Codex 배분 글이 시키는 명령
+
+    /// 글에 적힌 모양(`shown`, 글 원문 그대로)과 모델이 실제로 칠 명령(`typed`). `read` 는 allow 가 아닌 읽기(샌드박스 몫).
+    private struct Taught {
+        let shown: String
+        let typed: String
+        var read = false
+    }
+
+    /// 글이 "쓰지 말라" · "실패하면" 처럼 이름만 대는 곳 — 치라는 명령이 아니다.
+    private static let mentions = ["git add -A", "git add .", "git push 는", "gh pr list 로", "gh pr create 가"]
+
+    /// 글 안의 모든 `git <소문자>` · `gh <소문자>` 자리(앞이 글자가 아님).
+    private static func commandSites(_ body: String) -> [Substring] {
+        var out: [Substring] = []
+        var i = body.startIndex
+        while i < body.endIndex {
+            let before = i == body.startIndex ? nil : body[body.index(before: i)]
+            if !(before?.isLetter ?? false), before != "/", before != "-" {
+                for w in ["git ", "gh "] where body[i...].hasPrefix(w) {
+                    let next = body.index(i, offsetBy: w.count)
+                    if next < body.endIndex, body[next].isASCII, body[next].isLowercase || body[next] == "-" {
+                        out.append(body[i...])
+                    }
+                }
+            }
+            i = body.index(after: i)
+        }
+        return out
+    }
+
+    @Test func Codex_배분_글이_시키는_명령은_창_없이_게이트를_지난다() throws {
+        let newBranch = "feat/#51/share"      // 브랜치 제안 feat/#N/share 의 #N 을 새 이슈 번호로
+        let baseBranch = "feat/#49/base"
+        let contBranch = "feat/#50/x"
+        // 작은따옴표 한 덩어리 · 여러 줄 · 안의 작은따옴표는 '\'' (글의 인용 규칙 그대로)
+        let body = "'## 요약\n\n- it'\\''s $HOME `x` $(y)\n'"
+        let common = [
+            Taught(shown: "git status --porcelain", typed: "git status --porcelain"),
+            Taught(shown: "git log", typed: "git log --oneline -5", read: true),
+            Taught(shown: "git diff", typed: "git diff --stat", read: true),
+            Taught(shown: "git fetch origin", typed: "git fetch origin"),
+            Taught(shown: "git add <파일…>", typed: "git add Dure/a.swift 'Dure/b c.swift'"),
+            Taught(shown: "git commit -m '<메시지>'", typed: "git commit -m 'feat: 공유를 붙입니다\n\n본문 it'\\''s'"),
+        ]
+        let forms: [(String, Dispatch, [Taught])] = [
+            ("새 이슈 · 기준 없음",
+             DispatchBodyTests.row(mode: .newIssue, title: "[FEAT] 공유", body: "본문", scope: .pr, hint: "feat/#N/share"),
+             common + [
+                Taught(shown: "gh issue create --title '<제목>' --body …", typed: "gh issue create --title '[FEAT] 공유' --body " + body),
+                Taught(shown: "git switch -c <브랜치> origin/<기본 브랜치>", typed: "git switch -c \(newBranch) origin/main"),
+                Taught(shown: "git rev-parse --abbrev-ref origin/HEAD", typed: "git rev-parse --abbrev-ref origin/HEAD", read: true),
+                Taught(shown: "git branch -r", typed: "git branch -r", read: true),
+                Taught(shown: "git push -u origin <브랜치>", typed: "git push -u origin \(newBranch)"),
+                Taught(shown: "gh pr create --title '<제목>' --body …", typed: "gh pr create --title '[FEAT] 공유' --body " + body),
+             ]),
+            ("새 이슈 · 기준 브랜치에 #",
+             DispatchBodyTests.row(mode: .newIssue, title: "[FEAT] 공유", body: "본문", scope: .pr, hint: "feat/#N/share", base: baseBranch),
+             common + [
+                Taught(shown: "gh issue create --title '<제목>' --body …", typed: "gh issue create --title '[FEAT] 공유' --body " + body),
+                Taught(shown: "git switch -c <브랜치> origin/\(baseBranch)", typed: "git switch -c \(newBranch) origin/\(baseBranch)"),
+                Taught(shown: "git push -u origin <브랜치>", typed: "git push -u origin \(newBranch)"),
+                Taught(shown: "gh pr create --base \(baseBranch) --title '<제목>' --body …",
+                       typed: "gh pr create --base \(baseBranch) --title '[FEAT] 공유' --body " + body),
+             ]),
+            ("이어 하기",
+             DispatchBodyTests.row(mode: .continueWork, scope: .pr, issue: 50, branch: contBranch),
+             common + [
+                Taught(shown: "git switch \(contBranch)", typed: "git switch \(contBranch)"),
+                Taught(shown: "git push -u origin \(contBranch)", typed: "git push -u origin \(contBranch)"),
+                Taught(shown: "gh pr create --title '<제목>' --body …", typed: "gh pr create --title 'it'\\''s' --body " + body),
+             ]),
+        ]
+        for (name, d, taught) in forms {
+            let text = DispatchBody.dispatch(d, repoName: "android", kind: .codex)
+            // 글의 git · gh 자리는 모두 표에 있다 — 글에 새 명령이 생기면 여기서 걸린다
+            let sites = Self.commandSites(text)
+            #expect(sites.count >= taught.count, "\(name): 명령 자리를 못 찾았다")
+            for site in sites {
+                let known = taught.contains { site.hasPrefix($0.shown) } || Self.mentions.contains { site.hasPrefix($0) }
+                #expect(known, "\(name): 표에 없는 명령 — \(site.prefix(60))")
+            }
+            for t in taught {
+                #expect(text.contains(t.shown), "\(name): 글에 없음 — \(t.shown)")
+                let segs = try CodexGitPolicy.segments(t.typed)
+                #expect(segs.count == 1, "\(name): \(t.typed)")
+                let argv = try #require(segs.first)
+                if t.typed.contains("#") {
+                    #expect(argv.contains { $0.contains("#") }, "\(name): # 가 주석으로 잘렸다 — \(argv)")
+                }
+                #expect(CodexGitPolicy.gateDecision(t.typed) == .pass, "\(name): \(t.typed)")
+                #expect(!CodexGitPolicy.promptRuleMatches(argv), "\(name): \(t.typed)")
+                if t.read {
+                    #expect(CodexGitPolicy.risk(argv) == .other, "\(name): \(t.typed)")
+                } else {
+                    #expect(CodexGitPolicy.allowRuleMatches(argv), "\(name): \(t.typed)")
+                    #expect(CodexGitPolicy.risk(argv) == .safe, "\(name): \(t.typed)")
+                }
+            }
+        }
     }
 }

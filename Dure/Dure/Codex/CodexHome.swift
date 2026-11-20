@@ -20,11 +20,11 @@ enum CodexHome {
         root.appendingPathComponent(key.replacingOccurrences(of: ":", with: "-"))
     }
 
-    /// 다시 맞출 때 지우는 것 — 두레가 만든 것(링크 · config 사본 · rules)과 서버가 매번 새로 만드는 폴더.
-    /// hooks.json 은 두레가 만들지 않지만 있으면 사본 home 에서 훅이 돌므로 지운다.
     /// 레포 페인 home 의 두레 git 규칙 파일 이름(`CodexGitPolicy.rulesFile()`).
     nonisolated static let dureRulesName = "dure.rules"
 
+    /// 다시 맞출 때 지우는 것 — 두레가 만든 것(링크 · config 사본 · rules)과 서버가 매번 새로 만드는 폴더.
+    /// hooks.json 은 두레가 만들지 않지만 있으면 사본 home 에서 훅이 돌므로 지운다.
     private nonisolated static let rebuilt: Set<String> = ["config.toml", "rules", "hooks.json"]
 
     /// 시작할 때마다 다시 맞춘다. **폴더를 통째로 지우지 않는다** — 사용자 home 에 없던 이름(`sessions/` · 새 `state_N.sqlite`)은

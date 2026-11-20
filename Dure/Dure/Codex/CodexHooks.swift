@@ -147,15 +147,31 @@ nonisolated enum CodexHooks {
     /// Codex 는 훅 명령을 사용자 계정 셸로 돌린다(실측: `/bin/zsh -c '<명령>'`, `$SHELL` 환경 변수는 안 따른다).
     /// 감싼 부분은 POSIX 문법이라 fish 같은 셸에서는 문법 오류(→ 통과)가 된다 — 그래서 바깥은 `/bin/sh -c '<안>'`
     /// 단순 명령 하나로 내고 안쪽은 언제나 `/bin/sh` 가 읽는다. 신뢰 해시는 이 본문 그대로 걸린다.
+    /// **안쪽에는 작은따옴표가 하나도 없다** — 있으면 바깥 인용이 `'\''` 꼴이 되는데, 그 꼴을 모르는 계정 셸(nushell 등)에서는
+    /// 문법 오류(→ 통과)다. 작은따옴표 한 쌍만은 그런 셸도 날 문자열로 읽는다.
     static func gateCommand(executable: String) -> String {
-        "/bin/sh -c " + Spawn.quoted(gateScript(executable: executable))
+        "/bin/sh -c '" + gateScript(executable: executable) + "'"
     }
 
-    /// `/bin/sh` 가 읽는 안쪽 — 게이트를 돌리고 0 · 2 가 아닌 종료를 이유 + exit 2 로 바꾼다.
+    /// `/bin/sh` 가 읽는 안쪽 — 게이트를 돌리고 0 · 2 가 아닌 종료를 이유 + exit 2 로 바꾼다. 작은따옴표를 쓰지 않는다.
     static func gateScript(executable: String) -> String {
-        Spawn.quoted(executable) + " " + CodexGateMain.flag
+        shDoubleQuoted(executable) + " " + CodexGateMain.flag
             + "; s=$?; [ \"$s\" -eq 0 ] && exit 0; [ \"$s\" -eq 2 ] && exit 2; "
-            + "printf '%s\\n' \"\(gateLaunchFailure) (종료 코드 $s)\" >&2; exit 2"
+            + "echo \"\(gateLaunchFailure) (종료 코드 $s)\" >&2; exit 2"
+    }
+
+    /// POSIX 큰따옴표 한 단어 — `\` `"` `$` 백틱은 역슬래시로 막고, 경로 안의 작은따옴표는 `$(printf \\047)` 로 낸다
+    /// (작은따옴표 글자 없이 `'` 를 만든다). 줄바꿈은 큰따옴표 안에서 글자 그대로라 손대지 않는다.
+    static func shDoubleQuoted(_ s: String) -> String {
+        var out = "\""
+        for u in s.unicodeScalars {
+            switch u {
+            case "\\", "\"", "$", "`": out += "\\"; out.unicodeScalars.append(u)
+            case "'": out += "$(printf \\\\047)"
+            default: out.unicodeScalars.append(u)
+            }
+        }
+        return out + "\""
     }
 
     /// 두레가 세션에 얹는 훅. shim(상태 · 알림)은 SessionStart · UserPromptSubmit · PostToolUse · Stop 은 두 프로필 모두,

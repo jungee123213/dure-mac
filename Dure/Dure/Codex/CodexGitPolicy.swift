@@ -305,8 +305,37 @@ nonisolated enum CodexGitPolicy {
         return false
     }
 
+    /// 첫 `git` · `gh` 명령 단어가 끝난 자리(앞뒤가 이름 글자가 아님 — `/usr/bin/git` 는 들고 `digit` · `github` · `.git` · `git-lfs` 는 안 든다).
+    private static func endOfFirstGitWord(_ lower: String) -> String.Index? {
+        func nameChar(_ c: Character?) -> Bool {
+            guard let c else { return false }
+            return c.isASCII && (c.isLetter || c.isNumber || c == "_" || c == "-")
+        }
+        var i = lower.startIndex
+        while i < lower.endIndex {
+            let before = i == lower.startIndex ? nil : lower[lower.index(before: i)]
+            if !nameChar(before) && before != "." {
+                for w in ["git", "gh"] where lower[i...].hasPrefix(w) {
+                    let end = lower.index(i, offsetBy: w.count)
+                    if !nameChar(end < lower.endIndex ? lower[end] : nil) { return end }
+                }
+            }
+            i = lower.index(after: i)
+        }
+        return nil
+    }
+
+    /// 안쪽을 볼 수 없는 꼴에서 막을 위험 낱말. git · gh 명령 단어가 없으면 없다(`grep reset "$f"` 는 git 과 무관하다, 최종 리뷰 4).
+    /// - 첫 git · gh 단어 **뒤**에 위험 낱말이 있으면 그 낱말(`bash -c "git push -f …"` · `echo $(git push …)`).
+    /// - 앞에만 있으면, 그 뒤에 `$` · 백틱(값을 나중에 채우는 자리)이 있을 때만 — `x=push; git $x -f …` 처럼 낱말을 변수로 옮기는 꼴.
+    ///   `grep -n switch $(git ls-files)` 는 git 뒤에 위험 낱말도 `$` 도 없어 통과한다.
+    /// 따옴표 · 역슬래시는 빼고 본다 — `g''it` · `g\it` 도 셸에서는 git 이다.
     private static func dangerWord(in command: String) -> String? {
-        let lower = command.lowercased()
+        let lower = String(command.lowercased().filter { $0 != "'" && $0 != "\"" && $0 != "\\" })
+        guard let end = endOfFirstGitWord(lower) else { return nil }
+        let tail = lower[end...]
+        if let word = opaqueDangerWords.first(where: { tail.contains($0) }) { return word }
+        guard tail.contains("$") || tail.contains("`") else { return nil }
         return opaqueDangerWords.first { lower.contains($0) }
     }
 
@@ -438,8 +467,19 @@ nonisolated enum CodexGitPolicy {
     }
 
     private static let gitGlobalValued: Set<String> = [
-        "-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env", "--super-prefix", "--attr-source",
+        "-C", "-c", "--config", "--git-dir", "--work-tree", "--namespace", "--config-env", "--super-prefix", "--attr-source",
     ]
+
+    /// git 전역 설정 · 실행 경로 옵션(`-c` · `--config` · `--config-env` · `--exec-path`, 붙인 값 · `=값` 포함)이면 그 이름.
+    /// 어느 키든 막는다 — `gpg.program` · `core.pager` · `diff.external` 처럼 명령을 돌리는 키가 많아 키 목록으로는 닫히지 않는다.
+    /// `-C <경로>` 는 여기에 들지 않는다.
+    static func gitConfigOption(_ token: String) -> String? {
+        if token == "-c" || (token.hasPrefix("-c") && !token.hasPrefix("--")) { return "-c" }
+        for name in ["--config", "--config-env", "--exec-path"] where token == name || token.hasPrefix(name + "=") {
+            return name
+        }
+        return nil
+    }
 
     /// git 전역 옵션을 건넌 하위 명령의 위치(args 안).
     private static func gitSubcommandIndex(_ args: [String]) -> Int? {
@@ -460,21 +500,14 @@ nonisolated enum CodexGitPolicy {
     private static func gitDanger(_ args: [String]) -> Danger? {
         var i = 0
         let n = args.count
-        // 전역 옵션: -C <v> · -c <v> · --git-dir[=v] · --work-tree[=v] · --namespace[=v] · --no-pager · -P · --bare · --exec-path[=v] …
+        // 전역 옵션: -C <v> · --git-dir[=v] · --work-tree[=v] · --namespace[=v] · --no-pager · -P · --bare …
+        // 설정 · 실행 경로(-c · --config · --config-env · --exec-path)는 키를 가리지 않고 막는다(최종 리뷰 3) — 정형 모양이 없다.
         while i < n, args[i].hasPrefix("-") {
             let t = args[i]
-            var value: String?
-            if gitGlobalValued.contains(t) {
-                value = i + 1 < n ? args[i + 1] : nil
-                i += 2
-            } else {
-                if t.hasPrefix("-c"), t.count > 2, !t.hasPrefix("--") { value = String(t.dropFirst(2)) }
-                if t.hasPrefix("--config-env=") { value = String(t.dropFirst("--config-env=".count)) }
-                i += 1
+            if let option = gitConfigOption(t) {
+                return Danger(reason: "git 전역 설정 · 실행 경로 옵션(\(option))", example: "\(option) 없이 git <하위 명령> …", kind: .rewrite)
             }
-            if let value, let key = dangerousConfigKey(value) {
-                return Danger(reason: "위험한 git 설정(-c \(key))", example: "-c 없이 git <하위 명령> …", kind: .rewrite)
-            }
+            i += gitGlobalValued.contains(t) ? 2 : 1
         }
         guard i < n else { return nil }
         let sub = args[i]
@@ -497,17 +530,6 @@ nonisolated enum CodexGitPolicy {
         case "commit": return commitDanger(rest)
         default: return nil
         }
-    }
-
-    /// `-c` · `--config-env` 값(`키=…`)이 위험한 설정이면 그 키. 별칭 · 원격 명령(upload/receive pack, ssh) · 훅 경로 ·
-    /// 원격 주소 · push 대상 바꾸기 · 설정 포함 · 프로토콜 허용 · 자격 증명.
-    static func dangerousConfigKey(_ value: String) -> String? {
-        let key = (value.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init) ?? value).lowercased()
-        let exact: Set<String> = ["core.sshcommand", "core.hookspath", "core.gitproxy", "core.fsmonitor", "core.askpass"]
-        let prefixes = ["alias.", "url.", "include.", "includeif.", "protocol.", "credential.", "remote."]
-        let suffixes = [".uploadpack", ".receivepack"]
-        if exact.contains(key) || prefixes.contains(where: key.hasPrefix) || suffixes.contains(where: key.hasSuffix) { return key }
-        return nil
     }
 
     /// 보안 리뷰 C-2 — `--upload-pack <명령>` 은 allow(`git fetch`) 로 샌드박스 밖에서 임의 명령을 돌린다. 정형 모양이 없다.

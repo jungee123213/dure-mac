@@ -99,7 +99,7 @@ struct CodexHooksTests {
         let gate = gates[0]
         #expect(gate.command == CodexHooks.gateCommand(executable: "/A/Dure"))
         // 바깥은 어느 셸에서도 단순 명령 하나 — 안쪽(POSIX)은 /bin/sh 가 읽는다
-        #expect(gate.command.hasPrefix(#"/bin/sh -c ''\''/A/Dure'\'' --dure-codex-gate; s=$?; "#))
+        #expect(gate.command.hasPrefix(#"/bin/sh -c '"/A/Dure" --dure-codex-gate; s=$?; "#))
         #expect(gate.matcher == nil)          // tool_name 은 게이트가 스스로 본다
         #expect(gate.timeout == 10)
         #expect(!repo.contains { $0.command.contains("hookSpecificOutput") })
@@ -142,12 +142,38 @@ struct CodexHooksTests {
         let exe = "/Applications/My Apps/Dure.app/Contents/MacOS/Dure"
         let repo = CodexHooks.dureGroups(shimPath: "/x/hook", profile: .repoPane, gateExecutable: exe)
         let gate = repo.first { $0.event == "PreToolUse" }
-        #expect(gate?.command.hasPrefix(#"/bin/sh -c ''\''/Applications/My Apps/Dure.app/Contents/MacOS/Dure'\'' --dure-codex-gate; "#) == true)
+        #expect(gate?.command.hasPrefix(#"/bin/sh -c '"/Applications/My Apps/Dure.app/Contents/MacOS/Dure" --dure-codex-gate; "#) == true)
         // 작은따옴표가 든 경로도 한 단어로 묶인다 — 실제 셸 실행은 아래 테스트가 본다(폴더 이름에 ' 와 공백)
         let odd = CodexHooks.dureGroups(shimPath: "/x/hook", profile: .repoPane, gateExecutable: "/A/it's/Dure")
         #expect(odd.first { $0.event == "PreToolUse" }?.command
-                == "/bin/sh -c " + Spawn.quoted(CodexHooks.gateScript(executable: "/A/it's/Dure")))
-        #expect(CodexHooks.gateScript(executable: "/A/it's/Dure").hasPrefix(#"'/A/it'\''s/Dure' --dure-codex-gate; s=$?; "#))
+                == "/bin/sh -c '" + CodexHooks.gateScript(executable: "/A/it's/Dure") + "'")
+        #expect(CodexHooks.gateScript(executable: "/A/it's/Dure").hasPrefix(#""/A/it$(printf \\047)s/Dure" --dure-codex-gate; s=$?; "#))
+    }
+
+    /// 최종 리뷰 2 — 안쪽에 작은따옴표가 있으면 바깥이 `'\''` 꼴이 되고, 그 꼴을 모르는 계정 셸(nushell 등)에서 문법 오류 → 통과다.
+    @Test(arguments: ["/A/Dure", "/Applications/My Apps/Dure.app/Contents/MacOS/Dure", "/A/it's/Dure", #"/A/"q"/$HOME/`x`/b\s/Dure"#,
+                      "/A/줄\n바꿈/Dure"])
+    func 게이트_안쪽에는_작은따옴표가_없다(_ exe: String) {
+        let script = CodexHooks.gateScript(executable: exe)
+        #expect(!script.contains("'"), "\(script)")
+        let command = CodexHooks.gateCommand(executable: exe)
+        #expect(command == "/bin/sh -c '" + script + "'")
+        #expect(command.filter { $0 == "'" }.count == 2)
+        #expect(command == "/bin/sh -c " + Spawn.quoted(script))   // 작은따옴표가 없으니 Spawn.quoted 와 같은 꼴
+    }
+
+    @Test func 큰따옴표_인용은_sh_가_원래_글자로_읽는다() throws {
+        for s in ["/A/it's/Dure", #"/A/"q"/$HOME/`x`/b\s/Dure"#, "/A/줄\n바꿈/Dure", "a'b'c", "''", ""] {
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: "/bin/sh")
+            p.arguments = ["-c", "printf %s " + CodexHooks.shDoubleQuoted(s)]
+            let out = Pipe()
+            p.standardOutput = out
+            try p.run()
+            let data = out.fileHandleForReading.readDataToEndOfFile()
+            p.waitUntilExit()
+            #expect(String(decoding: data, as: UTF8.self) == s, "\(s)")
+        }
     }
 
     /// 감싼 게이트 명령을 실제 셸로 돌린다 — stdin 은 게이트로 그대로 간다.
