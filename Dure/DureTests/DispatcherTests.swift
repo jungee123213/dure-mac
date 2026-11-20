@@ -191,6 +191,15 @@ struct DispatcherTests {
         #expect(try w.db.read { try Dispatch.fetchOne($0) }?.deliveredSession == "T1")
     }
 
+    @Test func Codex_페인은_Codex_판_본문을_받는다() throws {
+        let w = try World()
+        w.repoPanes["r1"] = .init(started: true, state: .done, address: .codex(socket: "/s", thread: "T1"), kind: .codex)
+        _ = try w.d.enqueue(workspaceID: "w1", repo: w.repoA, title: nil, instruction: "x",
+                            git: .init(mode: .newIssue, issueTitle: "t", issueBody: "b", scope: .commit), toolUseId: nil)
+        let c = try #require(w.inbox.sent.first?.content)
+        #expect(c.contains("AGENTS.md") && !c.contains("<<'EOF'"))
+    }
+
     @Test func Claude_조율자에서_Codex_페인으로_가는_배분과_Codex_페인의_보고가_각자_출구로_간다() throws {
         let w = try World(); codexIdle(w); w.orchIdle()
         _ = try w.d.enqueue(workspaceID: "w1", repo: w.repoA, title: nil, instruction: "x", toolUseId: nil)

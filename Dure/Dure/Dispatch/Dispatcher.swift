@@ -17,6 +17,7 @@ final class Dispatcher {
         var state: AgentState?
         /// 메시지를 넣을 곳. Claude 는 현재 cc_session_id, Codex 는 서버 소켓 + 스레드 id. 모르면 nil — 큐에 남는다.
         var address: PaneAddress?
+        var kind: AgentKind = .claude
     }
 
     struct Lookups {
@@ -241,7 +242,7 @@ final class Dispatcher {
                   DispatchRules.isIdle(started: pane.started, state: pane.state, hasOutstanding: open != nil),
                   let address = pane.address,
                   let next = try db.read({ try DispatchOps.queued(repoID: repoID, in: $0) }).first else { return }
-            let body = DispatchBody.dispatch(next, repoName: lookups.repoName(repoID))
+            let body = DispatchBody.dispatch(next, repoName: lookups.repoName(repoID), kind: pane.kind)
             do {
                 try messaging.send(body, to: address)
             } catch {
@@ -336,15 +337,16 @@ final class Dispatcher {
     /// 배분만 싣는다. 조율자 답은 싣지 않는다 — 새 세션은 질문의 맥락이 없다(설계 3절). 답은 `SessionStart` 뒤 `pumpRepo` 로 간다.
     func initialPrompt(forRepo repoID: String) -> String? {
         do {
+            let kind = lookups.repoPane(repoID).kind
             // 뷰가 다시 그려지며 두 번 불릴 수 있다. 이미 argv 로 실은 것이 열려 있으면 같은 것을 다시 준다 —
             // 다음 것을 꺼내면 보내지도 않은 배분이 `delivered` 가 된다. 소켓으로 간 것이 열려 있으면 실을 것이 없다.
             if let open = try db.read({ try DispatchOps.outstanding(repoID: repoID, in: $0) }) {
                 guard open.deliveredSession == "argv" else { return nil }
-                return DispatchBody.dispatch(open, repoName: lookups.repoName(repoID))
+                return DispatchBody.dispatch(open, repoName: lookups.repoName(repoID), kind: kind)
             }
             guard let next = try db.read({ try DispatchOps.queued(repoID: repoID, in: $0) }).first else { return nil }
             try db.write { try DispatchOps.markDelivered(next.id, session: "argv", now: now(), in: $0) }
-            return DispatchBody.dispatch(next, repoName: lookups.repoName(repoID))
+            return DispatchBody.dispatch(next, repoName: lookups.repoName(repoID), kind: kind)
         } catch { NSLog("[Dure] 기동 프롬프트 실패: \(error)"); return nil }
     }
 

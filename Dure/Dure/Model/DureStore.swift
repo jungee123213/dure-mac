@@ -537,7 +537,7 @@ final class DureStore {
         // 스레드가 잡히면(`thread/started` · 보충) `startCodex` 의 알림이 큐를 흘린다.
         if agentKind(for: target) == .codex {
             return .init(started: hasStarted(target), state: state(for: target),
-                         address: codexPanes[target.key]?.address)
+                         address: codexPanes[target.key]?.address, kind: .codex)
         }
         return .init(started: hasStarted(target), state: state(for: target),
                      address: session.flatMap { currentSession(for: $0)?.ccSessionId }.map { .claude(session: $0) })
