@@ -376,7 +376,7 @@ final class DureStore {
     }
 
     /// 그 페인을 실제로 띄운 CLI. agent 행에서 읽는다.
-    private func agentKind(for target: PaneTarget) -> AgentKind? {
+    func agentKind(for target: PaneTarget) -> AgentKind? {
         guard let session = sessionIDs[target.key],
               let agent = agents.first(where: { $0.dureSession == session }) else { return nil }
         return AgentKind(rawValue: agent.agentKind)

@@ -128,10 +128,7 @@ struct ContentView: View {
                 .pickerStyle(.menu)
                 .font(.caption)
                 // 최종 리뷰 F4 — 바꿔도 지금은 아무것도 달라지지 않는다는 것을 숨기지 않는다.
-                .help("새 페인부터 적용할 값입니다. 지금은 claude 만 띄웁니다.")
-                Text("지금은 claude 만 띄웁니다")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
+                .help("새로 시작하는 페인부터 적용합니다.")
             }
 
             Section("레포") {
@@ -383,6 +380,9 @@ struct ContentView: View {
                         .help("조율자가 넘긴 일이 큐에 있습니다. 페인이 놀 때 전달됩니다.")
                 }
             }
+            if store.hasStarted(target), let kind = store.agentKind(for: target) {
+                Text(kind.rawValue).font(.caption2).foregroundStyle(.secondary)
+            }
             Spacer()
             if case .repo(let repo) = target { shellButton(for: repo) }
         }
@@ -392,7 +392,7 @@ struct ContentView: View {
         // 빈 자리를 눌러도 접히게. 헤더 안의 칩들은 버튼이 아니라 탭이 그대로 올라온다.
         .contentShape(Rectangle())
         .onTapGesture { store.toggleCollapsed(target) }
-        .help(store.isCollapsed(target) ? "눌러서 펼치기" : "눌러서 접기 — 접어도 claude 는 계속 돕니다")
+        .help(store.isCollapsed(target) ? "눌러서 펼치기" : "눌러서 접기 — 접어도 에이전트는 계속 돕니다")
     }
 
     /// 이슈 #30 — 레포 경로로 iTerm 창 하나를 열고 닫는다. 커밋 · push 는 사람이 거기서 한다(ADR-4).
@@ -411,7 +411,7 @@ struct ContentView: View {
         .buttonStyle(.borderless)
         .disabled(!isOpen && !repo.folderExists)
         .help(isOpen ? "이 레포의 \(app) 창을 닫습니다"
-                     : "이 레포 경로에서 \(app) 창을 엽니다 — claude 는 띄우지 않습니다")
+                     : "이 레포 경로에서 \(app) 창을 엽니다 — 에이전트는 띄우지 않습니다")
     }
 
     // MARK: - 워크스페이스 관리 (이슈 #12)
@@ -465,7 +465,7 @@ struct ContentView: View {
         panel.canChooseDirectories = true
         panel.allowsMultipleSelection = true
         panel.prompt = "추가"
-        panel.message = "Claude Code 를 띄울 레포 폴더를 고르세요."
+        panel.message = "에이전트를 띄울 레포 폴더를 고르세요."
         if panel.runModal() == .OK {
             for url in panel.urls {
                 store.addRepo(path: url.path, to: wsID)
