@@ -108,4 +108,55 @@ struct AgentStateTests {
     @Test func 사람_손이_필요한_상태는_대기중_하나뿐이다() {
         #expect(AgentState.allCases.filter(\.needsAttention) == [.waiting])
     }
+
+    // MARK: - Codex
+
+    static func codexEvent(_ ev: String, payload: String? = nil) throws -> HookEvent {
+        let p = payload.map { #","payload":\#($0)"# } ?? ""
+        let json = #"{"v":1,"ts":"2026-11-19T00:00:00Z","ev":"\#(ev)","agent_kind":"codex","dure_session":"pane"\#(p)}"#
+        return try #require(HookEvent(data: Data(json.utf8)))
+    }
+
+    @Test func Codex_승인_요청은_승인_대기와_알림이다() throws {
+        let e = try Self.codexEvent("PermissionRequest", payload: #"{"session_id":"s","turn_id":"t","hook_event_name":"PermissionRequest","tool_name":"Bash","tool_input":{"command":"git push --force origin b"}}"#)
+        #expect(e.toolCommand == "git push --force origin b")
+        let r = AgentStateMachine.reaction(to: e, current: .running)
+        #expect(r.next == .waiting)
+        #expect(r.alert == .waiting("승인이 필요합니다: git push --force origin b"))
+    }
+
+    @Test func Codex_승인_요청_명령이_길면_120자에서_자르고_줄임표를_붙인다() throws {
+        let long = String(repeating: "a", count: 200)
+        let e = try Self.codexEvent("PermissionRequest", payload: #"{"tool_input":{"command":"\#(long)"}}"#)
+        let r = AgentStateMachine.reaction(to: e, current: .running)
+        #expect(r.alert == .waiting("승인이 필요합니다: " + String(repeating: "a", count: 120) + "…"))
+        let exact = String(repeating: "b", count: 120)
+        let e2 = try Self.codexEvent("PermissionRequest", payload: #"{"tool_input":{"command":"\#(exact)"}}"#)
+        #expect(AgentStateMachine.reaction(to: e2, current: .running).alert == .waiting("승인이 필요합니다: " + exact))
+    }
+
+    @Test func Codex_승인_요청에_명령이_없으면_문구만_알린다() throws {
+        let e = try Self.codexEvent("PermissionRequest", payload: #"{"tool_name":"Bash"}"#)
+        let r = AgentStateMachine.reaction(to: e, current: .running)
+        #expect(r.next == .waiting)
+        #expect(r.alert == .waiting("승인이 필요합니다."))
+    }
+
+    @Test func 승인_대기_뒤_툴이_끝나면_실행_중으로_돌아간다() throws {
+        let r = AgentStateMachine.reaction(to: try Self.codexEvent("PostToolUse"), current: .waiting)
+        #expect(r.next == .running)
+        #expect(r.alert == nil)
+    }
+
+    @Test func 실행_중에_온_PostToolUse_는_상태를_바꾸지_않는다() throws {
+        for s: AgentState in [.running, .started, .done] {
+            #expect(AgentStateMachine.reaction(to: try Self.codexEvent("PostToolUse"), current: s) == .ignore)
+        }
+    }
+
+    @Test func 죽은_페인에_온_Codex_이벤트는_무시한다() throws {
+        for ev in ["SessionStart", "UserPromptSubmit", "PermissionRequest", "PostToolUse", "Stop"] {
+            #expect(AgentStateMachine.reaction(to: try Self.codexEvent(ev), current: .dead) == .ignore)
+        }
+    }
 }

@@ -47,6 +47,19 @@ enum AgentStateMachine {
             return Reaction(next: .waiting,
                             alert: .waiting(event.message ?? "승인이 필요합니다."))
 
+        case "PermissionRequest":
+            // Codex 전용. Claude 는 이 이벤트를 보내지 않는다.
+            var text = "승인이 필요합니다."
+            if let command = event.toolCommand, !command.isEmpty {
+                let cut = command.count > 120
+                text = "승인이 필요합니다: " + command.prefix(120) + (cut ? "…" : "")
+            }
+            return Reaction(next: .waiting, alert: .waiting(text))
+
+        case "PostToolUse":
+            // Codex 전용. 승인 뒤 툴이 끝났다는 신호라 `대기중` 에서만 풀어 준다.
+            return current == .waiting ? Reaction(next: .running) : .ignore
+
         case "Stop":
             return Reaction(next: .done, alert: .done, ingestTranscript: true, refreshGit: true)
 

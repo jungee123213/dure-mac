@@ -154,4 +154,24 @@ struct SessionBridgeTests {
         #expect(outcome == .missingFields)
         #expect(try q.read { try CCSession.fetchCount($0) } == 0)
     }
+
+    @Test func Codex_SessionStart_로_세션이_연결된다() throws {
+        let q = try makeDB()
+        let json = """
+        {"v":1,"ts":"2026-11-19T09:06:03Z","ev":"SessionStart","agent_kind":"codex",\
+        "dure_session":"fixture-pane","payload":{"session_id":"01a1f30e-493a-7ba2-8ff6-ad2dfe407e1e",\
+        "transcript_path":"/Users/x/.codex/sessions/2026/11/19/rollout-2026-11-19T18-06-03-01a1f30e-493a-7ba2-8ff6-ad2dfe407e1e.jsonl",\
+        "cwd":"/Users/x/repo","hook_event_name":"SessionStart","model":"gpt-6-astra",\
+        "permission_mode":"default","source":"startup"}}
+        """
+        let e = try Self.event(json)
+        #expect(e.agentKind == "codex")
+        let outcome = try q.write { try SessionBridge.apply(e, in: $0) }
+        #expect(outcome == .recorded)
+        let rows = try q.read { try CCSession.fetchAll($0) }
+        #expect(rows.count == 1)
+        #expect(rows[0].ccSessionId == "01a1f30e-493a-7ba2-8ff6-ad2dfe407e1e")
+        #expect(rows[0].transcriptPath.hasSuffix("-ad2dfe407e1e.jsonl"))
+        #expect(rows[0].source == "startup")
+    }
 }

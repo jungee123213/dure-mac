@@ -45,6 +45,9 @@ struct HookEvent {
     /// 알림 문구. 길 수 있으므로 표시할 때 자른다.
     var message: String? { payload?["message"] as? String }
 
+    /// Codex `PermissionRequest` 의 `tool_input.command`. 없으면 nil.
+    var toolCommand: String? { (payload?["tool_input"] as? [String: Any])?["command"] as? String }
+
     /// SessionStart 가 **실제 적용된** 모델을 준다. 사용자가 고른 값(repo.model)과는 별개다.
     var model: String? { payload?["model"] as? String }
 
