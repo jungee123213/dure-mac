@@ -81,7 +81,7 @@ nonisolated enum CodexHooks {
     }
 
     /// TOML 기본 문자열 — `"` `\` 와 제어 문자를 이스케이프한다.
-    private static func tomlString(_ s: String) -> String {
+    static func tomlString(_ s: String) -> String {
         var out = "\""
         for u in s.unicodeScalars {
             switch u {

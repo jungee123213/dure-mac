@@ -80,6 +80,7 @@ final class CodexPaneRuntime {
     private let socketReady: (String) -> Bool
     private let socketTimeout: TimeInterval
     private let shimPath: String
+    private let mcpSocket: String?
 
     /// 지금 TUI 가 쓰는 스레드(= 훅 `session_id`). `/new` · `/clear` 마다 바뀐다. 임시(제목) 스레드는 잡지 않는다.
     private(set) var threadID: String?
@@ -108,7 +109,8 @@ final class CodexPaneRuntime {
          connect: @escaping (String) -> any CodexServerConnecting = { CodexAppServerConnection(socketPath: $0) },
          socketReady: @escaping (String) -> Bool = { CodexPaneRuntime.isSocket($0) },
          socketTimeout: TimeInterval = CodexPaneRuntime.defaultSocketTimeout,
-         shimPath: String? = nil) {
+         shimPath: String? = nil,
+         mcpSocket: String? = nil) {
         self.sessionID = sessionID
         self.cwd = cwd
         self.profile = profile
@@ -118,6 +120,7 @@ final class CodexPaneRuntime {
         self.userCodexHome = userCodexHome
         self.versionOutput = versionOutput
         self.inventory = inventory
+        self.mcpSocket = mcpSocket
         self.connect = connect
         self.socketReady = socketReady
         self.socketTimeout = socketTimeout
@@ -191,7 +194,7 @@ final class CodexPaneRuntime {
         let script = CodexLaunch.serverScript(cwd: cwd, sessionID: sessionID, home: paths.home.path,
                                               socket: paths.socket,
                                               hookArguments: CodexHooks.configArguments(groups, extraTrust: configTrust),
-                                              disabledPlugins: disabled)
+                                              disabledPlugins: disabled, mcpSocket: mcpSocket)
 
         // `Process.run` 은 메인 밖에서. 그 사이 stop 이 오면 늦게 도착한 handle 을 바로 끈다.
         let launcher = launcher, log = paths.log

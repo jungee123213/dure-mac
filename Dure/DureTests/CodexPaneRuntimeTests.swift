@@ -89,7 +89,7 @@ struct CodexPaneRuntimeTests {
     private func make(_ f: Fixture, version: String? = "codex-cli 0.167.0",
                       launcher: FakeLauncher, connection: FakeConnection = FakeConnection(),
                       entries: [CodexAppServer.HookEntry] = [], ready: Bool = true,
-                      profile: CodexProfile = .repoPane) -> CodexPaneRuntime {
+                      profile: CodexProfile = .repoPane, mcpSocket: String? = nil) -> CodexPaneRuntime {
         let userHome = f.user
         return CodexPaneRuntime(sessionID: "ABCD1234-0000-0000-0000-000000000000", cwd: "/r/app", profile: profile,
                          paths: f.paths, launcher: launcher,
@@ -101,7 +101,7 @@ struct CodexPaneRuntimeTests {
                          connect: { _ in connection },
                          socketReady: { _ in ready },
                          socketTimeout: 0.3,
-                         shimPath: "/x/hook")
+                         shimPath: "/x/hook", mcpSocket: mcpSocket)
     }
 
     /// 콜백은 메인 큐로 넘어온다 — 조건이 설 때까지 양보하며 기다린다.
@@ -170,6 +170,16 @@ struct CodexPaneRuntimeTests {
         // 소켓이 생기면 붙어서 initialize → initialized
         #expect(conn.methods == ["initialize", "initialized"])
         #expect(rt.failure == nil)
+    }
+
+    @Test func 런타임은_MCP_소켓을_서버_스크립트에_넣는다() async throws {
+        let f = try fixture(); defer { try? fm.removeItem(at: f.base) }
+        let launcher = FakeLauncher()
+        let rt = make(f, launcher: launcher, mcpSocket: "/s/m.sock")
+        rt.start(onThreadStarted: { _ in }, onServerExit: {})
+        await rt.startup?.value
+        let script = try #require(launcher.scripts.first)
+        #expect(script.contains("'mcp_servers.dure.args=[\"-U\",\"/s/m.sock\"]'"))
     }
 
     @Test func 훅_목록에서_끌_플러그인과_옮길_사용자_훅을_서버에_준다() async throws {

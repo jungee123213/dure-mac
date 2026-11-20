@@ -734,7 +734,8 @@ final class DureStore {
         }
         let facts = codexFacts(for: target)
         let runtime = CodexPaneRuntime(sessionID: sessionID, cwd: facts.cwd, profile: facts.profile, paths: paths,
-                                       launcher: LiveCodexProcessLauncher(), threadName: facts.name)
+                                       launcher: LiveCodexProcessLauncher(), threadName: facts.name,
+                                       mcpSocket: mcpSocketPath(for: target))
         codexPanes[key] = runtime
         runtime.start(onThreadStarted: { thread in
             // 단계 1 은 기록만. 전달 주소로 쓰는 것은 단계 2.

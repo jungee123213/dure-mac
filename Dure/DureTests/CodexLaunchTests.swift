@@ -107,3 +107,26 @@ struct CodexLaunchTests {
         #expect(CodexLaunch.socketPath(forSession: "abcd1234").utf8.count < 104)
     }
 }
+
+struct CodexLaunchMCPTests {
+    private func server(_ mcp: String?) -> String {
+        CodexLaunch.serverScript(cwd: "/r", sessionID: "abcd1234", home: "/h", socket: "/s/a.sock",
+                                 hookArguments: [], disabledPlugins: [], mcpSocket: mcp)
+    }
+
+    @Test func 서버는_두레_MCP_를_nc_다리로_승인_없이_붙인다() {
+        let s = server("/s/m.sock")
+        #expect(s.contains("'mcp_servers.dure.command=\"/usr/bin/nc\"'"))
+        #expect(s.contains("'mcp_servers.dure.args=[\"-U\",\"/s/m.sock\"]'"))
+        #expect(s.contains("'mcp_servers.dure.default_tools_approval_mode=\"approve\"'"))
+    }
+
+    @Test func MCP_소켓이_없으면_MCP_인자도_없다() {
+        #expect(!server(nil).contains("mcp_servers"))
+    }
+
+    @Test func MCP_소켓_경로의_따옴표와_역슬래시는_TOML_로_이스케이프된다() {
+        let s = server("/s/a\"b\\c.sock")
+        #expect(s.contains(#"args=["-U","/s/a\"b\\c.sock"]"#))
+    }
+}

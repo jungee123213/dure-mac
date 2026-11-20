@@ -47,7 +47,7 @@ enum MCPHandler {
                 return "\(v)"
             }
             let meta = params["_meta"] as? [String: Any]
-            let r = call(MCPToolCall(name: name, arguments: args, toolUseId: meta?["claudecode/toolUseId"] as? String))
+            let r = call(MCPToolCall(name: name, arguments: args, toolUseId: (meta?["claudecode/toolUseId"] as? String) ?? (meta?["callId"] as? String)))
             var out: [String: Any] = ["content": [["type": "text", "text": r.text]]]
             if r.isError { out["isError"] = true }
             result = out

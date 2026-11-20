@@ -48,7 +48,8 @@ nonisolated enum CodexLaunch {
 
     /// 서버 스크립트. 인자마다 `Spawn.quoted`. `cd … && exec` 는 `&&` 로 잇는다(이슈 #10).
     static func serverScript(cwd: String, sessionID: String, home: String, socket: String,
-                             hookArguments: [String], disabledPlugins: [String]) -> String {
+                             hookArguments: [String], disabledPlugins: [String],
+                             mcpSocket: String? = nil) -> String {
         // 플래그(`-c` · `--listen`)는 그대로, 값만 인용한다. hookArguments 는 `-c` 와 값이 번갈아 온다.
         var parts = ["app-server", "--listen", Spawn.quoted("unix://" + socket)]
         let configs = ["check_for_update_on_startup=false",
@@ -56,7 +57,14 @@ nonisolated enum CodexLaunch {
                        "features.apps=false"]
             + stride(from: 1, to: hookArguments.count, by: 2).map { hookArguments[$0] }
             + disabledPlugins.map { "plugins.\($0).enabled=false" }
-        for c in configs { parts += ["-c", Spawn.quoted(c)] }
+        // 두레 MCP — Codex 는 유닉스 소켓을 못 붙으므로 `nc -U` 를 stdio 서버로 쓴다(승인 창 없이).
+        var mcp: [String] = []
+        if let mcpSocket {
+            mcp = ["mcp_servers.dure.command=\"/usr/bin/nc\"",
+                   "mcp_servers.dure.args=[\"-U\",\(CodexHooks.tomlString(mcpSocket))]",
+                   "mcp_servers.dure.default_tools_approval_mode=\"approve\""]
+        }
+        for c in configs + mcp { parts += ["-c", Spawn.quoted(c)] }
         let launch = "cd \(Spawn.quoted(cwd)) && exec codex " + parts.joined(separator: " ")
         return (exports(sessionID) + ["export CODEX_HOME=\(Spawn.quoted(home))", launch]).joined(separator: "; ")
     }
