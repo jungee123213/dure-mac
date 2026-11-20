@@ -135,6 +135,8 @@ final class CodexPaneRuntime {
     private var nextRequestID = 1
     private var onThreadStarted: ((String) -> Void)?
     private var onServerExit: (() -> Void)?
+    private var onRateLimits: ((CodexRateLimits, Bool) -> Void)?
+    private var onUsageLimit: ((String) -> Void)?
 
     // 주소 보충 — initialize 응답 뒤 스레드를 모르면 thread/loaded/list → id 마다 thread/read.
     private var initializeID: Int?
@@ -187,11 +189,17 @@ final class CodexPaneRuntime {
     }
 
     /// 한 번만 시작한다. 콜백은 메인에서 부른다. `onServerExit` 는 `stop()` 없이 서버가 끝났을 때만.
-    func start(onThreadStarted: @escaping (String) -> Void, onServerExit: @escaping () -> Void) {
+    /// `onRateLimits` — 한도를 읽을 때마다(`replaces`: `read` 응답이면 true = 통째로, `updated` 알림이면 false = 합침).
+    /// `onUsageLimit` — 재시도 없는 `usageLimitExceeded` 가 났을 때 그 스레드 id.
+    func start(onThreadStarted: @escaping (String) -> Void, onServerExit: @escaping () -> Void,
+               onRateLimits: @escaping (CodexRateLimits, _ replaces: Bool) -> Void = { _, _ in },
+               onUsageLimit: @escaping (String) -> Void = { _ in }) {
         guard !began, !stopped else { return }
         began = true
         self.onThreadStarted = onThreadStarted
         self.onServerExit = onServerExit
+        self.onRateLimits = onRateLimits
+        self.onUsageLimit = onUsageLimit
         // TUI 스크립트는 표식이 **있기만** 해도 끝난다 — 지난 기동의 찌꺼기를 지금 지운다(기다리면 늦는다).
         Self.removeSocket(paths.socket)
         try? FileManager.default.removeItem(atPath: paths.failMarker)
@@ -216,6 +224,8 @@ final class CodexPaneRuntime {
         try? FileManager.default.removeItem(atPath: paths.failMarker)
         onThreadStarted = nil
         onServerExit = nil
+        onRateLimits = nil
+        onUsageLimit = nil
         nudgeThread = nil
         nudgeGeneration += 1
     }
@@ -229,6 +239,14 @@ final class CodexPaneRuntime {
         nudgeThread = thread
         nudgeGeneration += 1
         if threadStatus != "active" { armNudge() }
+    }
+
+    /// 한도를 다시 읽는다 — 응답은 `onRateLimits(_, true)` 로 온다. 연결이 없거나 initialize 전이면 보내지 않고 false.
+    @discardableResult
+    func readRateLimits() -> Bool {
+        guard !stopped, initialized, let conn = connection else { return false }
+        conn.send(CodexAppServer.readRateLimits(id: requestID()))
+        return true
     }
 
     // MARK: - 시작 순서
@@ -366,7 +384,18 @@ final class CodexPaneRuntime {
                 return
             }
             initialized = true
+            readRateLimits()      // 연결 직후 서버가 먼저 알려 주는 한도는 없다(j-stage4 1절) — 우리가 읽는다
             if threadID == nil { recover(on: conn) }
+        case .rateLimits(let rid, let limits):
+            onRateLimits?(limits, rid != nil)
+        case .turnError(let thread, let error, let willRetry, let httpStatus):
+            guard !willRetry else { return }
+            if error == "usageLimitExceeded" {
+                onUsageLimit?(thread)
+            } else if httpStatus == 429 {
+                // 한도 초과인데 모양이 다른 실패 — 놓치지 않게 한 번 다시 읽는다(막힘 판정은 읽은 값으로).
+                readRateLimits()
+            }
         case .loadedThreads(let rid, let ids) where rid == pendingLoadedListID:
             pendingLoadedListID = nil
             guard threadID == nil else { return }

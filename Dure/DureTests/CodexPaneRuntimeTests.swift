@@ -870,6 +870,120 @@ struct CodexPaneRuntimeTests {
 
     // MARK: - 경로
 
+    // MARK: - 한도
+
+    private func initialize(_ conn: FakeConnection) async throws {
+        let id = try #require(conn.ids("initialize").first)
+        conn.deliver(ok(id))
+        // 응답은 메인 큐로 넘어온다 — 읽기 요청이 나갈 때까지 기다린다
+        _ = await eventually { !conn.ids("account/rateLimits/read").isEmpty }
+    }
+
+    private let updatedLimits = """
+    {"method":"account/rateLimits/updated","params":{"rateLimits":{"limitId":"codex","primary":{"usedPercent":42,"windowDurationMins":300,"resetsAt":1795174118},"secondary":null,"planType":null,"rateLimitReachedType":null}}}
+    """
+
+    private func errorJSON(_ info: String, willRetry: Bool, thread: String = "t1") -> String {
+        "{\"method\":\"error\",\"params\":{\"error\":{\"message\":\"m\",\"codexErrorInfo\":\(info)},\"willRetry\":\(willRetry),\"threadId\":\"\(thread)\",\"turnId\":\"u1\"}}"
+    }
+
+    @Test func readsRateLimitsAfterInitialize() async throws {
+        let f = try fixture(); defer { try? fm.removeItem(at: f.base) }
+        let conn = FakeConnection()
+        var got: [(CodexRateLimits, Bool)] = []
+        let rt = make(f, launcher: FakeLauncher(), connection: conn)
+        rt.start(onThreadStarted: { _ in }, onServerExit: {}, onRateLimits: { got.append(($0, $1)) })
+        await rt.startup?.value
+        #expect(conn.ids("account/rateLimits/read").isEmpty)    // initialize 응답 전에는 읽지 않는다
+        try await initialize(conn)
+        let rid = try #require(conn.ids("account/rateLimits/read").first)
+        #expect(conn.params("account/rateLimits/read").first?["excludeResetCreditDetails"] as? Bool == true)
+        conn.deliver("{\"id\":\(rid),\"result\":{\"ordinaryUsageAllowed\":true,\"rateLimits\":{\"limitId\":\"codex\",\"primary\":{\"usedPercent\":1,\"windowDurationMins\":300,\"resetsAt\":9},\"secondary\":null,\"planType\":\"plus\",\"rateLimitReachedType\":null}}}")
+        #expect(await eventually { got.count == 1 })
+        conn.deliver(updatedLimits)
+        #expect(await eventually { got.count == 2 })
+        #expect(got[0].1 == true)
+        #expect(got[0].0.planType == "plus")
+        #expect(got[0].0.ordinaryUsageAllowed == true)
+        #expect(got[1].1 == false)
+        #expect(got[1].0.primary?.usedPercent == 42)
+    }
+
+    @Test func 한도_읽기가_오류로_오면_콜백이_없다() async throws {
+        let f = try fixture(); defer { try? fm.removeItem(at: f.base) }
+        let conn = FakeConnection()
+        var count = 0
+        let rt = make(f, launcher: FakeLauncher(), connection: conn)
+        rt.start(onThreadStarted: { _ in }, onServerExit: {}, onRateLimits: { _, _ in count += 1 })
+        await rt.startup?.value
+        try await initialize(conn)
+        let rid = try #require(conn.ids("account/rateLimits/read").first)
+        conn.deliver("{\"id\":\(rid),\"error\":{\"code\":-32600,\"message\":\"auth\"}}")
+        try? await Task.sleep(for: .milliseconds(50))
+        #expect(count == 0)
+    }
+
+    @Test func 실패한_initialize_뒤에는_한도를_읽지_않는다() async throws {
+        let f = try fixture(); defer { try? fm.removeItem(at: f.base) }
+        let conn = FakeConnection()
+        _ = await connected(f, conn)
+        let id = try #require(conn.ids("initialize").first)
+        conn.deliver("{\"id\":\(id),\"error\":{\"code\":-32600,\"message\":\"x\"}}")
+        try? await Task.sleep(for: .milliseconds(50))
+        #expect(conn.ids("account/rateLimits/read").isEmpty)
+    }
+
+    @Test func retryingErrorIsNotLimit() async throws {
+        let f = try fixture(); defer { try? fm.removeItem(at: f.base) }
+        let conn = FakeConnection()
+        var threads: [String] = []
+        let rt = make(f, launcher: FakeLauncher(), connection: conn)
+        rt.start(onThreadStarted: { _ in }, onServerExit: {}, onUsageLimit: { threads.append($0) })
+        await rt.startup?.value
+        conn.deliver(errorJSON("\"usageLimitExceeded\"", willRetry: true))
+        conn.deliver(errorJSON("\"serverOverloaded\"", willRetry: false))
+        conn.deliver(errorJSON("{\"responseStreamDisconnected\":{\"httpStatusCode\":null}}", willRetry: true))
+        try? await Task.sleep(for: .milliseconds(80))
+        #expect(threads.isEmpty)
+        conn.deliver(errorJSON("\"usageLimitExceeded\"", willRetry: false, thread: "t9"))
+        #expect(await eventually { threads == ["t9"] })
+    }
+
+    @Test func http429FailureRereadsLimits() async throws {
+        let f = try fixture(); defer { try? fm.removeItem(at: f.base) }
+        let conn = FakeConnection()
+        var limitCalls = 0
+        let rt = make(f, launcher: FakeLauncher(), connection: conn)
+        rt.start(onThreadStarted: { _ in }, onServerExit: {}, onUsageLimit: { _ in limitCalls += 1 })
+        await rt.startup?.value
+        try await initialize(conn)
+        #expect(conn.ids("account/rateLimits/read").count == 1)
+        // 429 지만 재시도 중이면 읽지 않는다
+        conn.deliver(errorJSON("{\"responseTooManyFailedAttempts\":{\"httpStatusCode\":429}}", willRetry: true))
+        try? await Task.sleep(for: .milliseconds(50))
+        #expect(conn.ids("account/rateLimits/read").count == 1)
+        conn.deliver(errorJSON("{\"responseTooManyFailedAttempts\":{\"httpStatusCode\":429}}", willRetry: false))
+        #expect(await eventually { conn.ids("account/rateLimits/read").count == 2 })
+        #expect(limitCalls == 0)                // usageLimitExceeded 가 아니므로 막힘 콜백은 아니다
+    }
+
+    @Test func readRateLimitsWithoutConnectionReturnsFalse() async throws {
+        let f = try fixture(); defer { try? fm.removeItem(at: f.base) }
+        let conn = FakeConnection()
+        let rt = make(f, launcher: FakeLauncher(), connection: conn)
+        #expect(rt.readRateLimits() == false)         // 시작 전
+        rt.start(onThreadStarted: { _ in }, onServerExit: {})
+        await rt.startup?.value
+        #expect(rt.readRateLimits() == false)         // 연결은 있어도 initialize 전
+        #expect(conn.ids("account/rateLimits/read").isEmpty)
+        try await initialize(conn)
+        let before = conn.ids("account/rateLimits/read").count
+        #expect(rt.readRateLimits() == true)
+        #expect(conn.ids("account/rateLimits/read").count == before + 1)
+        rt.stop()
+        #expect(rt.readRateLimits() == false)
+    }
+
     @Test func 경로는_세션_앞_8자와_페인_키에서_나온다() {
         let root = URL(fileURLWithPath: "/d/codex"), homes = URL(fileURLWithPath: "/d/codex-home")
         let p = CodexPaneRuntime.Paths.paths(forSession: "ABCD1234-EF56-0000-0000-000000000000", paneKey: "repo:r1",

@@ -470,4 +470,114 @@ struct CodexAppServerTests {
         #expect(script.contains("check_for_update_on_startup=false"))
         #expect(!script.contains("--listen"))
     }
+
+    // MARK: - 한도 (j-stage4 1 · 2 · 3절 실측 원문)
+
+    private let readJSON = """
+    {"id":7,"result":{"ordinaryUsageAllowed":true,"rateLimits":{"limitId":"codex","limitName":null,"normalModelSlug":null,"primary":{"usedPercent":0,"windowDurationMins":300,"resetsAt":1795187802},"secondary":{"usedPercent":30,"windowDurationMins":10080,"resetsAt":1795670437},"credits":{"hasCredits":false,"unlimited":false,"balance":"0"},"individualLimit":null,"spendControlReached":false,"planType":"plus","rateLimitReachedType":null},"rateLimitsByLimitId":{"codex":{"limitId":"codex","limitName":null,"normalModelSlug":null,"primary":{"usedPercent":0,"windowDurationMins":300,"resetsAt":1795187802},"secondary":{"usedPercent":30,"windowDurationMins":10080,"resetsAt":1795670437},"credits":null,"individualLimit":null,"spendControlReached":false,"planType":"plus","rateLimitReachedType":null}},"rateLimitResetCredits":{"availableCount":3,"credits":null},"accountId":"x","rateLimitUpsell":null}}
+    """
+
+    private let updatedJSON = """
+    {"method":"account/rateLimits/updated","params":{"rateLimits":{"limitId":"codex","limitName":null,"normalModelSlug":null,"primary":{"usedPercent":42,"windowDurationMins":300,"resetsAt":1795174118},"secondary":{"usedPercent":7,"windowDurationMins":10080,"resetsAt":1795256918},"credits":null,"individualLimit":null,"spendControlReached":null,"planType":null,"rateLimitReachedType":null}},"emittedAtMs":1795170518624}
+    """
+
+    @Test func readRateLimits_요청은_리셋_크레딧_상세를_뺀다() {
+        let o = object(CodexAppServer.readRateLimits(id: 5))
+        #expect(o["id"] as? Int == 5)
+        #expect(o["method"] as? String == "account/rateLimits/read")
+        #expect((o["params"] as? [String: Any])?["excludeResetCreditDetails"] as? Bool == true)
+    }
+
+    @Test func parsesRateLimitsResponse() {
+        let expected = CodexRateLimits(
+            primary: .init(usedPercent: 0, windowMinutes: 300, resetsAt: 1795187802),
+            secondary: .init(usedPercent: 30, windowMinutes: 10080, resetsAt: 1795670437),
+            planType: "plus", reachedType: nil, ordinaryUsageAllowed: true)
+        #expect(parse(readJSON) == .rateLimits(id: 7, expected))
+    }
+
+    @Test func parsesRateLimitsUpdated() {
+        let expected = CodexRateLimits(
+            primary: .init(usedPercent: 42, windowMinutes: 300, resetsAt: 1795174118),
+            secondary: .init(usedPercent: 7, windowMinutes: 10080, resetsAt: 1795256918),
+            planType: nil, reachedType: nil, ordinaryUsageAllowed: nil)
+        #expect(parse(updatedJSON) == .rateLimits(id: nil, expected))
+    }
+
+    @Test func rateLimits_응답은_byLimitId_가_없으면_rateLimits_를_쓴다() {
+        let json = """
+        {"id":3,"result":{"rateLimits":{"limitId":"codex","primary":{"usedPercent":5,"windowDurationMins":300,"resetsAt":9},"secondary":null,"planType":"plus","rateLimitReachedType":"rate_limit_reached"}}}
+        """
+        let expected = CodexRateLimits(primary: .init(usedPercent: 5, windowMinutes: 300, resetsAt: 9),
+                                       secondary: nil, planType: "plus", reachedType: "rate_limit_reached",
+                                       ordinaryUsageAllowed: nil)
+        #expect(parse(json) == .rateLimits(id: 3, expected))
+    }
+
+    @Test func nullWindowsUpdateKeepsPrevious() {
+        let sparse = """
+        {"method":"account/rateLimits/updated","params":{"rateLimits":{"limitId":"codex","primary":null,"secondary":null,"planType":null,"rateLimitReachedType":null}}}
+        """
+        guard case .rateLimits(nil, let update)? = parse(sparse), case .rateLimits(nil, let full)? = parse(updatedJSON) else {
+            Issue.record("파싱 실패"); return
+        }
+        #expect(update == CodexRateLimits())
+        let previous = full.merged(into: nil)
+        #expect(update.merged(into: previous) == previous)
+        // 창은 통째로 바뀐다 — 새 창이 오면 이전 창의 칸을 섞지 않는다
+        let partial = CodexRateLimits(primary: .init(usedPercent: 50, windowMinutes: nil, resetsAt: nil))
+        let merged = partial.merged(into: previous)
+        #expect(merged.primary == .init(usedPercent: 50, windowMinutes: nil, resetsAt: nil))
+        #expect(merged.secondary == previous.secondary)
+    }
+
+    @Test func usedPercent_없는_창은_모름이다() {
+        let json = """
+        {"method":"account/rateLimits/updated","params":{"rateLimits":{"limitId":"codex","primary":{"windowDurationMins":300,"resetsAt":1}}}}
+        """
+        #expect(parse(json) == .rateLimits(id: nil, CodexRateLimits()))
+    }
+
+    @Test func 응답의_최상위_폴백도_limitId_를_본다() {
+        let json = """
+        {"id":4,"result":{"rateLimits":{"limitId":"codex_other","primary":{"usedPercent":9}},"rateLimitsByLimitId":{}}}
+        """
+        #expect(parse(json) == .response(id: 4, ok: true))
+    }
+
+    @Test func otherLimitIdIgnored() {
+        let other = """
+        {"method":"account/rateLimits/updated","params":{"rateLimits":{"limitId":"codex_other","primary":{"usedPercent":77,"windowDurationMins":60,"resetsAt":1}}}}
+        """
+        #expect(parse(other) == .other("account/rateLimits/updated"))
+        let noID = """
+        {"method":"account/rateLimits/updated","params":{"rateLimits":{"primary":{"usedPercent":3}}}}
+        """
+        #expect(parse(noID) == .rateLimits(id: nil, CodexRateLimits(primary: .init(usedPercent: 3, windowMinutes: nil, resetsAt: nil))))
+    }
+
+    @Test func 한도_읽기_오류_응답은_그대로_실패_응답이다() {
+        #expect(parse("{\"error\":{\"code\":-32600,\"message\":\"codex account authentication required to read rate limits\"},\"id\":2}")
+                == .response(id: 2, ok: false))
+    }
+
+    @Test func parsesUsageLimitError() {
+        let json = """
+        {"method":"error","params":{"error":{"message":"You’ve hit your usage limit.","codexErrorInfo":"usageLimitExceeded","additionalDetails":null,"misalignment":null},"willRetry":false,"threadId":"t1","turnId":"u1"}}
+        """
+        #expect(parse(json) == .turnError(threadID: "t1", codexError: "usageLimitExceeded", willRetry: false, httpStatus: nil))
+    }
+
+    @Test func 오류_codexErrorInfo_가_객체면_키_이름과_http_상태를_읽는다() {
+        let failed = """
+        {"method":"error","params":{"error":{"message":"exceeded retry limit","codexErrorInfo":{"responseTooManyFailedAttempts":{"httpStatusCode":429}}},"willRetry":false,"threadId":"t1","turnId":"u1"}}
+        """
+        #expect(parse(failed) == .turnError(threadID: "t1", codexError: "responseTooManyFailedAttempts",
+                                            willRetry: false, httpStatus: 429))
+        let disconnected = """
+        {"method":"error","params":{"error":{"message":"Reconnecting... 1/5","codexErrorInfo":{"responseStreamDisconnected":{"httpStatusCode":null}}},"willRetry":true,"threadId":"t1","turnId":"u1"}}
+        """
+        #expect(parse(disconnected) == .turnError(threadID: "t1", codexError: "responseStreamDisconnected",
+                                                  willRetry: true, httpStatus: nil))
+    }
 }
