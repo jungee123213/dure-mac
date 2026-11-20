@@ -18,7 +18,8 @@ enum OrchestratorDoc {
         var path: String
     }
 
-    static func render(workspaceName: String, sessionPrefix: String, repos: [Repo]) -> String {
+    static func render(workspaceName: String, sessionPrefix: String, repos: [Repo],
+                       kind: AgentKind = .claude) -> String {
         var out = """
         # \(workspaceName) — 조율자
 
@@ -34,7 +35,7 @@ enum OrchestratorDoc {
 
         1. `workspace.md` — 레포 지도(경로·역할·브랜치·최근 커밋·열린 페인). 두레가 계속 갱신한다
         2. `context.md` — 레포 사이 규약(API 계약·용어·지금 하는 일). 사람이 쓴다
-        3. 레포의 지시문이 필요하면 `workspace.md` 에 적힌 `CLAUDE.md` 경로를 읽는다
+        3. 레포의 지시문이 필요하면 `workspace.md` 에 적힌 레포 지시문 경로를 읽는다
 
         ## git — 읽기만
 
@@ -52,7 +53,7 @@ enum OrchestratorDoc {
         }
         out += """
 
-        - `cd <레포> && git …` 은 쓰지 않는다 (Claude Code 가 막는다)
+        - `cd <레포> && git …` 은 쓰지 않는다\(kind == .claude ? " (Claude Code 가 막는다)" : "")
         - `--output` 옵션은 쓰지 않는다 (파일을 쓴다 — 막혀 있다)
         - 너는 git 에 쓰지 않는다 — 이슈 등록 · 브랜치 · 커밋 · push · PR · 머지 모두
         - 이슈는 **초안만** 쓴다. 등록 · 브랜치 · 커밋 · PR 은 배분받은 레포 페인이 한다 (아래 작업 흐름)
@@ -86,7 +87,9 @@ enum OrchestratorDoc {
         6. 같은 레포에 여러 번 보낼 수 있다 — 큐에 쌓여 순서대로 전달된다. 페인이 일하는 중이면 끝난 뒤, 안 떠 있으면 사람이 시작할 때 실린다.
            `tasks` 로 상태를 본다 — 큐 대기 중인 배분도 여기 보인다. 아직 큐에 있는 것은 `cancel` 로 거둔다.
            폴더가 없는 레포에는 보낼 수 없다 — 사람에게 알린다.
-        7. 다른 Claude 세션에 직접 메시지를 보내는 길은 없다. 레포 페인과의 통로는 두레 툴뿐이다.
+        7. \(kind == .claude
+               ? "다른 Claude 세션에 직접 메시지를 보내는 길은 없다. 레포 페인과의 통로는 두레 툴뿐이다."
+               : "레포는 `workspace.md` 에 적힌 경로로 읽는다(`--add-dir` 없음). 셸은 읽기 전용이다 — 파일을 쓰거나 git 을 바꾸지 않는다. 레포 페인과의 통로는 두레 툴뿐이다.")
         8. **확인 안 한 코드 사실을 단정하지 않는다.** 이슈 초안 · 지시는 **동작 수준**(무엇 · 왜 · 기능명세서 번호 · 완료 조건)으로 쓴다.
            파일 수준 할 일과 "없음" · "새로 만든다" 는 그 레포 코드에서 **확인한 경로**가 있을 때만 그 경로와 함께 적는다.
            확인 못 한 것은 "페인이 확인" 으로 남긴다 — 코드와 대조하는 것은 레포 페인의 일이다(작업 흐름 3).

@@ -703,10 +703,14 @@ final class DureStore {
         guard let ws = workspaces.first(where: { $0.id == workspaceID }) else { return }
         try WorkspaceFolder.ensure(workspaceID)
         let members = repos(in: workspaceID).filter(\.folderExists)
-        try WorkspaceFolder.writeInstructions(workspaceID, OrchestratorDoc.render(
-            workspaceName: ws.name,
-            sessionPrefix: SessionName.prefix(workspaceName: ws.name, workspaceID: ws.id),
-            repos: members.map { .init(name: $0.displayName, path: $0.path) }))
+        // 조율자의 종류와 상관없이 두 판을 다 쓴다 — Claude 는 CLAUDE.md, Codex 는 AGENTS.md 를 읽는다.
+        for kind in AgentKind.allCases {
+            try WorkspaceFolder.writeInstructions(workspaceID, OrchestratorDoc.render(
+                workspaceName: ws.name,
+                sessionPrefix: SessionName.prefix(workspaceName: ws.name, workspaceID: ws.id),
+                repos: members.map { .init(name: $0.displayName, path: $0.path) },
+                kind: kind), kind: kind)
+        }
         try SessionSettings.writeOrchestrator(workspaceID, repoPaths: LaunchPlan.repoPaths(members))
     }
 
@@ -985,7 +989,11 @@ final class DureStore {
                 // 기본 CLI 를 codex 로 바꿔도 페인은 아직 claude 로만 뜬다. 지도가 거짓말을 하면
                 // 조율자가 엉뚱한 CLI 를 가정한다.
                 openedWith: hasStarted(.repo(repo)) ? agentKind(for: .repo(repo)) : nil,
-                instructionsPath: LaunchPlan.instructionsPath(for: repo),
+                // 떠 있는 페인은 그 agent 행의 종류, 아니면 워크스페이스 기본 CLI.
+                instructionsPath: LaunchPlan.instructionsPath(
+                    for: repo,
+                    kind: (hasStarted(.repo(repo)) ? agentKind(for: .repo(repo)) : nil)
+                        ?? AgentKind(rawValue: workspace.defaultAgentKind) ?? .claude),
                 sessionName: SessionName.repo(workspaceName: workspace.name, workspaceID: workspace.id,
                                               repoName: repo.displayName),
                 folderMissing: !repo.folderExists
@@ -1085,8 +1093,11 @@ enum LaunchPlan {
     }
 
     /// 레포 지시문 경로. 조율자는 자동으로 싣지 않고(D-31 ②) `workspace.md` 의 이 경로를 보고 읽는다.
-    static func instructionsPath(for repo: Repo) -> String? {
-        let p = URL(fileURLWithPath: repo.path).appendingPathComponent("CLAUDE.md").path
-        return FileManager.default.fileExists(atPath: p) ? p : nil
+    /// Codex 는 `AGENTS.md` 를 읽으므로 그것이 먼저, 없으면 `CLAUDE.md`.
+    static func instructionsPath(for repo: Repo, kind: AgentKind = .claude) -> String? {
+        let base = URL(fileURLWithPath: repo.path)
+        let names = kind == .codex ? ["AGENTS.md", "CLAUDE.md"] : ["CLAUDE.md"]
+        return names.map { base.appendingPathComponent($0).path }
+            .first { FileManager.default.fileExists(atPath: $0) }
     }
 }

@@ -112,9 +112,20 @@ enum WorkspaceFolder {
         url(for: workspaceID, root: root).appendingPathComponent("CLAUDE.md")
     }
 
+    /// Codex 조율자는 cwd 의 `AGENTS.md` 를 읽는다.
+    static func codexInstructionsURL(for workspaceID: String, root: URL = defaultRoot) -> URL {
+        url(for: workspaceID, root: root).appendingPathComponent("AGENTS.md")
+    }
+
+    static func instructionsURL(for workspaceID: String, kind: AgentKind, root: URL = defaultRoot) -> URL {
+        kind == .codex ? codexInstructionsURL(for: workspaceID, root: root)
+                       : instructionsURL(for: workspaceID, root: root)
+    }
+
     static func writeInstructions(_ workspaceID: String, _ text: String,
+                                  kind: AgentKind = .claude,
                                   root: URL = defaultRoot) throws {
-        try Data(text.utf8).write(to: instructionsURL(for: workspaceID, root: root), options: .atomic)
+        try Data(text.utf8).write(to: instructionsURL(for: workspaceID, kind: kind, root: root), options: .atomic)
     }
 
     /// D-26 — 삭제한 워크스페이스의 폴더는 지우지 않고 **휴지통으로 보낸다.**
@@ -134,7 +145,7 @@ enum WorkspaceFolder {
     private static let seedContext = """
     # 공유 컨텍스트
 
-    레포를 **가로지르는** 규약을 적는다. 레포 내부 규칙은 각 레포의 `CLAUDE.md` 에 있다.
+    레포를 **가로지르는** 규약을 적는다. 레포 내부 규칙은 각 레포의 `CLAUDE.md` · `AGENTS.md` 에 있다.
 
     ## API 계약
 

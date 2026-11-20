@@ -190,4 +190,23 @@ struct WorkspaceFolderTests {
         #expect(url.lastPathComponent == "CLAUDE.md")
         #expect(try String(contentsOf: url, encoding: .utf8) == "# 지시")
     }
+
+    @Test func 조율자_폴더에_두_지시문을_다_쓴다() throws {
+        let root = try Self.tempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try WorkspaceFolder.ensure("w1", root: root)
+        try WorkspaceFolder.writeInstructions("w1", "# c", kind: .claude, root: root)
+        try WorkspaceFolder.writeInstructions("w1", "# x", kind: .codex, root: root)
+        #expect(try String(contentsOf: root.appendingPathComponent("w1/CLAUDE.md"), encoding: .utf8) == "# c")
+        #expect(try String(contentsOf: root.appendingPathComponent("w1/AGENTS.md"), encoding: .utf8) == "# x")
+        #expect(WorkspaceFolder.codexInstructionsURL(for: "w1", root: root).lastPathComponent == "AGENTS.md")
+    }
+
+    @Test func context_씨앗은_두_지시문_이름을_적는다() throws {
+        let root = try Self.tempRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try WorkspaceFolder.ensure("w1", root: root)
+        let text = try String(contentsOf: WorkspaceFolder.contextURL(for: "w1", root: root), encoding: .utf8)
+        #expect(text.contains("`CLAUDE.md` · `AGENTS.md`"))
+    }
 }
