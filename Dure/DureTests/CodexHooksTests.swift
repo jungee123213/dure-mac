@@ -1,4 +1,5 @@
 import Testing
+import Foundation
 @testable import Dure
 
 struct CodexHooksTests {
@@ -17,7 +18,8 @@ struct CodexHooksTests {
         #expect(CodexHooks.trustHash(g) == "sha256:4a115e5d487826fd035544b90d7c549eca48215f025c668cea508b44e72815ce")
     }
     @Test func 신뢰_표는_인라인_하나이고_키가_세션_플래그_모양이다() {
-        let args = CodexHooks.configArguments(CodexHooks.dureGroups(shimPath: "/Users/x/.dure/bin/hook"))
+        let args = CodexHooks.configArguments(CodexHooks.dureGroups(shimPath: "/Users/x/.dure/bin/hook", profile: .repoPane,
+                                                                     gateExecutable: "/A/Dure"))
         let states = args.filter { $0.hasPrefix("hooks.state=") }
         #expect(states.count == 1)
         #expect(states[0].contains(#""/<session-flags>/config.toml:session_start:0:0"={trusted_hash="sha256:"#))
@@ -73,12 +75,135 @@ struct CodexHooksTests {
     }
     @Test func config_사본_훅의_신뢰는_같은_인라인_표에_덧붙는다() {
         let extra = [CodexHooks.TrustState(key: "/h/repo-1/config.toml:session_start:0:0", hash: "sha256:ab")]
-        let args = CodexHooks.configArguments(CodexHooks.dureGroups(shimPath: "/x/hook"), extraTrust: extra)
+        let args = CodexHooks.configArguments(CodexHooks.dureGroups(shimPath: "/x/hook", profile: .repoPane,
+                                                                     gateExecutable: "/A/Dure"),
+                                              extraTrust: extra)
         let states = args.filter { $0.hasPrefix("hooks.state=") }
         #expect(states.count == 1)
         #expect(states[0].contains(#""/<session-flags>/config.toml:stop:0:0"={trusted_hash="sha256:"#))
         #expect(states[0].hasSuffix(#","/h/repo-1/config.toml:session_start:0:0"={trusted_hash="sha256:ab"}}"#))
     }
+    // MARK: - 게이트 · 조율자 거절 (Task 4)
+
+    private let shimEvents = ["SessionStart", "UserPromptSubmit", "PermissionRequest", "PostToolUse", "Stop"]
+
+    private func state(_ args: [String]) -> String { args.first { $0.hasPrefix("hooks.state=") } ?? "" }
+
+    @Test func 레포_페인_훅에_게이트가_있고_조율자에는_없다() {
+        let repo = CodexHooks.dureGroups(shimPath: "/x/hook", profile: .repoPane, gateExecutable: "/A/Dure")
+        // shim 다섯 개는 그대로
+        #expect(Array(repo.prefix(5)).map(\.event) == shimEvents)
+        #expect(repo.prefix(5).allSatisfy { $0.command == "'/x/hook' \($0.event)" && $0.timeout == 5 })
+        let gates = repo.filter { $0.event == "PreToolUse" }
+        #expect(gates.count == 1)
+        let gate = gates[0]
+        #expect(gate.command == CodexHooks.gateCommand(executable: "/A/Dure"))
+        // 바깥은 어느 셸에서도 단순 명령 하나 — 안쪽(POSIX)은 /bin/sh 가 읽는다
+        #expect(gate.command.hasPrefix(#"/bin/sh -c ''\''/A/Dure'\'' --dure-codex-gate; s=$?; "#))
+        #expect(gate.matcher == nil)          // tool_name 은 게이트가 스스로 본다
+        #expect(gate.timeout == 10)
+        #expect(!repo.contains { $0.command.contains("hookSpecificOutput") })
+
+        let orch = CodexHooks.dureGroups(shimPath: "/x/hook", profile: .orchestrator, gateExecutable: "/A/Dure")
+        #expect(!orch.contains { $0.event == "PreToolUse" })
+        #expect(!orch.contains { $0.command.contains(CodexGateMain.flag) })
+
+        // 신뢰 표에 게이트 해시가 들어간다(없으면 Codex 가 조용히 건너뛴다)
+        let args = CodexHooks.configArguments(repo)
+        #expect(args.contains("hooks.PreToolUse=[{hooks=[{type=\"command\",command=\(CodexHooks.tomlString(gate.command)),timeout=10}]}]"))
+        #expect(state(args).contains(#""/<session-flags>/config.toml:pre_tool_use:0:0"={trusted_hash="\#(CodexHooks.trustHash(gate))"}"#))
+    }
+
+    @Test func 조율자_훅에_권한_요청_거절이_있다() throws {
+        let orch = CodexHooks.dureGroups(shimPath: "/x/hook", profile: .orchestrator, gateExecutable: nil)
+        // shim 은 PermissionRequest 를 뺀 네 이벤트 — 거절이 닫는 요청에 "승인 대기" 알림을 띄우지 않는다(D-11)
+        #expect(orch.filter { $0.command.hasPrefix("'/x/hook' ") }.map(\.event)
+                == ["SessionStart", "UserPromptSubmit", "PostToolUse", "Stop"])
+        #expect(!orch.contains { $0.command == "'/x/hook' PermissionRequest" })
+        let pr = orch.filter { $0.event == "PermissionRequest" }
+        #expect(pr.count == 1)
+        let deny = try #require(pr.first)
+        #expect(deny.command == #"cat >/dev/null; printf '%s' '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny"}}}'"#)
+        #expect(deny.matcher == nil)
+        #expect(deny.timeout == 5)
+
+        let args = CodexHooks.configArguments(orch)
+        let table = try #require(args.first { $0.hasPrefix("hooks.PermissionRequest=[") })
+        #expect(table == "hooks.PermissionRequest=[{hooks=[{type=\"command\",command=\(CodexHooks.tomlString(deny.command)),timeout=5}]}]")
+        #expect(state(args).contains(#""/<session-flags>/config.toml:permission_request:0:0"={trusted_hash="\#(CodexHooks.trustHash(deny))"}"#))
+        #expect(!state(args).contains("permission_request:1:0"))
+        // 레포 페인은 그대로 — shim PermissionRequest(승인 대기 + 알림)만, 거절 없음
+        let repo = CodexHooks.dureGroups(shimPath: "/x/hook", profile: .repoPane, gateExecutable: "/A/Dure")
+        #expect(repo.filter { $0.event == "PermissionRequest" }.map(\.command) == ["'/x/hook' PermissionRequest"])
+        #expect(!repo.contains { $0.command.contains("hookSpecificOutput") })
+    }
+
+    @Test func 실행_파일_경로에_공백이_있어도_한_명령이다() {
+        let exe = "/Applications/My Apps/Dure.app/Contents/MacOS/Dure"
+        let repo = CodexHooks.dureGroups(shimPath: "/x/hook", profile: .repoPane, gateExecutable: exe)
+        let gate = repo.first { $0.event == "PreToolUse" }
+        #expect(gate?.command.hasPrefix(#"/bin/sh -c ''\''/Applications/My Apps/Dure.app/Contents/MacOS/Dure'\'' --dure-codex-gate; "#) == true)
+        // 작은따옴표가 든 경로도 한 단어로 묶인다 — 실제 셸 실행은 아래 테스트가 본다(폴더 이름에 ' 와 공백)
+        let odd = CodexHooks.dureGroups(shimPath: "/x/hook", profile: .repoPane, gateExecutable: "/A/it's/Dure")
+        #expect(odd.first { $0.event == "PreToolUse" }?.command
+                == "/bin/sh -c " + Spawn.quoted(CodexHooks.gateScript(executable: "/A/it's/Dure")))
+        #expect(CodexHooks.gateScript(executable: "/A/it's/Dure").hasPrefix(#"'/A/it'\''s/Dure' --dure-codex-gate; s=$?; "#))
+    }
+
+    /// 감싼 게이트 명령을 실제 셸로 돌린다 — stdin 은 게이트로 그대로 간다.
+    /// stdin 은 파일로 준다 — 파이프에 쓰면 게이트가 읽지 않고 끝난 경우 SIGPIPE 가 테스트 호스트로 온다.
+    private func runGate(_ command: String, shell: String, stdin: URL) throws -> (status: Int32, stderr: String) {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: shell)
+        p.arguments = ["-c", command]
+        let err = Pipe()
+        let input = try FileHandle(forReadingFrom: stdin)
+        defer { try? input.close() }
+        p.standardInput = input
+        p.standardOutput = FileHandle.nullDevice
+        p.standardError = err
+        try p.run()
+        let e = err.fileHandleForReading.readDataToEndOfFile()
+        p.waitUntilExit()
+        return (p.terminationStatus, String(decoding: e, as: UTF8.self))
+    }
+
+    @Test func 게이트를_실행하지_못하면_감싼_명령이_exit_2_와_이유로_막는다() throws {
+        let fm = FileManager.default
+        let dir = fm.temporaryDirectory.appendingPathComponent("gate-\(UUID().uuidString.prefix(8)) it's 공백")
+        try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: dir) }
+        func stub(_ name: String, _ body: String, mode: Int = 0o755) throws -> String {
+            let url = dir.appendingPathComponent(name)
+            try ("#!/bin/sh\n" + body + "\n").write(to: url, atomically: true, encoding: .utf8)
+            try fm.setAttributes([.posixPermissions: mode], ofItemAtPath: url.path)
+            return url.path
+        }
+        // 통과: stdin 이 게이트에 그대로 가야 0
+        let pass = try stub("pass", #"IN=$(cat); [ "$IN" = "PAYLOAD" ] || exit 1; exit 0"#)
+        let deny = try stub("deny", "cat >/dev/null; printf '두레 게이트: 막음' >&2; exit 2")
+        let one = try stub("one", "cat >/dev/null; exit 1")
+        let crash = try stub("crash", "cat >/dev/null; kill -SEGV $$")
+        let noexec = try stub("noexec", "exit 0", mode: 0o644)
+        let missing = dir.appendingPathComponent("없음/Dure").path
+        let payload = dir.appendingPathComponent("payload")
+        try "PAYLOAD".write(to: payload, atomically: true, encoding: .utf8)
+
+        for shell in ["/bin/sh", "/bin/zsh", "/bin/bash"] {
+            let ok = try runGate(CodexHooks.gateCommand(executable: pass), shell: shell, stdin: payload)
+            #expect(ok.status == 0 && ok.stderr.isEmpty, "\(shell) pass")
+            let d = try runGate(CodexHooks.gateCommand(executable: deny), shell: shell, stdin: payload)
+            #expect(d.status == 2 && d.stderr == "두레 게이트: 막음", "\(shell) deny")
+            for (exe, code) in [(one, "1"), (crash, "139"), (noexec, "126"), (missing, "127")] {
+                let r = try runGate(CodexHooks.gateCommand(executable: exe), shell: shell, stdin: payload)
+                #expect(r.status == 2, "\(shell) \(exe)")
+                let last = r.stderr.split(separator: "\n").last.map(String.init) ?? ""
+                #expect(last == "\(CodexHooks.gateLaunchFailure) (종료 코드 \(code))", "\(shell) \(exe): \(r.stderr)")
+                #expect(!r.stderr.trimmingCharacters(in: .whitespacesAndNewlines).hasSuffix("."))
+            }
+        }
+    }
+
     @Test func snake_이름() {
         #expect(CodexHooks.snakeName("UserPromptSubmit") == "user_prompt_submit")
         #expect(CodexHooks.snakeName("Stop") == "stop")

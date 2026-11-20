@@ -110,6 +110,10 @@ final class CodexPaneRuntime {
     private let socketTimeout: TimeInterval
     private let shimPath: String
     private let mcpSocket: String?
+    /// 게이트 훅이 부를 두레 실행 파일(`<경로> --dure-codex-gate`). 레포 페인은 이것이 없으면 시작하지 않는다.
+    private let gateExecutable: String?
+    /// 게이트 실행 파일을 실제로 실행할 수 있는가. 기본은 `isRunnable`.
+    private let isExecutable: (String) -> Bool
     private let nudgeDelay: TimeInterval
     private let schedule: (TimeInterval, @escaping @MainActor @Sendable () -> Void) -> Void
 
@@ -157,6 +161,8 @@ final class CodexPaneRuntime {
          socketTimeout: TimeInterval = CodexPaneRuntime.defaultSocketTimeout,
          shimPath: String? = nil,
          mcpSocket: String? = nil,
+         gateExecutable: String? = Bundle.main.executablePath,
+         isExecutable: @escaping (String) -> Bool = { CodexPaneRuntime.isRunnable($0) },
          nudgeDelay: TimeInterval = CodexPaneRuntime.defaultNudgeDelay,
          schedule: @escaping (TimeInterval, @escaping @MainActor @Sendable () -> Void) -> Void = CodexPaneRuntime.mainAfter) {
         self.sessionID = sessionID
@@ -169,6 +175,8 @@ final class CodexPaneRuntime {
         self.versionOutput = versionOutput
         self.inventory = inventory
         self.mcpSocket = mcpSocket
+        self.gateExecutable = gateExecutable
+        self.isExecutable = isExecutable
         self.connect = connect
         self.socketReady = socketReady
         self.socketTimeout = socketTimeout
@@ -226,6 +234,18 @@ final class CodexPaneRuntime {
     // MARK: - 시작 순서
 
     private func run() async {
+        // 레포 페인의 git 게이트는 닫힌 채 실패한다 — 게이트 없이 뜨느니 뜨지 않는다.
+        // 훅 명령도 실행 실패를 막음으로 바꾸지만(`CodexHooks.gateCommand`), 시작 때 알 수 있는 것은 여기서 알린다.
+        if profile == .repoPane {
+            guard let gate = gateExecutable, !gate.isEmpty else {
+                fail("두레 실행 파일 경로를 몰라 git 게이트 훅을 걸 수 없습니다 — 게이트 없이 레포 페인을 띄우지 않습니다")
+                return
+            }
+            guard isExecutable(gate) else {
+                fail("git 게이트 실행 파일을 실행할 수 없습니다(\(gate)) — 게이트 없이 레포 페인을 띄우지 않습니다")
+                return
+            }
+        }
         let version = await versionOutput()
         guard !stopped else { return }
         guard let version = version?.trimmingCharacters(in: .whitespacesAndNewlines), !version.isEmpty else {
@@ -246,7 +266,8 @@ final class CodexPaneRuntime {
 
         let entries = await inventory(cwd, userCodexHome)
         guard !stopped else { return }
-        let groups = CodexHooks.dureGroups(shimPath: shimPath) + CodexAppServer.userGroupsToCarry(entries)
+        let groups = CodexHooks.dureGroups(shimPath: shimPath, profile: profile, gateExecutable: gateExecutable)
+            + CodexAppServer.userGroupsToCarry(entries)
         // 사용자 config.toml [hooks] 는 사본에 딸려 가지만 신뢰 키의 파일 경로가 사본 경로로 바뀐다 — 신뢰만 다시 건다.
         let configTrust = CodexAppServer.configTrustToCarry(
             entries, paneConfigPath: paths.home.appendingPathComponent("config.toml").path)
@@ -481,6 +502,11 @@ final class CodexPaneRuntime {
     }
 
     // MARK: - 파일 · 기본 구현
+
+    /// 게이트 실행 파일 확인 — 있고 실행 권한이 있는가(링크를 따라).
+    nonisolated static func isRunnable(_ path: String) -> Bool {
+        FileManager.default.isExecutableFile(atPath: path)
+    }
 
     /// 경로가 (링크를 따라) 유닉스 소켓인가. TUI 스크립트의 `[ -S … ]` 와 같은 판정.
     nonisolated static func isSocket(_ path: String) -> Bool {

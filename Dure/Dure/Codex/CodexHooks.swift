@@ -131,9 +131,56 @@ nonisolated enum CodexHooks {
         return args
     }
 
-    static func dureGroups(shimPath: String) -> [Group] {
-        ["SessionStart", "UserPromptSubmit", "PermissionRequest", "PostToolUse", "Stop"].map {
-            Group(event: $0, matcher: nil, command: Spawn.quoted(shimPath) + " " + $0, timeout: 5)
+    /// 조율자의 둘째 PermissionRequest 그룹 — 상승 요청을 창 없이 거절한다. 입력은 읽어 버린다(파이프가 막히지 않게).
+    /// 실측 그대로의 문자열이다 — 모델이 받는 것은 `Rejected("PermissionRequest hook denied approval")`(i-stage3 (e)).
+    static let orchestratorDenyCommand =
+        #"cat >/dev/null; printf '%s' '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny"}}}'"#
+
+    /// 게이트를 돌리지 못했을 때(실행 파일 없음 127 · 신호로 죽음 · 그 밖의 종료 코드) 모델이 받는 이유. 마침표로 끝내지 않는다 —
+    /// Codex 가 뒤에 `. Command:` 를 붙인다.
+    static let gateLaunchFailure = "두레 게이트: 게이트를 실행하지 못했다"
+
+    /// 게이트 훅 명령 — `<두레 실행 파일> --dure-codex-gate` 를 감싸 **닫힌 채 실패**하게 한다.
+    /// Codex 는 exit 2 + 비지 않은 stderr 만 막고 나머지(127 · 신호 · exit 1)는 통과시킨다(i-stage3 (d)).
+    /// 그래서 0 · 2 는 그대로 내고, 그 밖의 종료는 이유를 stderr 에 써서 exit 2 로 바꾼다. 경로는 한 단어로 인용한다.
+    ///
+    /// Codex 는 훅 명령을 사용자 계정 셸로 돌린다(실측: `/bin/zsh -c '<명령>'`, `$SHELL` 환경 변수는 안 따른다).
+    /// 감싼 부분은 POSIX 문법이라 fish 같은 셸에서는 문법 오류(→ 통과)가 된다 — 그래서 바깥은 `/bin/sh -c '<안>'`
+    /// 단순 명령 하나로 내고 안쪽은 언제나 `/bin/sh` 가 읽는다. 신뢰 해시는 이 본문 그대로 걸린다.
+    static func gateCommand(executable: String) -> String {
+        "/bin/sh -c " + Spawn.quoted(gateScript(executable: executable))
+    }
+
+    /// `/bin/sh` 가 읽는 안쪽 — 게이트를 돌리고 0 · 2 가 아닌 종료를 이유 + exit 2 로 바꾼다.
+    static func gateScript(executable: String) -> String {
+        Spawn.quoted(executable) + " " + CodexGateMain.flag
+            + "; s=$?; [ \"$s\" -eq 0 ] && exit 0; [ \"$s\" -eq 2 ] && exit 2; "
+            + "printf '%s\\n' \"\(gateLaunchFailure) (종료 코드 $s)\" >&2; exit 2"
+    }
+
+    /// 두레가 세션에 얹는 훅. shim(상태 · 알림)은 SessionStart · UserPromptSubmit · PostToolUse · Stop 은 두 프로필 모두,
+    /// PermissionRequest 는 레포 페인만.
+    /// - 레포 페인: + PreToolUse 게이트(matcher 없음 — `tool_name` 은 게이트가 스스로 본다, timeout 10).
+    ///   `gateExecutable` 이 nil 이면 게이트가 빠진다 — **레포 페인은 그 전에 시작을 멈춰야 한다**(`CodexPaneRuntime` 이 닫힌 채 실패).
+    /// - 조율자: PermissionRequest 는 **거절 그룹 하나뿐**(timeout 5, 신뢰 키 `permission_request:0:0`). shim 을 같이 걸면
+    ///   상태가 "승인 대기" 로 가고 알림이 뜨는데, 그 요청은 거절 그룹이 바로 닫아 답할 창이 없다 — 상승 시도마다 거짓 알림이 된다(D-11).
+    ///   조율자의 "승인 대기 + 알림" 은 없다(레포 페인만).
+    static func dureGroups(shimPath: String, profile: CodexProfile, gateExecutable: String?) -> [Group] {
+        func shim(_ event: String) -> Group {
+            Group(event: event, matcher: nil, command: Spawn.quoted(shimPath) + " " + event, timeout: 5)
+        }
+        switch profile {
+        case .repoPane:
+            var groups = ["SessionStart", "UserPromptSubmit", "PermissionRequest", "PostToolUse", "Stop"].map(shim)
+            if let gateExecutable {
+                groups.append(Group(event: "PreToolUse", matcher: nil,
+                                    command: gateCommand(executable: gateExecutable), timeout: 10))
+            }
+            return groups
+        case .orchestrator:
+            return [shim("SessionStart"), shim("UserPromptSubmit"),
+                    Group(event: "PermissionRequest", matcher: nil, command: orchestratorDenyCommand, timeout: 5),
+                    shim("PostToolUse"), shim("Stop")]
         }
     }
 }

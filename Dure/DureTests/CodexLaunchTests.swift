@@ -42,6 +42,40 @@ struct CodexLaunchTests {
         #expect(s.contains("-c 'plugins.b@c.enabled=false'"))
     }
 
+    @Test func 게이트와_거절_훅_인자는_서버_스크립트의_셸_인용을_거쳐도_그대로다() throws {
+        // 거절 명령에는 작은따옴표가, 게이트 경로에는 공백이 있다 — 실제 셸로 풀어 codex 가 받을 argv 를 본다.
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("cl-\(UUID().uuidString.prefix(8))")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let groups = CodexHooks.dureGroups(shimPath: "/x/hook", profile: .repoPane,
+                                           gateExecutable: "/Applications/My Apps/Dure.app/Contents/MacOS/Dure")
+            + CodexHooks.dureGroups(shimPath: "/x/hook", profile: .orchestrator, gateExecutable: nil)
+                .filter { $0.command.contains("hookSpecificOutput") }
+        let hookArgs = CodexHooks.configArguments(groups)
+        let script = CodexLaunch.serverScript(cwd: dir.path, sessionID: "abcd1234", home: "/h", socket: "/s/x.sock",
+                                              hookArguments: hookArgs, disabledPlugins: [])
+        let probe = script.replacingOccurrences(of: "exec codex ", with: "exec /usr/bin/printf '%s\\0' ")
+        #expect(probe != script)
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/bin/sh")
+        p.arguments = ["-c", probe]
+        let out = Pipe()
+        p.standardOutput = out
+        try p.run()
+        let data = out.fileHandleForReading.readDataToEndOfFile()
+        p.waitUntilExit()
+        #expect(p.terminationStatus == 0)
+        let argv = String(decoding: data, as: UTF8.self).split(separator: "\0", omittingEmptySubsequences: false).map(String.init)
+        for value in stride(from: 1, to: hookArgs.count, by: 2).map({ hookArgs[$0] }) {
+            #expect(argv.contains(value))
+        }
+        let pre = try #require(argv.first { $0.hasPrefix("hooks.PreToolUse=") })
+        let gate = CodexHooks.gateCommand(executable: "/Applications/My Apps/Dure.app/Contents/MacOS/Dure")
+        #expect(pre.contains("command=" + CodexHooks.tomlString(gate) + ","))
+        let perm = try #require(argv.first { $0.hasPrefix("hooks.PermissionRequest=") })
+        #expect(perm.contains(#"printf '%s' '{\"hookSpecificOutput\""#))
+    }
+
     @Test func TUI_는_remote_와_C_와_샌드박스를_준다() {
         let r = tui(profile: .repoPane)
         #expect(r.contains("exec codex --remote 'unix:///s/abcd1234.sock' -C '/r/a b' -s 'workspace-write' -a 'on-request'"))
