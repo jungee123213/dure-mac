@@ -61,12 +61,18 @@ nonisolated enum CodexLaunch {
         return (exports(sessionID) + ["export CODEX_HOME=\(Spawn.quoted(home))", launch]).joined(separator: "; ")
     }
 
-    /// TUI 스크립트. 실패 표식이 있으면 그 내용을 찍고, 소켓이 10초 안에 안 생기면 로그 위치를 알리고 끝낸다.
+    /// TUI 가 소켓을 기다리는 안전 상한(초). **10초 판정은 런타임이 한다** — 서버를 띄운 때부터 10초 안에 소켓이 없으면
+    /// 실패 표식을 쓰고, TUI 는 그 표식을 찍고 끝난다. TUI 의 시계는 PTY 시작부터라 서버 앞 단계(`codex --version` ·
+    /// home 준비 · 훅 목록)까지 세므로 10초로 두면 멀쩡한 서버를 두고 페인이 죽는다. 이 상한은 런타임이 표식을
+    /// 못 쓰는 경우(앱이 죽음 등)에만 걸린다 — 런타임의 최악 시간보다 길어야 한다(테스트가 고정).
+    static let tuiWaitSeconds = 45
+
+    /// TUI 스크립트. 실패 표식이 있으면 그 내용을 찍고, 상한 안에 소켓이 안 생기면 로그 위치를 알리고 끝낸다.
     static func tuiScript(cwd: String, sessionID: String, socket: String, failMarker: String, log: String,
                           profile: CodexProfile, initialPrompt: String?) -> String {
         let sandbox = profile == .orchestrator ? "read-only" : "workspace-write"
-        let timeout = "Codex 서버가 10초 안에 뜨지 않았습니다 — 로그: \(log)"
-        let wait = "i=0; while [ $i -lt 100 ]; do "
+        let timeout = "Codex 서버가 \(tuiWaitSeconds)초 안에 뜨지 않았습니다 — 로그: \(log)"
+        let wait = "i=0; while [ $i -lt \(tuiWaitSeconds * 10) ]; do "
             + "if [ -e \(Spawn.quoted(failMarker)) ]; then cat \(Spawn.quoted(failMarker)); exit 1; fi; "
             + "if [ -S \(Spawn.quoted(socket)) ]; then break; fi; "
             + "sleep 0.1; i=$((i+1)); done; "

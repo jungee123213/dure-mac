@@ -64,6 +64,10 @@ nonisolated enum CodexAppServer {
         /// 스키마 `sourcePath` — 훅이 정의된 파일(`~/.codex/hooks.json` · `~/.codex/config.toml` …).
         /// 기본값을 둬서 브리프의 init(앞 7개 필드)이 그대로 쓰인다.
         var sourcePath: String? = nil
+        /// 스키마 `key` — `<sourcePath>:<snake 이벤트>:<그룹>:<핸들러>`. 신뢰 표의 키다.
+        var key: String? = nil
+        /// 스키마 `currentHash` — 내용만으로 계산한 해시(경로는 안 들어간다).
+        var currentHash: String? = nil
     }
 
     /// JSON 이 아니거나 객체가 아니면 nil. `pendingHooksListID` 와 id 가 같은 성공 응답만 훅 목록으로 읽는다.
@@ -123,7 +127,9 @@ nonisolated enum CodexAppServer {
                              command: isCommand ? (h["command"] as? String ?? "") : "",
                              timeout: intValue(h["timeoutSec"]) ?? 0,
                              trusted: trust == "trusted" || trust == "managed",
-                             sourcePath: h["sourcePath"] as? String)
+                             sourcePath: h["sourcePath"] as? String,
+                             key: h["key"] as? String,
+                             currentHash: h["currentHash"] as? String)
         }
     }
 
@@ -136,18 +142,38 @@ nonisolated enum CodexAppServer {
     // MARK: - 훅 목록 판정
 
     /// 신뢰 안 된 훅이 하나라도 있는 플러그인 — 페인 서버에서 끈다(안 끄면 TUI 에 "Hooks need review" 창).
+    /// id 에 `.` 이 든 플러그인은 뺀다 — `-c plugins.<id>.enabled=false` 의 키가 점에서 갈라져 다른 키가 된다.
+    /// 빼면 그 플러그인의 훅 검토 창이 뜰 수 있다(로그로 남긴다).
     static func pluginsToDisable(_ entries: [HookEntry]) -> [String] {
-        Set(entries.compactMap { $0.trusted ? nil : $0.pluginID }).sorted()
+        let all = Set(entries.compactMap { $0.trusted ? nil : $0.pluginID }).sorted()
+        let dotted = all.filter { $0.contains(".") }
+        if !dotted.isEmpty {
+            NSLog("[Dure] Codex: id 에 '.' 이 있어 -c 로 끌 수 없는 플러그인 — \(dotted.joined(separator: ", ")). 훅 검토 창이 뜰 수 있습니다")
+        }
+        return all.filter { !$0.contains(".") }
     }
 
     /// 사용자 `hooks.json` 의 신뢰된 command 훅 — 페인 home 은 hooks.json 을 만들지 않으므로 세션 플래그로 옮긴다. 원래 순서.
-    /// `config.toml [hooks]` 는 옮기지 않는다 — CodexHome 이 config 사본에 이미 담아 가므로 옮기면 두 번 돈다.
+    /// `config.toml [hooks]` 는 옮기지 않는다 — CodexHome 이 config 사본에 이미 담아 가므로 옮기면 두 번 돈다
+    /// (그 신뢰는 `configTrustToCarry` 가 옮긴다).
     static func userGroupsToCarry(_ entries: [HookEntry]) -> [CodexHooks.Group] {
         entries.filter {
             $0.source == "user" && $0.trusted && $0.pluginID == nil && !$0.command.isEmpty
                 && ($0.sourcePath?.hasSuffix("/hooks.json") ?? false)
         }
             .map { CodexHooks.Group(event: $0.event, matcher: $0.matcher, command: $0.command, timeout: $0.timeout) }
+    }
+
+    /// 사용자 `config.toml [hooks]` 의 신뢰된 훅 — 페인 home 의 config 사본에서는 키 앞부분(파일 경로)이 바뀌어
+    /// 사본에 딸려 간 `[hooks.state]` 와 맞지 않는다. 키 앞부분만 사본 경로로 바꾸고 해시는 그대로 둔다(내용만으로 계산).
+    static func configTrustToCarry(_ entries: [HookEntry], paneConfigPath: String) -> [CodexHooks.TrustState] {
+        entries.compactMap { e in
+            guard e.source == "user", e.trusted, e.pluginID == nil,
+                  let path = e.sourcePath, path.hasSuffix("/config.toml"),
+                  let key = e.key, key.hasPrefix(path + ":"),
+                  let hash = e.currentHash, !hash.isEmpty else { return nil }
+            return CodexHooks.TrustState(key: paneConfigPath + key.dropFirst(path.count), hash: hash)
+        }
     }
 }
 

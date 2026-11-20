@@ -154,6 +154,16 @@ struct AgentStateTests {
         }
     }
 
+    @Test func Claude_페인에_온_PermissionRequest_PostToolUse_는_무시한다() throws {
+        // 스펙 4절 — agent_kind 로 가른다. Claude 동작은 그대로다.
+        let perm = try Self.event("PermissionRequest", payload: #"{"tool_input":{"command":"rm -rf x"}}"#)
+        #expect(perm.agentKind == "claude")
+        for s: AgentState in [.running, .started, .done, .waiting] {
+            #expect(AgentStateMachine.reaction(to: perm, current: s) == .ignore)
+            #expect(AgentStateMachine.reaction(to: try Self.event("PostToolUse"), current: s) == .ignore)
+        }
+    }
+
     @Test func 죽은_페인에_온_Codex_이벤트는_무시한다() throws {
         for ev in ["SessionStart", "UserPromptSubmit", "PermissionRequest", "PostToolUse", "Stop"] {
             #expect(AgentStateMachine.reaction(to: try Self.codexEvent(ev), current: .dead) == .ignore)

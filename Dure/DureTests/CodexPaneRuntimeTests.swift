@@ -90,12 +90,14 @@ struct CodexPaneRuntimeTests {
                       launcher: FakeLauncher, connection: FakeConnection = FakeConnection(),
                       entries: [CodexAppServer.HookEntry] = [], ready: Bool = true,
                       profile: CodexProfile = .repoPane) -> CodexPaneRuntime {
-        CodexPaneRuntime(sessionID: "ABCD1234-0000-0000-0000-000000000000", cwd: "/r/app", profile: profile,
+        let userHome = f.user
+        return CodexPaneRuntime(sessionID: "ABCD1234-0000-0000-0000-000000000000", cwd: "/r/app", profile: profile,
                          paths: f.paths, launcher: launcher,
                          threadName: "dure-모바일-ab12-app",
                          userCodexHome: f.user,
                          versionOutput: { version },
-                         inventory: { _ in entries },
+                         // CodexHome.prepare 와 같은 사용자 home 을 읽을 때만 목록을 준다 — 어긋나면 훅 테스트가 깨진다
+                         inventory: { _, home in home == userHome ? entries : [] },
                          connect: { _ in connection },
                          socketReady: { _ in ready },
                          socketTimeout: 0.3,
@@ -186,6 +188,25 @@ struct CodexPaneRuntimeTests {
         let script = try #require(launcher.scripts.first)
         #expect(script.contains("plugins.p1@m.enabled=false"))
         #expect(script.contains("/u/dump.sh"))
+    }
+
+    @Test func 사용자_config_toml_훅의_신뢰를_페인_home_사본_경로로_옮긴다() async throws {
+        let f = try fixture(); defer { try? fm.removeItem(at: f.base) }
+        let launcher = FakeLauncher()
+        let entries = [
+            CodexAppServer.HookEntry(source: "user", pluginID: nil, event: "SessionStart", matcher: "*",
+                                     command: "from-config", timeout: 5, trusted: true,
+                                     sourcePath: "/u/.codex/config.toml",
+                                     key: "/u/.codex/config.toml:session_start:0:0", currentHash: "sha256:abc"),
+        ]
+        let rt = make(f, launcher: launcher, entries: entries)
+        rt.start(onThreadStarted: { _ in }, onServerExit: {})
+        await rt.startup?.value
+        let script = try #require(launcher.scripts.first)
+        let key = f.paths.home.appendingPathComponent("config.toml").path + ":session_start:0:0"
+        #expect(script.contains("\"\(key)\"={trusted_hash=\"sha256:abc\"}"))
+        #expect(script.components(separatedBy: "hooks.state=").count == 2)   // 신뢰 표는 하나
+        #expect(!script.contains("from-config"))   // 훅 자체는 config 사본에 있으므로 옮기지 않는다
     }
 
     @Test func 버전이_낮으면_실패_표식에_이유를_쓰고_서버를_띄우지_않는다() async throws {

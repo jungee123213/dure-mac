@@ -1,7 +1,7 @@
 import Darwin
 import Foundation
 
-/// 사용자 Codex 의 훅 목록 — 진짜 home 으로 일회용 stdio `codex app-server` 를 띄워 `hooks/list` 를 묻는다.
+/// 사용자 Codex 의 훅 목록 — 사용자 home(기본 `~/.codex`)으로 일회용 stdio `codex app-server` 를 띄워 `hooks/list` 를 묻는다.
 ///
 /// 읽기만 한다(실측 M1: config · hooks.json · rules 변화 없음). 페인 서버가 끌 플러그인과 옮길 사용자 훅을 여기서 정한다.
 /// 실패하거나 5초를 넘기면 빈 배열 — 페인 시작을 막지 않는다(훅을 못 옮길 뿐이다).
@@ -9,13 +9,20 @@ import Foundation
 nonisolated enum CodexHookInventory {
 
     static let timeout: TimeInterval = 5
+    /// 답을 받은(또는 시간이 다 된) 뒤 서버를 끝내는 데 최대로 쓰는 시간 — stdin 닫고 0.5초, TERM 뒤 1초, KILL 뒤 1초.
+    static let shutdownBudget: TimeInterval = 2.5
 
-    /// GUI 앱은 PATH 가 비어 있어 `zsh -ilc` 로 띄운다(`Spawn` 과 같은 이유). CODEX_HOME 은 사용자 셸이 정한 그대로(진짜 home).
+    /// GUI 앱은 PATH 가 비어 있어 `zsh -ilc` 로 띄운다(`Spawn` 과 같은 이유).
+    /// CODEX_HOME 은 `CodexHome.prepare` 가 복사해 오는 그 home 으로 정한다 — 셸이 다른 home 을 정해 두었어도 둘이 어긋나지 않게.
     /// 두레 페인 안에서 두레를 띄운 경우에 대비해 두레 표식만 지운다.
-    static let defaultScript = "unset DURE_SESSION DURE_AGENT_KIND; exec codex app-server -c check_for_update_on_startup=false"
+    static func script(userCodexHome: URL) -> String {
+        "unset DURE_SESSION DURE_AGENT_KIND; export CODEX_HOME=\(Spawn.quoted(userCodexHome.path)); "
+            + "exec codex app-server -c check_for_update_on_startup=false"
+    }
 
-    static func load(cwd: String) async -> [CodexAppServer.HookEntry] {
-        await load(cwd: cwd, executable: "/bin/zsh", arguments: ["-ilc", defaultScript], timeout: timeout)
+    static func load(cwd: String, userCodexHome: URL) async -> [CodexAppServer.HookEntry] {
+        await load(cwd: cwd, executable: "/bin/zsh", arguments: ["-ilc", script(userCodexHome: userCodexHome)],
+                   timeout: timeout)
     }
 
     /// 테스트는 진짜 codex 대신 가짜 스크립트를 넣는다.

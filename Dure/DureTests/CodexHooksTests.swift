@@ -58,6 +58,27 @@ struct CodexHooksTests {
             command: "/tmp/x.sh \t탭 😀 \u{7f} \"q\" \\b", timeout: 5)
         #expect(CodexHooks.trustHash(g) == "sha256:43eea80ea58d941b0316f91b90ba50d5a93d892c457140f3493bcd3eeeb80003")
     }
+    @Test func SessionEnd_와_Interrupt_의_timeout_은_3초로_줄여_해시하고_낸다() {
+        let long = CodexHooks.Group(event: "SessionEnd", matcher: nil, command: "x", timeout: 10)
+        let three = CodexHooks.Group(event: "SessionEnd", matcher: nil, command: "x", timeout: 3)
+        #expect(CodexHooks.trustHash(long) == CodexHooks.trustHash(three))
+        #expect(CodexHooks.configArguments([long])[1].contains("timeout=3}"))
+        let i = CodexHooks.Group(event: "Interrupt", matcher: nil, command: "x", timeout: 30)
+        #expect(CodexHooks.effectiveTimeout(i) == 3)
+        #expect(CodexHooks.configArguments([i])[1].contains("timeout=3}"))
+        // 짧은 값은 그대로, 다른 이벤트는 줄이지 않는다
+        #expect(CodexHooks.effectiveTimeout(.init(event: "SessionEnd", matcher: nil, command: "x", timeout: 2)) == 2)
+        let stop = CodexHooks.Group(event: "Stop", matcher: nil, command: "x", timeout: 10)
+        #expect(CodexHooks.configArguments([stop])[1].contains("timeout=10}"))
+    }
+    @Test func config_사본_훅의_신뢰는_같은_인라인_표에_덧붙는다() {
+        let extra = [CodexHooks.TrustState(key: "/h/repo-1/config.toml:session_start:0:0", hash: "sha256:ab")]
+        let args = CodexHooks.configArguments(CodexHooks.dureGroups(shimPath: "/x/hook"), extraTrust: extra)
+        let states = args.filter { $0.hasPrefix("hooks.state=") }
+        #expect(states.count == 1)
+        #expect(states[0].contains(#""/<session-flags>/config.toml:stop:0:0"={trusted_hash="sha256:"#))
+        #expect(states[0].hasSuffix(#","/h/repo-1/config.toml:session_start:0:0"={trusted_hash="sha256:ab"}}"#))
+    }
     @Test func snake_이름() {
         #expect(CodexHooks.snakeName("UserPromptSubmit") == "user_prompt_submit")
         #expect(CodexHooks.snakeName("Stop") == "stop")

@@ -58,10 +58,21 @@ struct CodexLaunchTests {
         #expect(s.contains("'/s/abcd1234.fail'"))
         #expect(s.contains("-S "))
         #expect(s.contains("sleep 0.1"))
-        #expect(s.contains("100"))
-        #expect(s.contains("Codex 서버가 10초 안에 뜨지 않았습니다 — 로그: /s/abcd1234.log"))
+        #expect(s.contains("[ $i -lt \(CodexLaunch.tuiWaitSeconds * 10) ]"))
+        #expect(s.contains("Codex 서버가 \(CodexLaunch.tuiWaitSeconds)초 안에 뜨지 않았습니다 — 로그: /s/abcd1234.log"))
+        #expect(!s.contains("10초 안에"))
         #expect(s.contains("cd '/r/a b' && "))
         #expect(s.contains("exit 1"))
+    }
+
+    /// 10초 판정은 런타임 몫이다(서버를 띄운 때부터). TUI 의 상한은 런타임이 판정을 내리기까지의 최악 시간보다 길어야
+    /// 멀쩡한 서버를 두고 페인이 먼저 죽지 않는다 — 버전 확인(시간 초과 + 유예 + 정리) · 훅 목록(+ 서버 정리) · 소켓 대기를 다 더한 값.
+    @Test func TUI_대기_상한은_런타임이_판정하기까지의_최악_시간보다_길다() {
+        let version = CodexPaneRuntime.versionTimeout + LiveCommandRunner().grace + 5 + 1
+        let inventory = CodexHookInventory.timeout + CodexHookInventory.shutdownBudget
+        let worst = version + inventory + CodexPaneRuntime.defaultSocketTimeout
+        #expect(TimeInterval(CodexLaunch.tuiWaitSeconds) > worst)
+        #expect(CodexPaneRuntime.defaultSocketTimeout == 10)
     }
 
     @Test func 첫_프롬프트는_대시_대시_뒤에_인용된다() {

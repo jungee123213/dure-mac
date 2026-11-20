@@ -32,6 +32,20 @@ nonisolated enum CodexHooks {
         matcherEvents.contains(g.event) ? g.matcher : nil
     }
 
+    /// Codex 가 timeout 을 줄여 쓰는 이벤트(초). 해시도 줄인 값으로 계산하므로 내보낼 때도 같은 값이어야 한다.
+    static let timeoutCaps: [String: Int] = ["SessionEnd": 3, "Interrupt": 3]
+
+    static func effectiveTimeout(_ g: Group) -> Int {
+        guard let cap = timeoutCaps[g.event] else { return g.timeout }
+        return min(g.timeout, cap)
+    }
+
+    /// `hooks.state` 항목 하나 — 세션 플래그 밖(페인 home 의 config 사본)에서 온 훅의 신뢰.
+    struct TrustState: Equatable {
+        let key: String
+        let hash: String
+    }
+
     /// 정규 JSON 문자열 값 — `"` `\` 와 U+0000~001F 만 이스케이프. 비 ASCII · `/` 는 그대로.
     private static func jsonString(_ s: String) -> String {
         var out = "\""
@@ -59,7 +73,7 @@ nonisolated enum CodexHooks {
         // 키 정렬: event_name < hooks < matcher, 안쪽은 async < command < timeout < type
         var json = "{\"event_name\":" + jsonString(snakeName(g.event))
         json += ",\"hooks\":[{\"async\":false,\"command\":" + jsonString(g.command)
-        json += ",\"timeout\":\(g.timeout),\"type\":\"command\"}]"
+        json += ",\"timeout\":\(effectiveTimeout(g)),\"type\":\"command\"}]"
         if let m = effectiveMatcher(g) { json += ",\"matcher\":" + jsonString(m) }
         json += "}"
         let digest = SHA256.hash(data: Data(json.utf8))
@@ -87,7 +101,8 @@ nonisolated enum CodexHooks {
         return out + "\""
     }
 
-    static func configArguments(_ groups: [Group]) -> [String] {
+    /// `extraTrust` 는 같은 인라인 표 하나에 덧붙인다 — `hooks.state` 는 `-c` 하나로만 낸다.
+    static func configArguments(_ groups: [Group], extraTrust: [TrustState] = []) -> [String] {
         var order: [String] = []
         var byEvent: [String: [Group]] = [:]
         for g in groups {
@@ -100,7 +115,7 @@ nonisolated enum CodexHooks {
             let gs = byEvent[event] ?? []
             var tables: [String] = []
             for (idx, g) in gs.enumerated() {
-                var t = "{hooks=[{type=\"command\",command=\(tomlString(g.command)),timeout=\(g.timeout)}]"
+                var t = "{hooks=[{type=\"command\",command=\(tomlString(g.command)),timeout=\(effectiveTimeout(g))}]"
                 if let m = effectiveMatcher(g) { t += ",matcher=\(tomlString(m))" }
                 t += "}"
                 tables.append(t)
@@ -108,6 +123,9 @@ nonisolated enum CodexHooks {
                 states.append("\(tomlString(key))={trusted_hash=\(tomlString(trustHash(g)))}")
             }
             args += ["-c", "hooks.\(event)=[" + tables.joined(separator: ",") + "]"]
+        }
+        for t in extraTrust {
+            states.append("\(tomlString(t.key))={trusted_hash=\(tomlString(t.hash))}")
         }
         args += ["-c", "hooks.state={" + states.joined(separator: ",") + "}"]
         return args

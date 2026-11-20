@@ -56,6 +56,11 @@ final class CodexPaneRuntime {
         }
     }
 
+    /// 서버를 띄운 때부터 소켓을 기다리는 시간(스펙 1절 "최대 10초").
+    nonisolated static let defaultSocketTimeout: TimeInterval = 10
+    /// `codex --version` 을 기다리는 시간.
+    nonisolated static let versionTimeout: TimeInterval = 15
+
     nonisolated static var defaultUserCodexHome: URL {
         FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".codex")
     }
@@ -69,7 +74,8 @@ final class CodexPaneRuntime {
     private let threadName: String?
     private let userCodexHome: URL
     private let versionOutput: @Sendable () async -> String?
-    private let inventory: @Sendable (String) async -> [CodexAppServer.HookEntry]
+    /// (cwd, 사용자 Codex home) → 훅 목록. `CodexHome.prepare` 와 같은 home 을 읽는다.
+    private let inventory: @Sendable (String, URL) async -> [CodexAppServer.HookEntry]
     private let connect: (String) -> any CodexServerConnecting
     private let socketReady: (String) -> Bool
     private let socketTimeout: TimeInterval
@@ -96,10 +102,12 @@ final class CodexPaneRuntime {
          threadName: String? = nil,
          userCodexHome: URL = CodexPaneRuntime.defaultUserCodexHome,
          versionOutput: @escaping @Sendable () async -> String? = { await CodexPaneRuntime.liveVersionOutput() },
-         inventory: @escaping @Sendable (String) async -> [CodexAppServer.HookEntry] = { await CodexHookInventory.load(cwd: $0) },
+         inventory: @escaping @Sendable (String, URL) async -> [CodexAppServer.HookEntry] = {
+             await CodexHookInventory.load(cwd: $0, userCodexHome: $1)
+         },
          connect: @escaping (String) -> any CodexServerConnecting = { CodexAppServerConnection(socketPath: $0) },
          socketReady: @escaping (String) -> Bool = { CodexPaneRuntime.isSocket($0) },
-         socketTimeout: TimeInterval = 10,
+         socketTimeout: TimeInterval = CodexPaneRuntime.defaultSocketTimeout,
          shimPath: String? = nil) {
         self.sessionID = sessionID
         self.cwd = cwd
@@ -170,16 +178,19 @@ final class CodexPaneRuntime {
             return
         }
 
-        let entries = await inventory(cwd)
+        let entries = await inventory(cwd, userCodexHome)
         guard !stopped else { return }
         let groups = CodexHooks.dureGroups(shimPath: shimPath) + CodexAppServer.userGroupsToCarry(entries)
+        // 사용자 config.toml [hooks] 는 사본에 딸려 가지만 신뢰 키의 파일 경로가 사본 경로로 바뀐다 — 신뢰만 다시 건다.
+        let configTrust = CodexAppServer.configTrustToCarry(
+            entries, paneConfigPath: paths.home.appendingPathComponent("config.toml").path)
         let disabled = CodexAppServer.pluginsToDisable(entries)
         if !disabled.isEmpty {
             NSLog("[Dure] Codex 페인 \(sessionID): 신뢰 안 된 훅이 있는 플러그인을 끕니다 — \(disabled.joined(separator: ", "))")
         }
         let script = CodexLaunch.serverScript(cwd: cwd, sessionID: sessionID, home: paths.home.path,
                                               socket: paths.socket,
-                                              hookArguments: CodexHooks.configArguments(groups),
+                                              hookArguments: CodexHooks.configArguments(groups, extraTrust: configTrust),
                                               disabledPlugins: disabled)
 
         // `Process.run` 은 메인 밖에서. 그 사이 stop 이 오면 늦게 도착한 handle 을 바로 끈다.
@@ -314,7 +325,7 @@ final class CodexPaneRuntime {
     /// `codex --version` — GUI 앱은 PATH 가 비어 `zsh -ilc`. `.zshrc` 출력이 섞이므로 표지 뒤만 읽는다. 없거나 실패면 nil.
     nonisolated static func liveVersionOutput() async -> String? {
         let script = "unset DURE_SESSION DURE_AGENT_KIND; printf '%s\\n' \(CommandOutput.marker); codex --version"
-        let r = await LiveCommandRunner().run(script, timeout: 15)
+        let r = await LiveCommandRunner().run(script, timeout: versionTimeout)
         guard r.status == 0, !r.timedOut else { return nil }
         return CommandOutput.afterMarker(r.stdout)
     }

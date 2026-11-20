@@ -127,7 +127,7 @@ struct ContentView: View {
                 }
                 .pickerStyle(.menu)
                 .font(.caption)
-                // 최종 리뷰 F4 — 바꿔도 지금은 아무것도 달라지지 않는다는 것을 숨기지 않는다.
+                // 바꾸면 이 워크스페이스에서 새로 시작하는 페인이 이 CLI 로 뜬다. 이번 실행에 이미 세션이 있는 페인은 그 CLI 그대로(`DureStore.start`).
                 .help("새로 시작하는 페인부터 적용합니다.")
             }
 

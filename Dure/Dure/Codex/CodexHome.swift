@@ -20,10 +20,22 @@ enum CodexHome {
         root.appendingPathComponent(key.replacingOccurrences(of: ":", with: "-"))
     }
 
+    /// 다시 맞출 때 지우는 것 — 두레가 만든 것(링크 · config 사본 · rules)과 서버가 매번 새로 만드는 폴더.
+    /// hooks.json 은 두레가 만들지 않지만 있으면 사본 home 에서 훅이 돌므로 지운다.
+    private nonisolated static let rebuilt: Set<String> = ["config.toml", "rules", "hooks.json"]
+
+    /// 시작할 때마다 다시 맞춘다. **폴더를 통째로 지우지 않는다** — 사용자 home 에 없던 이름(`sessions/` · 새 `state_N.sqlite`)은
+    /// 서버가 이 home 안에 실제 파일로 만들고, 그것이 기록이다. 링크 · 두레가 만든 것 · 서버 제어 폴더만 지우고
+    /// 나머지 실제 항목은 그대로 두며 그 이름은 링크하지 않는다.
     nonisolated static func prepare(profile: CodexProfile, cwd: String, userHome: URL, into dir: URL) throws {
         let fm = FileManager.default
-        remove(dir)
         try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        for name in (try? fm.contentsOfDirectory(atPath: dir.path)) ?? [] {
+            let entry = dir.appendingPathComponent(name)
+            if isSymlink(entry) || rebuilt.contains(name) || serverOwned.contains(name) {
+                try fm.removeItem(at: entry)
+            }
+        }
 
         // config.toml — 링크가 아니라 사본. 링크면 Codex 가 쓰는 신뢰가 전역 파일에 들어간다.
         var text = (try? String(contentsOf: userHome.appendingPathComponent("config.toml"), encoding: .utf8)) ?? ""
@@ -42,16 +54,35 @@ enum CodexHome {
         if profile == .repoPane {
             let src = userHome.appendingPathComponent("rules")
             for name in (try? fm.contentsOfDirectory(atPath: src.path)) ?? [] where name.hasSuffix(".rules") {
-                try fm.copyItem(at: src.appendingPathComponent(name), to: rules.appendingPathComponent(name))
+                // 내용을 복사한다(링크를 따라간다). copyItem 은 링크를 링크로 복사해 "다시 묻지 않기" 가 전역 규칙에 쓰인다.
+                guard let data = try? Data(contentsOf: src.appendingPathComponent(name)) else {
+                    NSLog("[Dure] Codex home: 규칙 파일을 읽지 못해 건너뜁니다 — \(name)")
+                    continue
+                }
+                try data.write(to: rules.appendingPathComponent(name))
             }
         }
 
         // 나머지 최상위 항목은 사용자 home 으로 링크. hooks.json 은 만들지 않는다.
         let skip = Set(["config.toml", "rules", "hooks.json"]).union(serverOwned)
         for name in (try? fm.contentsOfDirectory(atPath: userHome.path)) ?? [] where !skip.contains(name) {
-            try fm.createSymbolicLink(at: dir.appendingPathComponent(name),
-                                      withDestinationURL: userHome.appendingPathComponent(name))
+            let link = dir.appendingPathComponent(name)
+            if exists(link) {
+                NSLog("[Dure] Codex home \(dir.lastPathComponent): 실제 항목 \(name) 이 있어 링크하지 않고 그대로 둡니다")
+                continue
+            }
+            try fm.createSymbolicLink(at: link, withDestinationURL: userHome.appendingPathComponent(name))
         }
+    }
+
+    private nonisolated static func isSymlink(_ url: URL) -> Bool {
+        (try? FileManager.default.destinationOfSymbolicLink(atPath: url.path)) != nil
+    }
+
+    /// 링크를 따라가지 않는 존재 확인(lstat).
+    private nonisolated static func exists(_ url: URL) -> Bool {
+        var st = stat()
+        return lstat(url.path, &st) == 0
     }
 
     /// 링크는 따라가지 않고 링크 자체만 지운다(FileManager.removeItem 동작).

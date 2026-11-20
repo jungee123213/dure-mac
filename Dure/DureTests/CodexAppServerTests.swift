@@ -130,7 +130,8 @@ struct CodexAppServerTests {
         #expect(e.count == 7)
         #expect(e[0] == CodexAppServer.HookEntry(source: "user", pluginID: nil, event: "SessionStart", matcher: "*",
             command: #"node "/Users/qhrtj07/.claude/scripts/gptaku-update-check.cjs""#, timeout: 5, trusted: true,
-            sourcePath: "/Users/x/.codex/hooks.json"))
+            sourcePath: "/Users/x/.codex/hooks.json", key: "/Users/x/.codex/hooks.json:session_start:0:0",
+            currentHash: "sha256:5064ac3e2883b8f01b2d389632f4d2c955bcdc915562897ffb99927e8b208ee0"))
         #expect(e[3].sourcePath == "/Users/x/.codex/plugins/cache/understand-anything/hooks/hooks.json")
         #expect(e[1].event == "Stop")
         #expect(e[2].event == "PostToolUse")
@@ -150,6 +151,19 @@ struct CodexAppServerTests {
 
     @Test func hooks_list_결과에서_신뢰_안_된_플러그인만_끈다() {
         #expect(CodexAppServer.pluginsToDisable(entries) == ["bad@market", "understand-anything@understand-anything"])
+    }
+
+    @Test func id_에_점이_있는_플러그인은_끄지_않는다() {
+        // `-c plugins.<id>.enabled=false` 는 점에서 키가 갈라진다 — 다른 키를 끄게 되므로 뺀다(로그만).
+        let e = [
+            CodexAppServer.HookEntry(source: "plugin", pluginID: "a.b@market", event: "Stop", matcher: nil,
+                                     command: "x", timeout: 5, trusted: false),
+            CodexAppServer.HookEntry(source: "plugin", pluginID: "ok@market", event: "Stop", matcher: nil,
+                                     command: "x", timeout: 5, trusted: false),
+            CodexAppServer.HookEntry(source: "plugin", pluginID: "c@m.io", event: "Stop", matcher: nil,
+                                     command: "x", timeout: 5, trusted: false),
+        ]
+        #expect(CodexAppServer.pluginsToDisable(e) == ["ok@market"])
     }
 
     @Test func 신뢰된_사용자_훅만_옮긴다() {
@@ -197,6 +211,30 @@ struct CodexAppServerTests {
         let bare = CodexAppServer.HookEntry(source: "user", pluginID: nil, event: "Stop", matcher: nil,
                                             command: "x", timeout: 5, trusted: true)
         #expect(CodexAppServer.userGroupsToCarry([bare]).isEmpty)
+    }
+
+    @Test func config_toml_사용자_훅의_신뢰는_키_앞부분만_사본_경로로_바꿔_옮긴다() {
+        let json = #"""
+        {"id":7,"result":{"data":[{"cwd":"/r","hooks":[
+        {"key":"/Users/x/.codex/config.toml:session_start:0:0","eventName":"sessionStart","handlerType":"command","command":"from-config","async":false,"matcher":"*","timeoutSec":5,"sourcePath":"/Users/x/.codex/config.toml","source":"user","pluginId":null,"displayOrder":0,"enabled":true,"isManaged":false,"currentHash":"sha256:c0","trustStatus":"trusted"},
+        {"key":"/Users/x/.codex/config.toml:stop:1:0","eventName":"stop","handlerType":"command","command":"new","async":false,"matcher":null,"timeoutSec":5,"sourcePath":"/Users/x/.codex/config.toml","source":"user","pluginId":null,"displayOrder":1,"enabled":true,"isManaged":false,"currentHash":"sha256:c1","trustStatus":"untrusted"},
+        {"key":"/Users/x/.codex/hooks.json:stop:0:0","eventName":"stop","handlerType":"command","command":"hj","async":false,"matcher":null,"timeoutSec":5,"sourcePath":"/Users/x/.codex/hooks.json","source":"user","pluginId":null,"displayOrder":2,"enabled":true,"isManaged":false,"currentHash":"sha256:c2","trustStatus":"trusted"},
+        {"key":"/r/.codex/config.toml:stop:0:0","eventName":"stop","handlerType":"command","command":"proj","async":false,"matcher":null,"timeoutSec":5,"sourcePath":"/r/.codex/config.toml","source":"project","pluginId":null,"displayOrder":3,"enabled":true,"isManaged":false,"currentHash":"sha256:c3","trustStatus":"trusted"},
+        {"key":"/Users/x/.codex/config.toml:stop:0:0","eventName":"stop","handlerType":"command","command":"later","async":false,"matcher":null,"timeoutSec":5,"sourcePath":"/Users/x/.codex/config.toml","source":"user","pluginId":null,"displayOrder":4,"enabled":true,"isManaged":false,"currentHash":"sha256:c4","trustStatus":"trusted"}
+        ],"warnings":[],"errors":[]}]}}
+        """#
+        guard case .hooksListResult(_, let e)? = parse(json, pending: 7) else { Issue.record("결과 아님"); return }
+        #expect(e[0].key == "/Users/x/.codex/config.toml:session_start:0:0")
+        #expect(e[0].currentHash == "sha256:c0")
+        // 신뢰된 사용자 config.toml 훅만 — 신뢰 안 된 것 · hooks.json · 프로젝트 훅은 빼고, 해시는 그대로
+        #expect(CodexAppServer.configTrustToCarry(e, paneConfigPath: "/h/repo-1/config.toml") == [
+            CodexHooks.TrustState(key: "/h/repo-1/config.toml:session_start:0:0", hash: "sha256:c0"),
+            CodexHooks.TrustState(key: "/h/repo-1/config.toml:stop:0:0", hash: "sha256:c4"),
+        ])
+        // 키 · 해시를 모르는 항목은 옮기지 않는다
+        let bare = CodexAppServer.HookEntry(source: "user", pluginID: nil, event: "Stop", matcher: nil, command: "x",
+                                            timeout: 5, trusted: true, sourcePath: "/Users/x/.codex/config.toml")
+        #expect(CodexAppServer.configTrustToCarry([bare], paneConfigPath: "/h/config.toml").isEmpty)
     }
 
     @Test func hooks_list_오류_응답은_실패다() {
@@ -358,10 +396,11 @@ struct CodexAppServerTests {
         #expect(gone.isEmpty)
     }
 
-    @Test func 훅_목록_기본_명령은_진짜_home_의_stdio_서버다() {
-        let script = CodexHookInventory.defaultScript
-        #expect(script.hasPrefix("unset DURE_SESSION DURE_AGENT_KIND; exec codex app-server"))
-        #expect(!script.contains("CODEX_HOME"))   // 사용자 셸이 정한 진짜 home 을 그대로 쓴다
+    @Test func 훅_목록_기본_명령은_사용자_home_의_stdio_서버다() {
+        let script = CodexHookInventory.script(userCodexHome: URL(fileURLWithPath: "/Users/x/.codex"))
+        #expect(script.hasPrefix("unset DURE_SESSION DURE_AGENT_KIND; "))
+        // CodexHome.prepare 가 복사해 오는 그 home 을 읽는다 — 셸의 CODEX_HOME 과 어긋나지 않게
+        #expect(script.contains("export CODEX_HOME='/Users/x/.codex'; exec codex app-server"))
         #expect(script.contains("check_for_update_on_startup=false"))
         #expect(!script.contains("--listen"))
     }
