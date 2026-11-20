@@ -16,7 +16,8 @@ enum TranscriptIngestor {
 
     /// 한 세션의 트랜스크립트에서 **새로 붙은 줄만** 읽어 반영한다.
     @discardableResult
-    static func ingest(_ session: CCSession, in db: Database) throws -> Result {
+    static func ingest(_ session: CCSession, in db: Database,
+                       now: Int = Int(Date().timeIntervalSince1970)) throws -> Result {
         let cursor = try ReadCursor.fetchOne(db, key: session.transcriptPath)
         guard let batch = TranscriptReader.read(path: session.transcriptPath,
                                                 offset: cursor?.byteOffset ?? 0,
@@ -24,36 +25,42 @@ enum TranscriptIngestor {
         else { return Result() }
 
         var result = Result(usageRows: 0, toolRows: 0, linesRead: batch.lines.count)
-        let now = Int(Date().timeIntervalSince1970)
+        var model = session.model
 
         for line in batch.lines {
-            guard let parsed = TranscriptParser.parse(line.data) else { continue }
+            let ts = (try? JSONSerialization.jsonObject(with: line.data) as? [String: Any])
+                .flatMap { TranscriptParser.timestamp($0) } ?? now
 
-            if let u = parsed.usage {
-                // 같은 응답의 둘째·셋째 줄은 같은 행을 덮어쓴다. 그래서 2배가 되지 않는다 (A7-1).
-                try TokenUsage(ccSessionId: session.ccSessionId,
-                               messageId: u.messageId,
-                               lineNo: line.no,
-                               ts: now,
-                               input: u.input,
-                               output: u.output,
-                               cacheRead: u.cacheRead,
-                               cacheCreation: u.cacheCreation,
-                               thinking: u.thinking,
-                               serviceTier: u.serviceTier,
-                               model: u.model).save(db)
-                result.usageRows += 1
+            if let parsed = TranscriptParser.parse(line.data) {
+                if let u = parsed.usage {
+                    // 같은 응답의 둘째·셋째 줄은 같은 행을 덮어쓴다. 그래서 2배가 되지 않는다 (A7-1).
+                    try save(u, line: line.no, ts: ts, session: session, db: db)
+                    result.usageRows += 1
+                }
+                if let t = parsed.tool {
+                    try save(t, line: line.no, ts: ts, session: session, db: db)
+                    result.toolRows += 1
+                }
+                continue
             }
 
-            if let t = parsed.tool {
-                try ToolUse(ccSessionId: session.ccSessionId,
-                            lineNo: line.no,
-                            ts: now,
-                            toolName: t.name,
-                            mcpServer: t.mcpServer,
-                            skillName: t.skillName).save(db)
+            guard let codex = CodexTranscriptParser.parse(line.data) else { continue }
+            switch codex {
+            case .model(let m):
+                model = m
+            case .usage(var u, _):
+                u.model = model
+                try save(u, line: line.no, ts: ts, session: session, db: db)
+                result.usageRows += 1
+            case .tool(let t, _):
+                try save(t, line: line.no, ts: ts, session: session, db: db)
                 result.toolRows += 1
             }
+        }
+
+        if model != session.model {
+            try db.execute(sql: "UPDATE cc_session SET model = ? WHERE cc_session_id = ?",
+                           arguments: [model, session.ccSessionId])
         }
 
         try ReadCursor(path: session.transcriptPath,
@@ -61,6 +68,20 @@ enum TranscriptIngestor {
                        lineNo: batch.lineNo,
                        updatedAt: now).save(db)
         return result
+    }
+
+    private static func save(_ u: TranscriptParser.Usage, line: Int, ts: Int,
+                             session: CCSession, db: Database) throws {
+        try TokenUsage(ccSessionId: session.ccSessionId, messageId: u.messageId, lineNo: line,
+                       ts: ts, input: u.input, output: u.output, cacheRead: u.cacheRead,
+                       cacheCreation: u.cacheCreation, thinking: u.thinking,
+                       serviceTier: u.serviceTier, model: u.model).save(db)
+    }
+
+    private static func save(_ t: TranscriptParser.Tool, line: Int, ts: Int,
+                             session: CCSession, db: Database) throws {
+        try ToolUse(ccSessionId: session.ccSessionId, lineNo: line, ts: ts, toolName: t.name,
+                    mcpServer: t.mcpServer, skillName: t.skillName).save(db)
     }
 }
 

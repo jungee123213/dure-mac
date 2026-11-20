@@ -3,7 +3,7 @@ import Foundation
 /// 트랜스크립트 한 줄을 읽어 F6·F7 이 쓸 값으로 바꾼다.
 /// `docs/step1/tokens.sh` · `tools.sh` 의 Swift 이식. 규칙은 부록 A7.
 /// **순수 함수만 둔다** — 실제 트랜스크립트 줄로 테스트하기 위해서다.
-enum TranscriptParser {
+nonisolated enum TranscriptParser {
 
     struct Line {
         var usage: Usage?
@@ -55,6 +55,24 @@ enum TranscriptParser {
         }
 
         return (line.usage == nil && line.tool == nil) ? nil : line
+    }
+
+    nonisolated(unsafe) private static let isoFraction: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f
+    }()
+    nonisolated(unsafe) private static let isoPlain: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime]
+        return f
+    }()
+
+    /// 줄의 `timestamp`(ISO 8601, 소수 초 · `Z`)를 유닉스 초로. Claude · Codex 줄이 같은 필드를 쓴다.
+    static func timestamp(_ root: [String: Any]) -> Int? {
+        guard let s = root["timestamp"] as? String else { return nil }
+        guard let d = isoFraction.date(from: s) ?? isoPlain.date(from: s) else { return nil }
+        return Int(d.timeIntervalSince1970)
     }
 
     /// 부록 A7-2 의 판별표.
