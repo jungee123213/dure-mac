@@ -1,0 +1,83 @@
+import Foundation
+
+/// Codex 페인의 서버 · TUI 기동 스크립트와 경로 · 버전 판정. 순수 문자열 조립이라 격리하지 않는다.
+///
+/// 서버(`codex app-server`)는 두레가 백그라운드 `Process`(`zsh -ilc`)로 직접 띄우고,
+/// TUI 는 PTY 에서 소켓이 생길 때까지 기다렸다가 `codex --remote` 로 붙는다.
+/// 세션 단위 훅 주입은 서버의 `-c hooks.*` 로 한다(D-44).
+nonisolated enum CodexLaunch {
+
+    static let minimumVersion = "0.167.0"
+
+    /// `codex --version` 출력(`codex-cli 0.167.0`)이 최소 버전 이상인가. 못 읽으면 false.
+    static func isSupported(versionOutput: String) -> Bool {
+        guard let token = versionOutput.split(whereSeparator: { $0.isWhitespace })
+            .first(where: { $0.first?.isNumber == true }) else { return false }
+        let have = token.split(separator: ".").map { Int($0.prefix(while: \.isNumber)) }
+        let need = minimumVersion.split(separator: ".").compactMap { Int($0) }
+        guard have.count >= 3, !have.contains(where: { $0 == nil }) else { return false }
+        for (h, n) in zip(have.compactMap { $0 }, need) where h != n { return h > n }
+        return true
+    }
+
+    // MARK: - 경로
+
+    static var defaultRoot: URL {
+        FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".dure/codex")
+    }
+
+    /// 유닉스 소켓 경로는 104바이트 미만이어야 한다. 세션 ID 를 짧게 유지할 것.
+    static func socketPath(forSession id: String, root: URL = defaultRoot) -> String {
+        root.appendingPathComponent(id + ".sock").path
+    }
+
+    static func failMarkerPath(forSession id: String, root: URL = defaultRoot) -> String {
+        root.appendingPathComponent(id + ".fail").path
+    }
+
+    static func logPath(forSession id: String, root: URL = defaultRoot) -> String {
+        root.appendingPathComponent(id + ".log").path
+    }
+
+    // MARK: - 스크립트
+
+    private static func exports(_ sessionID: String) -> [String] {
+        ["export DURE_SESSION=\(Spawn.quoted(sessionID))",
+         "export DURE_AGENT_KIND=\(Spawn.quoted("codex"))"]
+    }
+
+    /// 서버 스크립트. 인자마다 `Spawn.quoted`. `cd … && exec` 는 `&&` 로 잇는다(이슈 #10).
+    static func serverScript(cwd: String, sessionID: String, home: String, socket: String,
+                             hookArguments: [String], disabledPlugins: [String]) -> String {
+        // 플래그(`-c` · `--listen`)는 그대로, 값만 인용한다. hookArguments 는 `-c` 와 값이 번갈아 온다.
+        var parts = ["app-server", "--listen", Spawn.quoted("unix://" + socket)]
+        let configs = ["check_for_update_on_startup=false",
+                       "project_doc_fallback_filenames=[\"CLAUDE.md\"]",
+                       "features.apps=false"]
+            + stride(from: 1, to: hookArguments.count, by: 2).map { hookArguments[$0] }
+            + disabledPlugins.map { "plugins.\($0).enabled=false" }
+        for c in configs { parts += ["-c", Spawn.quoted(c)] }
+        let launch = "cd \(Spawn.quoted(cwd)) && exec codex " + parts.joined(separator: " ")
+        return (exports(sessionID) + ["export CODEX_HOME=\(Spawn.quoted(home))", launch]).joined(separator: "; ")
+    }
+
+    /// TUI 스크립트. 실패 표식이 있으면 그 내용을 찍고, 소켓이 10초 안에 안 생기면 로그 위치를 알리고 끝낸다.
+    static func tuiScript(cwd: String, sessionID: String, socket: String, failMarker: String, log: String,
+                          profile: CodexProfile, initialPrompt: String?) -> String {
+        let sandbox = profile == .orchestrator ? "read-only" : "workspace-write"
+        let timeout = "Codex 서버가 10초 안에 뜨지 않았습니다 — 로그: \(log)"
+        let wait = "i=0; while [ $i -lt 100 ]; do "
+            + "if [ -e \(Spawn.quoted(failMarker)) ]; then cat \(Spawn.quoted(failMarker)); exit 1; fi; "
+            + "if [ -S \(Spawn.quoted(socket)) ]; then break; fi; "
+            + "sleep 0.1; i=$((i+1)); done; "
+            + "if [ ! -S \(Spawn.quoted(socket)) ]; then printf '%s\\n' \(Spawn.quoted(timeout)); exit 1; fi"
+        var cmd = "exec codex --remote \(Spawn.quoted("unix://" + socket)) -C \(Spawn.quoted(cwd))"
+            + " -s \(Spawn.quoted(sandbox)) -a \(Spawn.quoted("on-request"))"
+            + " -c \(Spawn.quoted("check_for_update_on_startup=false"))"
+        if let prompt = initialPrompt?.trimmingCharacters(in: .whitespacesAndNewlines), !prompt.isEmpty {
+            cmd += " -- " + Spawn.quoted(prompt)
+        }
+        let launch = "cd \(Spawn.quoted(cwd)) && { \(wait); } && \(cmd)"
+        return (exports(sessionID) + [launch]).joined(separator: "; ")
+    }
+}
