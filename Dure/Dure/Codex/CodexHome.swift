@@ -20,6 +20,9 @@ enum CodexHome {
         root.appendingPathComponent(key.replacingOccurrences(of: ":", with: "-"))
     }
 
+    /// 레포 페인 home 의 두레 git 규칙 파일 이름(`CodexGitPolicy.rulesFile()`).
+    nonisolated static let dureRulesName = "dure.rules"
+
     /// 다시 맞출 때 지우는 것 — 두레가 만든 것(링크 · config 사본 · rules)과 서버가 매번 새로 만드는 폴더.
     /// hooks.json 은 두레가 만들지 않지만 있으면 사본 home 에서 훅이 돌므로 지운다.
     private nonisolated static let rebuilt: Set<String> = ["config.toml", "rules", "hooks.json"]
@@ -48,12 +51,17 @@ enum CodexHome {
         }
         try text.write(to: dir.appendingPathComponent("config.toml"), atomically: true, encoding: .utf8)
 
-        // rules/ — 실제 폴더. 레포 페인만 사용자 규칙 사본.
+        // rules/ — 실제 폴더. 레포 페인만 사용자 규칙 사본 + 두레 git 규칙(`dure.rules`). 조율자는 비운다.
         let rules = dir.appendingPathComponent("rules")
         try fm.createDirectory(at: rules, withIntermediateDirectories: true)
         if profile == .repoPane {
             let src = userHome.appendingPathComponent("rules")
             for name in (try? fm.contentsOfDirectory(atPath: src.path)) ?? [] where name.hasSuffix(".rules") {
+                // 같은 이름의 사용자 파일은 가져오지 않는다 — 두레 규칙이 이긴다(아래에서 쓴다).
+                if name == dureRulesName {
+                    NSLog("[Dure] Codex home: 사용자 규칙 \(name) 은 두레 규칙과 이름이 같아 가져오지 않습니다")
+                    continue
+                }
                 // 내용을 복사한다(링크를 따라간다). copyItem 은 링크를 링크로 복사해 "다시 묻지 않기" 가 전역 규칙에 쓰인다.
                 guard let data = try? Data(contentsOf: src.appendingPathComponent(name)) else {
                     NSLog("[Dure] Codex home: 규칙 파일을 읽지 못해 건너뜁니다 — \(name)")
@@ -61,6 +69,8 @@ enum CodexHome {
                 }
                 try data.write(to: rules.appendingPathComponent(name))
             }
+            try CodexGitPolicy.rulesFile().write(to: rules.appendingPathComponent(dureRulesName),
+                                                 atomically: true, encoding: .utf8)
         }
 
         // 나머지 최상위 항목은 사용자 home 으로 링크. hooks.json 은 만들지 않는다.

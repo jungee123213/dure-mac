@@ -114,6 +114,8 @@ struct CodexPaneRuntimeTests {
                       launcher: FakeLauncher, connection: FakeConnection = FakeConnection(),
                       entries: [CodexAppServer.HookEntry] = [], ready: Bool = true,
                       profile: CodexProfile = .repoPane, mcpSocket: String? = nil,
+                      gate: String? = "/A/Dure",
+                      gateRunnable: @escaping (String) -> Bool = { _ in true },
                       timer: FakeTimer = FakeTimer()) -> CodexPaneRuntime {
         let userHome = f.user
         return CodexPaneRuntime(sessionID: "ABCD1234-0000-0000-0000-000000000000", cwd: "/r/app", profile: profile,
@@ -127,6 +129,7 @@ struct CodexPaneRuntimeTests {
                          socketReady: { _ in ready },
                          socketTimeout: 0.3,
                          shimPath: "/x/hook", mcpSocket: mcpSocket,
+                         gateExecutable: gate, isExecutable: gateRunnable,
                          schedule: { timer.add($0, $1) })
     }
 
@@ -281,6 +284,95 @@ struct CodexPaneRuntimeTests {
         #expect(script.contains("\"\(key)\"={trusted_hash=\"sha256:abc\"}"))
         #expect(script.components(separatedBy: "hooks.state=").count == 2)   // 신뢰 표는 하나
         #expect(!script.contains("from-config"))   // 훅 자체는 config 사본에 있으므로 옮기지 않는다
+    }
+
+    // MARK: - 게이트 · 조율자 거절 (Task 4)
+
+    @Test func 레포_페인_서버에는_게이트_훅을_주고_거절_훅은_주지_않는다() async throws {
+        let f = try fixture(); defer { try? fm.removeItem(at: f.base) }
+        let launcher = FakeLauncher()
+        let rt = make(f, launcher: launcher, gate: "/Applications/My Apps/Dure.app/Contents/MacOS/Dure")
+        rt.start(onThreadStarted: { _ in }, onServerExit: {})
+        await rt.startup?.value
+        let script = try #require(launcher.scripts.first)
+        let expected = CodexHooks.configArguments(
+            CodexHooks.dureGroups(shimPath: "/x/hook", profile: .repoPane,
+                                  gateExecutable: "/Applications/My Apps/Dure.app/Contents/MacOS/Dure"))
+        for value in stride(from: 1, to: expected.count, by: 2).map({ expected[$0] }) {
+            #expect(script.contains("-c " + Spawn.quoted(value)))
+        }
+        #expect(script.contains("--dure-codex-gate"))
+        #expect(!script.contains("hookSpecificOutput"))
+        #expect(fm.fileExists(atPath: f.paths.home.appendingPathComponent("rules/dure.rules").path))
+        #expect(rt.failure == nil)
+    }
+
+    @Test func 조율자_서버에는_거절_훅을_주고_게이트는_주지_않는다() async throws {
+        let f = try fixture(); defer { try? fm.removeItem(at: f.base) }
+        let launcher = FakeLauncher()
+        // 조율자는 게이트를 쓰지 않으니 실행 파일 경로가 없어도 뜬다
+        let rt = make(f, launcher: launcher, profile: .orchestrator, gate: nil)
+        rt.start(onThreadStarted: { _ in }, onServerExit: {})
+        await rt.startup?.value
+        let script = try #require(launcher.scripts.first)
+        #expect(script.contains("hookSpecificOutput"))
+        #expect(script.contains("permission_request:0:0"))
+        #expect(!script.contains("permission_request:1:0"))
+        #expect(!script.contains("/x/hook'\\'' PermissionRequest"))   // shim PermissionRequest 없음(D-11)
+        #expect(!script.contains("--dure-codex-gate"))
+        #expect(!fm.fileExists(atPath: f.paths.home.appendingPathComponent("rules/dure.rules").path))
+        #expect(rt.failure == nil)
+    }
+
+    @Test func 게이트_실행_파일을_모르면_레포_페인은_띄우지_않고_실패_표식에_쓴다() async throws {
+        let f = try fixture(); defer { try? fm.removeItem(at: f.base) }
+        let launcher = FakeLauncher()
+        let rt = make(f, launcher: launcher, gate: nil)
+        rt.start(onThreadStarted: { _ in }, onServerExit: {})
+        await rt.startup?.value
+
+        #expect(launcher.scripts.isEmpty)
+        let marker = try String(contentsOfFile: f.paths.failMarker, encoding: .utf8)
+        #expect(marker.contains("게이트"))
+        #expect(rt.failure == marker.trimmingCharacters(in: .newlines))
+    }
+
+    @Test func 게이트_실행_파일을_실행할_수_없으면_레포_페인은_띄우지_않고_실패_표식에_쓴다() async throws {
+        let f = try fixture(); defer { try? fm.removeItem(at: f.base) }
+        // 실제 확인(`isRunnable`)으로 — 실행 권한 없는 파일 · 없는 파일
+        let plain = f.base.appendingPathComponent("Dure-plain")
+        try "x".write(to: plain, atomically: true, encoding: .utf8)
+        try fm.setAttributes([.posixPermissions: 0o644], ofItemAtPath: plain.path)
+        for path in [plain.path, f.base.appendingPathComponent("없음/Dure").path] {
+            try? fm.removeItem(atPath: f.paths.failMarker)
+            let launcher = FakeLauncher()
+            let rt = make(f, launcher: launcher, gate: path, gateRunnable: CodexPaneRuntime.isRunnable)
+            rt.start(onThreadStarted: { _ in }, onServerExit: {})
+            await rt.startup?.value
+            #expect(launcher.scripts.isEmpty)
+            let marker = try String(contentsOfFile: f.paths.failMarker, encoding: .utf8)
+            #expect(marker.contains("게이트") && marker.contains(path))
+            #expect(rt.failure == marker.trimmingCharacters(in: .newlines))
+        }
+        // 실행 권한이 있으면 뜬다
+        try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: plain.path)
+        let launcher = FakeLauncher()
+        let rt = make(f, launcher: launcher, gate: plain.path, gateRunnable: CodexPaneRuntime.isRunnable)
+        rt.start(onThreadStarted: { _ in }, onServerExit: {})
+        await rt.startup?.value
+        #expect(launcher.scripts.count == 1)
+        #expect(rt.failure == nil)
+        rt.stop()
+    }
+
+    @Test func 조율자는_게이트_실행_파일_확인을_하지_않는다() async throws {
+        let f = try fixture(); defer { try? fm.removeItem(at: f.base) }
+        let launcher = FakeLauncher()
+        let rt = make(f, launcher: launcher, profile: .orchestrator, gate: "/없음/Dure", gateRunnable: { _ in false })
+        rt.start(onThreadStarted: { _ in }, onServerExit: {})
+        await rt.startup?.value
+        #expect(launcher.scripts.count == 1)
+        #expect(rt.failure == nil)
     }
 
     @Test func 버전이_낮으면_실패_표식에_이유를_쓰고_서버를_띄우지_않는다() async throws {

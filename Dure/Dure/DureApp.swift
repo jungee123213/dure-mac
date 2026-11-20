@@ -6,6 +6,8 @@ import SwiftUI
 @main
 enum DureMain {
     static func main() {
+        // Codex PreToolUse 게이트 — UI · DB 를 만들기 전에, 테스트 호스트 분기보다도 먼저.
+        if CommandLine.arguments.contains(CodexGateMain.flag) { CodexGateMain.run() }
         if TestHost.isActive { TestHostApp.main() } else { DureApp.main() }
     }
 }

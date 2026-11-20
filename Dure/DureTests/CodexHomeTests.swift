@@ -74,6 +74,36 @@ struct CodexHomeTests {
         #expect(!isLink(r))
     }
 
+    @Test func 레포_페인_home_에_dure_rules_를_쓴다() throws {
+        let f = try fixture(); defer { try? fm.removeItem(at: f.base) }
+        try CodexHome.prepare(profile: .repoPane, cwd: "/r/a", userHome: f.user, into: f.dir)
+        let rules = f.dir.appendingPathComponent("rules/dure.rules")
+        #expect(!isLink(rules))
+        #expect(try String(contentsOf: rules, encoding: .utf8) == CodexGitPolicy.rulesFile())
+        // 사용자 규칙도 그대로 같이 있다
+        #expect(fm.fileExists(atPath: f.dir.appendingPathComponent("rules/default.rules").path))
+    }
+
+    @Test func 사용자에게_같은_이름의_dure_rules_가_있어도_두레_것이_이긴다() throws {
+        let f = try fixture(); defer { try? fm.removeItem(at: f.base) }
+        try "prefix_rule(pattern=[\"git\"], decision=\"allow\")\n"
+            .write(to: f.user.appendingPathComponent("rules/dure.rules"), atomically: true, encoding: .utf8)
+        try CodexHome.prepare(profile: .repoPane, cwd: "/r/a", userHome: f.user, into: f.dir)
+        #expect(try String(contentsOf: f.dir.appendingPathComponent("rules/dure.rules"), encoding: .utf8)
+                == CodexGitPolicy.rulesFile())
+        // 사용자 파일은 건드리지 않는다
+        #expect(try String(contentsOf: f.user.appendingPathComponent("rules/dure.rules"), encoding: .utf8)
+                .hasPrefix("prefix_rule(pattern=[\"git\"]"))
+    }
+
+    @Test func 조율자_home_에는_dure_rules_가_없다() throws {
+        let f = try fixture(); defer { try? fm.removeItem(at: f.base) }
+        try CodexHome.prepare(profile: .repoPane, cwd: "/r/a", userHome: f.user, into: f.dir)
+        try CodexHome.prepare(profile: .orchestrator, cwd: "/r/a", userHome: f.user, into: f.dir)
+        #expect(!exists(f.dir.appendingPathComponent("rules/dure.rules")))
+        #expect(try fm.contentsOfDirectory(atPath: f.dir.appendingPathComponent("rules").path).isEmpty)
+    }
+
     @Test func 나머지는_사용자_home_으로_링크된다() throws {
         let f = try fixture(); defer { try? fm.removeItem(at: f.base) }
         try CodexHome.prepare(profile: .repoPane, cwd: "/r/a", userHome: f.user, into: f.dir)
