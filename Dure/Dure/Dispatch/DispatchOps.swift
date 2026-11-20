@@ -125,6 +125,15 @@ enum DispatchOps {
         }
     }
 
+    /// 전달로 찍었지만 읽히지 않은 relay 를 큐로 되돌린다(Codex 조율자 턴이 한도로 실패, D-46). 들어온 순서(`created_at`)는 그대로다.
+    static func requeueRelays(_ ids: [String], in db: Database) throws {
+        for id in ids {
+            guard var r = try Relay.fetchOne(db, key: id), r.state == .delivered else { continue }
+            r.state = .queued; r.deliveredAt = nil
+            try r.update(db)
+        }
+    }
+
     /// 최신이 먼저. `created_at` 은 초 단위라 같은 초는 rowid 로 가른다 — 대시보드 카드가 이걸 뒤집어 시간순으로 그린다.
     static func relays(workspaceID: String, in db: Database) throws -> [Relay] {
         try Relay.filter(Column("workspace_id") == workspaceID).order(Column("created_at").desc, Column.rowID.desc).fetchAll(db)

@@ -117,8 +117,47 @@ enum DispatchBody {
         case .answerFailure: head = seq.map { "답 전달 실패 (배분 #\($0), \(time))" } ?? "답 전달 실패 (\(time))"
         case .report:     head = seq.map { "보고 (배분 #\($0), \(time))" } ?? "보고 (\(time))"
         case .question:   head = seq.map { "질문 (배분 #\($0), \(time))" } ?? "질문 (\(time))"
+        case .limit:
+            // 계정 단위 일이라 레포 이름을 달지 않는다(조율자 페인의 한도 실패면 레포가 없다).
+            let limitHead = seq.map { "Codex 한도 (배분 #\($0), \(time))" } ?? "Codex 한도 (\(time))"
+            return "[두레] \(limitHead)\n\(body)"
         }
         return "[두레] ‹\(repoName)› \(head)\n\(body)"
+    }
+
+    // MARK: - Codex 한도 (4단계, D-46)
+
+    /// 한도가 찼을 때 조율자에게 가는 글. 조율자가 Codex 면 이 글도 풀린 뒤에 풀림 안내와 한 묶음으로 간다.
+    static func limitNotice(until: Int, timeZone: TimeZone = .current) -> String {
+        "Codex 사용 한도가 찼다. \(hourMinute(until, timeZone: timeZone)) 에 다시 확인한다 — Codex 페인 배분은 그때까지 큐에 쌓인다. "
+            + "Claude 페인은 그대로 간다. 한도로 끊긴 배분은 실패로 닫지 않고, 풀리면 두레가 그 페인에 이어서 하라고 다시 보낸다."
+    }
+
+    /// 풀렸을 때 조율자에게 가는 글.
+    static let limitReleased = "Codex 한도가 풀렸다 — 멈춘 배분을 다시 보낸다."
+
+    /// Codex 조율자의 한도 실패 턴에서 되돌린 relay 를 다시 실은 묶음의 첫 줄.
+    static let limitResent = "[두레] 앞 묶음 일부는 한도로 끊긴 턴에 넘긴 것을 다시 보낸다 — 이미 dispatch · answer 한 것은 tasks 로 확인하고 다시 하지 않는다."
+
+    /// 한도로 끊긴 배분을 리셋 뒤 그 페인에 다시 보내는 글. 끊긴 턴이 첫 모델 호출에서 실패했으면 에이전트는 아무것도 안 했으므로
+    /// **원래 배분 전문**을 다시 싣는다(j-stage4 2절). 이미 한 일이 있으면 그 뒤부터 하게 머리에 적는다.
+    static func resumeAfterLimit(_ d: Dispatch, repoName: String, kind: AgentKind = .codex) -> String {
+        """
+        [두레] 배분 #\(d.seq) 이어 하기 — Codex 한도가 풀렸다
+        앞 턴이 한도로 끊겼다 — 이어서 하라. 이미 한 일(이슈 · 브랜치 · 커밋 · PR)이 있으면 git status · git log 로 확인하고 그 뒤부터 한다. 이미 만든 이슈 · PR 을 다시 만들지 않는다.
+        아래는 원래 배분 전문이다.
+
+        \(dispatch(d, repoName: repoName, kind: kind))
+        """
+    }
+
+    /// `H:mm`(예: 9:05 · 14:07). 테스트는 시간대를 넣는다.
+    static func hourMinute(_ epoch: Int, timeZone: TimeZone = .current) -> String {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = timeZone
+        f.dateFormat = "H:mm"
+        return f.string(from: Date(timeIntervalSince1970: TimeInterval(epoch)))
     }
 
     /// 조율자의 답을 레포 페인이 받는 글로. 질문은 첫 줄만, 120자까지.

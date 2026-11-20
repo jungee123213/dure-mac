@@ -52,6 +52,7 @@ enum DispatchPresentation {
         case .question: "질문"
         case .failure: "실패"
         case .answerFailure: "답 전달 실패"
+        case .limit: "Codex 한도"
         }
     }
 

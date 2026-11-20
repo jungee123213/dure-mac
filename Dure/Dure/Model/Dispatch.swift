@@ -70,6 +70,8 @@ enum RelayKind: String, Codable {
     case completion, report, question, failure
     /// 조율자 답을 페인에 못 전했다(이슈 #43) — 배분 자체의 실패(`failure`)와 구별한다. TEXT 칸이라 마이그레이션이 없다.
     case answerFailure
+    /// Codex 계정 한도로 전달을 멈춤 · 다시 시작함(4단계, D-46). TEXT 칸이라 마이그레이션이 없다.
+    case limit
 }
 
 enum RelayState: String, Codable {
