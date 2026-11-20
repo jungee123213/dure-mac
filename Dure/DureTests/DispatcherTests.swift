@@ -8,12 +8,24 @@ import Testing
 @MainActor
 struct DispatcherTests {
 
-    final class FakeInbox: InboxSending {
-        var sent: [(session: String, content: String)] = []
+    /// 출구 가짜 — 받은 주소를 그대로 적는다. `session` 은 Claude 면 세션 id, Codex 면 스레드 id.
+    final class FakeMessaging: PaneMessaging {
+        struct Sent {
+            var address: PaneAddress
+            var content: String
+            var session: String { address.sessionKey }
+        }
+        var sent: [Sent] = []
         var failNext = 0
-        func send(_ content: String, toClaudeSession id: String) throws {
-            if failNext > 0 { failNext -= 1; throw Inbox.Problem.noSocket }
-            sent.append((id, content))
+        func send(_ content: String, to address: PaneAddress) throws {
+            if failNext > 0 {
+                failNext -= 1
+                switch address {
+                case .claude: throw Inbox.Problem.noSocket
+                case .codex: throw CodexQueueSender.Problem.exit(1, "failed to connect")
+                }
+            }
+            sent.append(Sent(address: address, content: content))
         }
     }
 
@@ -22,14 +34,14 @@ struct DispatcherTests {
     final class World {
         var repoPanes: [String: Dispatcher.PaneView] = [:]
         var orch: [String: Dispatcher.PaneView] = [:]
-        let inbox = FakeInbox()
+        let inbox = FakeMessaging()
         var clock = 1_000
         let db: DatabaseQueue
         let repoA = Repo(id: "r1", workspaceId: "w1", path: "/a/android", label: "android")
         let repoB = Repo(id: "r2", workspaceId: "w1", path: "/a/ios")
-        lazy var d = Dispatcher(db: db, inbox: inbox, lookups: .init(
-            repoPane: { [unowned self] in self.repoPanes[$0] ?? .init(started: false, state: nil, claudeSessionID: nil) },
-            orchestratorPane: { [unowned self] in self.orch[$0] ?? .init(started: false, state: nil, claudeSessionID: nil) },
+        lazy var d = Dispatcher(db: db, messaging: inbox, lookups: .init(
+            repoPane: { [unowned self] in self.repoPanes[$0] ?? .init(started: false, state: nil, address: nil) },
+            orchestratorPane: { [unowned self] in self.orch[$0] ?? .init(started: false, state: nil, address: nil) },
             repoName: { [unowned self] in $0 == "r1" ? "android" : "ios" }),
             now: { [unowned self] in self.clock })
 
@@ -42,10 +54,10 @@ struct DispatcherTests {
             }
         }
         func idle(_ repo: String, session: String = "cc-\(UUID().uuidString.prefix(4))") {
-            repoPanes[repo] = .init(started: true, state: .done, claudeSessionID: session)
+            repoPanes[repo] = .init(started: true, state: .done, address: .claude(session: session))
         }
-        func busy(_ repo: String) { repoPanes[repo] = .init(started: true, state: .running, claudeSessionID: "cc") }
-        func orchIdle() { orch["w1"] = .init(started: true, state: .done, claudeSessionID: "cc-orch") }
+        func busy(_ repo: String) { repoPanes[repo] = .init(started: true, state: .running, address: .claude(session: "cc")) }
+        func orchIdle() { orch["w1"] = .init(started: true, state: .done, address: .claude(session: "cc-orch")) }
         /// 레포 페인의 `ask_orchestrator` — 그 페인의 열린 배분에 묶인 질문 relay.
         func ask(_ repo: String, _ text: String) throws {
             try d.relay(workspaceID: "w1", dispatchID: d.outstandingDispatchID(repoID: repo), repoID: repo,
@@ -147,19 +159,80 @@ struct DispatcherTests {
         #expect(try w.db.read { try Relay.fetchCount($0) } == 0)   // 배분 아닌 턴의 Stop 은 보고하지 않는다
     }
 
-    /// Codex 단계 1 Review Focus 5 — Codex 페인은 `claudeSessionID: nil` 로 보인다. 떠 있고 놀고 있어도
-    /// 소켓 주소가 없으니 큐에 남아야 한다(전달은 단계 2). 이 테스트는 지금 코드로도 통과한다 — 고정 테스트다.
-    @Test func 시작했지만_CLI_세션_주소가_없는_페인으로는_배분이_나가지_않는다() throws {
+    /// 주소(Claude 세션 · Codex 서버 소켓 + 스레드)를 아직 모르는 페인 — 떠 있고 놀고 있어도 큐에 남는다.
+    /// Codex 페인은 스레드 주소가 잡히기 전(기동 직후 · Task 4 연결 전)이 이 경우다. (1단계 Review Focus 5 의 고정 테스트를 새 필드로)
+    @Test func 주소가_없는_페인으로는_나가지_않는다() throws {
         let w = try World()
-        w.repoPanes["r1"] = .init(started: true, state: .started, claudeSessionID: nil)
+        w.repoPanes["r1"] = .init(started: true, state: .started, address: nil)
         let out = try w.d.enqueue(workspaceID: "w1", repo: w.repoA, title: nil, instruction: "x", toolUseId: nil)
         #expect(out == .queuedBusy(seq: 1))
         #expect(w.inbox.sent.isEmpty)
         #expect(try w.db.read { try Dispatch.fetchOne($0) }?.state == .queued)
-        w.repoPanes["r1"] = .init(started: true, state: .done, claudeSessionID: nil)
+        w.repoPanes["r1"] = .init(started: true, state: .done, address: nil)
         w.d.didStop(repoID: "r1", lastMessage: "끝")
         #expect(w.inbox.sent.isEmpty)
         #expect(w.d.queueCount(repoID: "r1") == 1)
+    }
+
+    // MARK: - Codex 페인 (2단계 Task 3)
+
+    func codexIdle(_ w: World, _ repo: String = "r1", thread: String = "T1") {
+        w.repoPanes[repo] = .init(started: true, state: .done, address: .codex(socket: "/s", thread: thread))
+    }
+
+    @Test func Codex_페인에는_codex_주소로_배분이_간다() throws {
+        let w = try World(); codexIdle(w)
+        let out = try w.d.enqueue(workspaceID: "w1", repo: w.repoA, title: nil, instruction: "파랑으로", toolUseId: nil)
+        #expect(out == .delivered(seq: 1))
+        #expect(w.inbox.sent.count == 1)
+        #expect(w.inbox.sent[0].address == .codex(socket: "/s", thread: "T1"))
+        #expect(w.inbox.sent[0].content.hasPrefix("[두레] 조율자 배분 #1 — android\n파랑으로\n"))
+        // SessionStart 의 session_id 와 같은 공간 — Codex 는 스레드 id 가 곧 session_id 다.
+        #expect(try w.db.read { try Dispatch.fetchOne($0) }?.deliveredSession == "T1")
+    }
+
+    @Test func Claude_조율자에서_Codex_페인으로_가는_배분과_Codex_페인의_보고가_각자_출구로_간다() throws {
+        let w = try World(); codexIdle(w); w.orchIdle()
+        _ = try w.d.enqueue(workspaceID: "w1", repo: w.repoA, title: nil, instruction: "x", toolUseId: nil)
+        #expect(try w.d.complete(repoID: "r1", summary: "다 했습니다") == 1)
+        #expect(w.inbox.sent.count == 2)
+        #expect(w.inbox.sent[0].address == .codex(socket: "/s", thread: "T1"))
+        #expect(w.inbox.sent[1].address == .claude(session: "cc-orch"))
+        #expect(w.inbox.sent[1].content.contains("배분 #1 끝남"))
+        // Codex 페인의 질문에 온 조율자 답도 Codex 출구로 간다.
+        w.d.didStop(repoID: "r1", lastMessage: nil)
+        _ = try w.d.enqueue(workspaceID: "w1", repo: w.repoA, title: nil, instruction: "y", toolUseId: nil)
+        try w.ask("r1", "어느 쪽?")
+        w.d.didStop(repoID: "r1", lastMessage: "어느 쪽?")
+        w.d.didStopOrchestrator(workspaceID: "w1")
+        #expect(try w.d.answer(workspaceID: "w1", repo: w.repoA, body: "왼쪽") == .delivered)
+        let last = try #require(w.inbox.sent.last)
+        #expect(last.address == .codex(socket: "/s", thread: "T1"))
+        #expect(last.content.hasPrefix("[두레] 조율자 답 (배분 #2)"))
+    }
+
+    @Test func Codex_페인이_새_스레드를_열면_열린_배분이_실패로_닫힌다() throws {
+        let w = try World(); codexIdle(w, thread: "T1"); w.orchIdle()
+        _ = try w.d.enqueue(workspaceID: "w1", repo: w.repoA, title: nil, instruction: "x", toolUseId: nil)
+        // `/new` — 새 스레드 id + source "startup"
+        codexIdle(w, thread: "T2")
+        w.d.didStart(repoID: "r1", session: "T2", source: "startup")
+        let row = try w.db.read { try Dispatch.fetchOne($0) }
+        #expect(row?.state == .failed && row?.failure == "세션 재시작")
+        #expect(w.inbox.sent.last?.address == .claude(session: "cc-orch"))
+        #expect(w.inbox.sent.last?.content.contains("배분 #1 실패") == true)
+    }
+
+    @Test func Codex_전달이_실패하면_재시도_횟수가_는다() throws {
+        let w = try World(); codexIdle(w); w.orchIdle()
+        w.inbox.failNext = 1
+        #expect(try w.d.enqueue(workspaceID: "w1", repo: w.repoA, title: nil, instruction: "x", toolUseId: nil)
+                == .deliveryFailed(seq: 1, attempts: 1))
+        #expect(try w.db.read { try Dispatch.fetchOne($0) }?.state == .queued)
+        w.d.retryPending()
+        let row = try w.db.read { try Dispatch.fetchOne($0) }
+        #expect(row?.state == .delivered && row?.attempts == 1 && row?.deliveredSession == "T1")
+        #expect(w.inbox.sent.count == 1 && w.inbox.sent[0].address == .codex(socket: "/s", thread: "T1"))
     }
 
     @Test func 안_뜬_페인은_큐에_두고_시작할_때_싣는다() throws {
@@ -304,7 +377,7 @@ struct DispatcherTests {
 
     @Test func 조율자가_일하는_중이면_Stop_뒤에_올린다() throws {
         let w = try World(); w.idle("r1")
-        w.orch["w1"] = .init(started: true, state: .running, claudeSessionID: "cc-orch")
+        w.orch["w1"] = .init(started: true, state: .running, address: .claude(session: "cc-orch"))
         try w.d.relay(workspaceID: "w1", dispatchID: nil, repoID: "r1", kind: .report, body: "중간")
         #expect(w.inbox.sent.isEmpty)
         w.orchIdle(); w.d.didStopOrchestrator(workspaceID: "w1")
@@ -402,7 +475,7 @@ struct DispatcherTests {
     @Test func 앱_시작_복구() throws {
         let w = try World(); w.idle("r1")
         _ = try w.d.enqueue(workspaceID: "w1", repo: w.repoA, title: nil, instruction: "x", toolUseId: nil)
-        let fresh = Dispatcher(db: w.db, inbox: w.inbox, lookups: w.d.lookups, now: { 5 })
+        let fresh = Dispatcher(db: w.db, messaging: w.inbox, lookups: w.d.lookups, now: { 5 })
         w.d.didStop(repoID: "r1", lastMessage: "질문")         // 응답 대기도 앱이 꺼지면 영영 안 닫힌다
         fresh.recoverOnLaunch()
         #expect(try w.db.read { try Dispatch.fetchOne($0) }?.failure == "앱 종료")
@@ -473,7 +546,7 @@ struct DispatcherTests {
         let w = try World()
         _ = try w.d.enqueue(workspaceID: "w1", repo: w.repoA, title: nil, instruction: "첫", toolUseId: nil)
         _ = try #require(w.d.initialPrompt(forRepo: "r1"))
-        w.repoPanes["r1"] = .init(started: true, state: .started, claudeSessionID: "cc-new")
+        w.repoPanes["r1"] = .init(started: true, state: .started, address: .claude(session: "cc-new"))
         w.d.didStart(repoID: "r1", session: "cc-new", source: "startup")
         try w.ask("r1", "어느 쪽?")
         #expect(try w.d.answer(workspaceID: "w1", repo: w.repoA, body: "왼쪽") == .queuedBusy)

@@ -95,12 +95,52 @@ nonisolated enum Inbox {
     }
 }
 
-/// `Dispatcher` 가 쓰는 출구. 테스트는 가짜를 꽂는다.
-protocol InboxSending {
-    func send(_ content: String, toClaudeSession id: String) throws
+/// 받는 페인의 주소 — 페인 종류(CLI)마다 다르다.
+/// `nonisolated` 인 이유 — 기본 격리(MainActor)면 `Equatable` 적합성도 메인액터에 묶여 `#expect` 에서 Swift 6 경고가 난다.
+nonisolated enum PaneAddress: Equatable {
+    /// Claude Code — 레지스트리(`~/.claude/sessions`)에서 인박스 소켓을 찾는 열쇠.
+    case claude(session: String)
+    /// Codex — 그 페인 전용 app-server 소켓과 스레드 id.
+    case codex(socket: String, thread: String)
+
+    /// `dispatch.delivered_session` 에 적는 값. `SessionStart` 훅의 `session_id` 와 같은 공간이다 —
+    /// Codex 는 스레드 id 가 곧 `session_id` 라 `/new`(새 스레드 · source "startup")가 열린 배분을 실패로 닫는다.
+    var sessionKey: String {
+        switch self {
+        case .claude(let session): session
+        case .codex(_, let thread): thread
+        }
+    }
 }
 
-struct LiveInbox: InboxSending {
+/// `Dispatcher` 가 쓰는 출구. 테스트는 가짜를 꽂는다. 던지면 그 배분 · 답의 재시도 횟수에 든다.
+protocol PaneMessaging {
+    func send(_ content: String, to address: PaneAddress) throws
+}
+
+/// 실제 출구 — Claude 는 인박스 소켓, Codex 는 `codex queue`(`CodexQueueSender`).
+struct LivePaneMessaging: PaneMessaging {
+    var inbox = LiveInbox()
+    let codexToolchain: CodexToolchainResolver
+    var runner: ArgvRunning = LiveArgvRunner()
+
+    func send(_ content: String, to address: PaneAddress) throws {
+        switch address {
+        case .claude(let session):
+            try inbox.send(content, toClaudeSession: session)
+        case .codex(let socket, let thread):
+            let toolchain = codexToolchain.current
+            // 아직 못 구했으면(또는 지난 구하기가 실패했으면) 다시 구하기를 걸어 두고 던진다 — 재시도 틱 때는 간다.
+            if toolchain == nil { codexToolchain.start() }
+            try CodexQueueSender(codexPath: toolchain?.codexPath,
+                                 environment: toolchain.map { CodexQueueSender.environment(loginPath: $0.path) } ?? [:],
+                                 runner: runner)
+                .send(content, socket: socket, thread: thread)
+        }
+    }
+}
+
+struct LiveInbox {
     var registry: URL = Inbox.defaultRegistry
 
     func send(_ content: String, toClaudeSession id: String) throws {

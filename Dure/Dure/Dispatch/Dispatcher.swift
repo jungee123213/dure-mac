@@ -6,7 +6,7 @@ import GRDB
 /// 들어오는 것: 조율자의 `dispatch`(enqueue) · 레포의 `complete`/`report`/`ask`(complete · relay) · 사람의 [완료로 닫기](closeByHuman)
 /// · 훅(didStart · didStop · didDie) · 앱 시작(recover).
 /// **완료는 레포 에이전트가 `complete` 로 선언한다**(이슈 #24). 턴이 끝난 것(Stop)은 완료가 아니다 — 사람에게 묻고 멈췄을 수 있다.
-/// 나가는 것: 인박스 소켓(`InboxSending`) 또는 기동 프롬프트(`initialPrompt`). 판단은 `DispatchRules`, 행은 `DispatchOps`.
+/// 나가는 것: 받는 페인 종류에 맞는 출구(`PaneMessaging` — Claude 인박스 소켓 · Codex `codex queue`) 또는 기동 프롬프트(`initialPrompt`). 판단은 `DispatchRules`, 행은 `DispatchOps`.
 ///
 /// 스토어의 상태는 `Lookups` 클로저로 받는다 — 스토어는 실제 DB 를 쓰므로 여기서 직접 잡으면 테스트가 안 된다.
 @MainActor
@@ -15,8 +15,8 @@ final class Dispatcher {
     struct PaneView {
         var started: Bool
         var state: AgentState?
-        /// 현재 cc_session_id. 레지스트리에서 소켓을 찾는 열쇠.
-        var claudeSessionID: String?
+        /// 메시지를 넣을 곳. Claude 는 현재 cc_session_id, Codex 는 서버 소켓 + 스레드 id. 모르면 nil — 큐에 남는다.
+        var address: PaneAddress?
     }
 
     struct Lookups {
@@ -44,7 +44,7 @@ final class Dispatcher {
     }
 
     private let db: DatabaseQueue
-    private let inbox: InboxSending
+    private let messaging: PaneMessaging
     let lookups: Lookups
     private let now: () -> Int
     /// 조율자에게 묶음을 넣고 그 턴의 `Stop` 을 아직 못 본 워크스페이스. 레포의 `outstanding` 과 같은 가드다 —
@@ -57,9 +57,9 @@ final class Dispatcher {
     /// argv 로 실은 배분은 넣지 않는다. 메모리에만 둔다 — 앱을 다시 켜면 `recoverOnLaunch` 가 열린 배분을 닫고 가드는 비어 있다.
     private var repoAwaitingStop: Set<String> = []
 
-    init(db: DatabaseQueue, inbox: InboxSending, lookups: Lookups,
+    init(db: DatabaseQueue, messaging: PaneMessaging, lookups: Lookups,
          now: @escaping () -> Int = { Int(Date().timeIntervalSince1970) }) {
-        self.db = db; self.inbox = inbox; self.lookups = lookups; self.now = now
+        self.db = db; self.messaging = messaging; self.lookups = lookups; self.now = now
     }
 
     // MARK: - 들어오는 것
@@ -239,11 +239,11 @@ final class Dispatcher {
             }
             guard !repoAwaitingStop.contains(repoID),
                   DispatchRules.isIdle(started: pane.started, state: pane.state, hasOutstanding: open != nil),
-                  let session = pane.claudeSessionID,
+                  let address = pane.address,
                   let next = try db.read({ try DispatchOps.queued(repoID: repoID, in: $0) }).first else { return }
             let body = DispatchBody.dispatch(next, repoName: lookups.repoName(repoID))
             do {
-                try inbox.send(body, toClaudeSession: session)
+                try messaging.send(body, to: address)
             } catch {
                 let n = try db.write { try DispatchOps.bumpAttempts(next.id, in: $0) }
                 NSLog("[Dure] 배분 #\(next.seq) 전달 실패 \(n)회: \(error)")
@@ -257,8 +257,9 @@ final class Dispatcher {
             }
             repoAwaitingStop.insert(repoID)
             // 보낸 뒤의 기록 실패는 "안 보냄" 이 아니다 — 재시도로 몰면 같은 지시가 두 번 간다. 로그만 남긴다.
+            // 세션 열쇠(Claude 세션 · Codex 스레드)를 적는다 — 다음 `SessionStart` 의 `session_id` 와 견준다.
             do {
-                try db.write { try DispatchOps.markDelivered(next.id, session: session, now: now(), in: $0) }
+                try db.write { try DispatchOps.markDelivered(next.id, session: address.sessionKey, now: now(), in: $0) }
             } catch { NSLog("[Dure] 배분 #\(next.seq) 보냈지만 기록 실패: \(error)") }
         } catch { NSLog("[Dure] 배분 전달 실패: \(error)") }
     }
@@ -289,11 +290,11 @@ final class Dispatcher {
         // 열린 배분이 `delivered` 면 그 턴(argv 첫 턴 포함)이 아직 돈다 — `canAnswer` 가 막는다(검토 2).
         guard !repoAwaitingStop.contains(repoID),
               DispatchRules.canAnswer(started: pane.started, state: pane.state, open: open?.state),
-              let session = pane.claudeSessionID else { return }
+              let address = pane.address else { return }
         let question = try a.questionId.flatMap { id in try db.read { try Relay.fetchOne($0, key: id)?.body } }
         let body = DispatchBody.answer(seq: bound?.seq, question: question, body: a.body)
         do {
-            try inbox.send(body, toClaudeSession: session)
+            try messaging.send(body, to: address)
         } catch {
             let n = try db.write { try DispatchOps.bumpAnswerAttempts(a.id, in: $0) }
             NSLog("[Dure] 조율자 답 전달 실패 \(n)회: \(error)")
@@ -320,10 +321,10 @@ final class Dispatcher {
             let pane = lookups.orchestratorPane(workspaceID)
             guard DispatchRules.isIdle(started: pane.started, state: pane.state,
                                        hasOutstanding: orchestratorAwaitingStop.contains(workspaceID)),
-                  let session = pane.claudeSessionID else { return }
+                  let address = pane.address else { return }
             let queued = try db.read { try DispatchOps.queuedRelays(workspaceID: workspaceID, in: $0) }
             guard !queued.isEmpty else { return }
-            try inbox.send(DispatchBody.bundle(try queued.map(render)), toClaudeSession: session)
+            try messaging.send(DispatchBody.bundle(try queued.map(render)), to: address)
             // 보냈으면 그 턴이 끝날 때까지 다음 묶음은 쌓아 둔다(아래 기록이 실패해도 보낸 것은 보낸 것이다).
             orchestratorAwaitingStop.insert(workspaceID)
             try db.write { try DispatchOps.markRelaysDelivered(queued.map(\.id), now: now(), in: $0) }

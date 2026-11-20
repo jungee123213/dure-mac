@@ -50,14 +50,16 @@ final class DureStore {
     private(set) var paneProblems: [String: String] = [:]
     /// 이슈 #30 — 레포 경로로 연 바깥 터미널(iTerm). 두레가 관할하지 않고 창 번호만 기억한다.
     let shells = RepoShells()
-    /// 단계 4 — 배분 흐름. 스토어 상태는 클로저로 넘긴다(테스트 가능성).
+    /// Codex 2단계 — `codex queue` 에 쓸 `codex` 경로 · 로그인 PATH. 첫 Codex 페인을 띄울 때 메인 밖에서 한 번 구한다.
+    @ObservationIgnored private let codexToolchain = CodexToolchainResolver()
+    /// 단계 4 — 배분 흐름. 스토어 상태는 클로저로 넘긴다(테스트 가능성). 출구는 받는 페인 종류로 고른다.
     @ObservationIgnored private(set) lazy var dispatcher = Dispatcher(
-        db: AppDatabase.queue, inbox: LiveInbox(),
+        db: AppDatabase.queue, messaging: LivePaneMessaging(codexToolchain: codexToolchain),
         lookups: .init(
             // 레포 **id** 를 받는다. 모르는 id 면 "안 뜬 페인" 으로 답해 큐에 남긴다.
             repoPane: { [unowned self] id in
                 guard let r = self.repos.first(where: { $0.id == id }) else {
-                    return .init(started: false, state: nil, claudeSessionID: nil)
+                    return .init(started: false, state: nil, address: nil)
                 }
                 return self.paneView(.repo(r))
             },
@@ -528,12 +530,12 @@ final class DureStore {
 
     private func paneView(_ target: PaneTarget) -> Dispatcher.PaneView {
         let session = sessionIDs[target.key]
-        // Codex 단계 1 — Codex 페인으로는 배분을 내보내지 않는다(전달은 단계 2). 주소가 없으면 큐에 남는다.
+        // Codex — 주소(서버 소켓 + 스레드 id) 연결은 2단계 Task 4. 그때까지는 주소가 없어 큐에 남는다(1단계 동작).
         if agentKind(for: target) == .codex {
-            return .init(started: hasStarted(target), state: state(for: target), claudeSessionID: nil)
+            return .init(started: hasStarted(target), state: state(for: target), address: nil)
         }
         return .init(started: hasStarted(target), state: state(for: target),
-                     claudeSessionID: session.flatMap { currentSession(for: $0)?.ccSessionId })
+                     address: session.flatMap { currentSession(for: $0)?.ccSessionId }.map { .claude(session: $0) })
     }
 
     func queueCount(for target: PaneTarget) -> Int {
@@ -681,6 +683,8 @@ final class DureStore {
         // 지난 세션의 끝내기 요청이 남아 있으면 새 터미널이 뜨자마자 끝난다.
         if terminalEndRequests.contains(target.key) { terminalEndRequests.clear(target.key) }
         // Codex — 서버는 비동기로 뜬다. 페인은 지금처럼 바로 출발한다(TUI 스크립트가 소켓을 기다린다).
+        // 전달에 쓸 `codex` 경로 · PATH 도 이때 구하기 시작한다(앱 세션마다 한 번, 메인 밖). 스레드가 잡히기 전에 끝난다.
+        if agentKind(for: target) == .codex { codexToolchain.start() }
         if agentKind(for: target) == .codex { startCodex(target, sessionID: sessionID) }
         startedPanes.insert(target.key)
         // "지금 페인이 열려 있음" 이 지도에 반영돼야 한다.
