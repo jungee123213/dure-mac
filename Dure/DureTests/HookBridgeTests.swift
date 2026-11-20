@@ -39,7 +39,12 @@ struct HookBridgeTests {
     /// 프롬프트 전문은 길이가 무제한이고 상태 판정에 필요 없다. 어느 세션인지는
     /// 앱이 "가장 최근 SessionStart" 로 판정한다 (부록 A4 주석).
     @Test func 프롬프트_전문은_기록하지_않는다() {
-        #expect(HookBridge.shimSource.contains("UserPromptSubmit) BODY=\"$HEAD}\""))
+        #expect(HookBridge.shimSource.contains("UserPromptSubmit|PostToolUse) BODY=\"$HEAD}\""))
+    }
+
+    /// Codex 의 PostToolUse payload 에는 툴 출력 전문이 실려 크다.
+    @Test func shim_은_PostToolUse_의_payload_를_버린다() {
+        #expect(HookBridge.shimSource.contains("PostToolUse) BODY=\"$HEAD}\""))
     }
 
     @Test func 이벤트_디렉토리_경로() {

@@ -1,7 +1,7 @@
 import Foundation
 
 /// 앱이 띄우는 에이전트 종류.
-/// D-3 — 1차 구현은 Claude Code 뿐이고 Codex 는 자리만 열어둔다.
+/// 둘 다 띄운다. Codex 는 페인마다 app-server 를 거친다 (D-44).
 /// 이벤트 줄에 이 값이 들어가므로 **지금** 넣는다. 나중에 포맷을 바꾸면 이미 쌓인 줄과 섞인다.
 enum AgentKind: String, Codable, CaseIterable {
     case claude
@@ -17,8 +17,8 @@ enum AgentKind: String, Codable, CaseIterable {
 /// 그 결과 설계문서 Step 3 가 요구하던 백업·이어붙이기·제거 마커·멱등성 판정·
 /// 설치 여부 확인이 **전부 필요 없다.** 앱이 안 띄우면 훅 자체가 존재하지 않는다.
 ///
-/// ⚠️ Codex 는 세션 단위 훅 주입이 없고 `~/.codex/` 전역 설정뿐이다 (D-3).
-///    그쪽을 붙일 때는 이어붙이기 기계장치가 다시 필요해진다.
+/// Codex 도 세션에만 훅을 얹는다 — 서버를 `codex app-server -c hooks.*` 로 띄우고 신뢰 표(`hooks.state`)를
+/// 함께 준다(`CodexHooks`, D-44). 전역 `~/.codex/` 는 건드리지 않아 이어붙이기 기계장치가 필요 없다.
 enum HookBridge {
 
     // MARK: - 경로
@@ -91,8 +91,8 @@ enum HookBridge {
     /// - **stdin 을 파싱하지 않는다.** 받은 JSON 을 `payload` 값으로 그대로 끼워넣는다.
     ///   유효한 JSON 을 JSON 값 자리에 넣는 것이므로 이스케이프가 필요 없고,
     ///   에이전트가 나중에 필드를 추가해도 그대로 따라온다.
-    /// - **`UserPromptSubmit` 만 payload 를 버린다.** 거기에만 사용자가 친 프롬프트 전문이
-    ///   들어와 길이가 무제한이다. 상태 판정에는 "누가 언제 제출했나"면 충분하다.
+    /// - **`UserPromptSubmit` · `PostToolUse` 는 payload 를 버린다.** 앞쪽에는 사용자가 친 프롬프트 전문이,
+    ///   뒤쪽(Codex)에는 툴 출력 전문이 들어와 길이가 무제한이다. 상태 판정에는 "누가 언제 제출했나"면 충분하다.
     ///   어느 cc_session 인지는 앱이 "가장 최근 SessionStart" 로 판정한다 (부록 A4 주석).
     /// - **이벤트 하나당 파일 하나 + 원자적 rename.** 설계문서 부록 A2 는 `events.jsonl` 에
     ///   공유 append 하고 "단일 write + 4KB 이하면 실무적으로 안전"하다고 적었는데,
@@ -127,7 +127,7 @@ enum HookBridge {
     HEAD="{\"v\":1,\"ts\":\"$TS\",\"ev\":\"$EV\",\"agent_kind\":\"$KIND\",\"dure_session\":\"$DURE_SESSION\""
 
     case "$EV" in
-      UserPromptSubmit) BODY="$HEAD}" ;;
+      UserPromptSubmit|PostToolUse) BODY="$HEAD}" ;;
       *)                BODY="$HEAD,\"payload\":$PAYLOAD}" ;;
     esac
 

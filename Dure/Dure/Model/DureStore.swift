@@ -65,6 +65,11 @@ final class DureStore {
             repoName: { [unowned self] id in self.repos.first { $0.id == id }?.displayName ?? "?" }))
     /// 페인별 MCP 소켓 서버. 페인이 살아 있는 동안만.
     @ObservationIgnored private var mcpServers: [String: MCPServer] = [:]
+    /// Codex 페인(페인 키 → 그 페인의 전용 app-server). 페인이 살아 있는 동안만 — `markDead` 가 멈추고 뺀다.
+    @ObservationIgnored private var codexPanes: [String: CodexPaneRuntime] = [:]
+    /// 터미널에 끝내기를 요청한 페인(Codex 서버가 먼저 죽음). **관측 대상이다** — 뷰가 읽어 PTY 를 끝낸다.
+    /// 터미널이 끝나면 `onExit` → `markDead` 가 지운다.
+    private(set) var terminalEndRequests = PaneTermination.Requests()
     /// 스폰 스크립트 캐시. `initialPrompt` 는 큐 항목을 `delivered` 로 찍는 쓰기라 뷰가 그릴 때마다 부르지 않는다 — 페인당 한 번.
     @ObservationIgnored private var launchScripts: [String: String] = [:]
     /// 이슈 #23 — 감시자. 훅 두 가지만 넘긴다(수집 계기 · 실제 승인 프롬프트). 앱이 붙여 준다.
@@ -222,6 +227,7 @@ final class DureStore {
         for key in keys {
             startedPanes.remove(key)
             sessionIDs[key] = nil
+            codexPanes.removeValue(forKey: key)?.stop()
         }
         if selectedWorkspaceID == workspaceID { selectedWorkspaceID = nil }
         // 선택이 비었으면 load 가 다시 고른다. 저장값이 지운 워크스페이스라 첫 번째가 된다 (#38).
@@ -243,6 +249,8 @@ final class DureStore {
     }
 
     func removeRepo(_ repo: Repo) {
+        // 떠 있던 Codex 페인이면 서버를 끈다 — 뷰가 빠지며 TUI 는 닫히지만 서버는 두레 `Process` 라 남는다.
+        codexPanes.removeValue(forKey: PaneTarget.repo(repo).key)?.stop()
         do {
             _ = try AppDatabase.queue.write { try repo.delete($0) }
             load()
@@ -368,7 +376,7 @@ final class DureStore {
     }
 
     /// 그 페인을 실제로 띄운 CLI. agent 행에서 읽는다.
-    private func agentKind(for target: PaneTarget) -> AgentKind? {
+    func agentKind(for target: PaneTarget) -> AgentKind? {
         guard let session = sessionIDs[target.key],
               let agent = agents.first(where: { $0.dureSession == session }) else { return nil }
         return AgentKind(rawValue: agent.agentKind)
@@ -420,6 +428,12 @@ final class DureStore {
         // 다시 시작하면 `sessionID(for:)` 가 새 DURE_SESSION 과 새 agent 행을 만든다.
         guard let key = PaneReset.paneToReset(exitedSession: dureSession,
                                               sessionIDs: sessionIDs) else { return }
+        if terminalEndRequests.contains(key) { terminalEndRequests.clear(key) }
+        // Codex — 전용 서버를 끈다(TUI 가 끝났거나 서버가 먼저 끝났다). 시작하지 못한 이유는 시작 대기 화면에 남긴다.
+        if let codex = codexPanes.removeValue(forKey: key) {
+            if let why = codex.failure { paneProblems[key] = why }
+            codex.stop()
+        }
         // 단계 4 — 죽은 페인의 소켓을 닫고, 열려 있던 배분은 실패로 닫는다. 다시 시작하면 새 스크립트를 만든다.
         closeMCP(for: key)
         launchScripts[key] = nil
@@ -514,6 +528,10 @@ final class DureStore {
 
     private func paneView(_ target: PaneTarget) -> Dispatcher.PaneView {
         let session = sessionIDs[target.key]
+        // Codex 단계 1 — Codex 페인으로는 배분을 내보내지 않는다(전달은 단계 2). 주소가 없으면 큐에 남는다.
+        if agentKind(for: target) == .codex {
+            return .init(started: hasStarted(target), state: state(for: target), claudeSessionID: nil)
+        }
         return .init(started: hasStarted(target), state: state(for: target),
                      claudeSessionID: session.flatMap { currentSession(for: $0)?.ccSessionId })
     }
@@ -649,7 +667,8 @@ final class DureStore {
         }
         // agent 행을 먼저 만든다(ADR-17) — 소켓 이름도 이 세션 id 에서 나온다.
         // workspace.md 의 "열려 있음 (X)" 도 이 행의 agentKind 를 읽는다 (최종 리뷰 F4).
-        let sessionID = sessionID(for: target)
+        // 새 페인의 CLI 는 워크스페이스 기본값. 이미 행이 있으면 그 행의 종류를 따른다(sessionID 가 기존 값을 돌려준다).
+        let sessionID = sessionID(for: target, kind: defaultAgentKind(for: target))
         do {
             try openMCP(for: target, sessionID: sessionID)
             paneProblems[target.key] = nil
@@ -659,6 +678,10 @@ final class DureStore {
         }
         // 지난 기동의 스크립트가 남아 있으면 새 소켓·기동 프롬프트가 빠진 채 뜬다.
         launchScripts[target.key] = nil
+        // 지난 세션의 끝내기 요청이 남아 있으면 새 터미널이 뜨자마자 끝난다.
+        if terminalEndRequests.contains(target.key) { terminalEndRequests.clear(target.key) }
+        // Codex — 서버는 비동기로 뜬다. 페인은 지금처럼 바로 출발한다(TUI 스크립트가 소켓을 기다린다).
+        if agentKind(for: target) == .codex { startCodex(target, sessionID: sessionID) }
         startedPanes.insert(target.key)
         // "지금 페인이 열려 있음" 이 지도에 반영돼야 한다.
         refreshWorkspaceDoc(for: target.workspaceID)
@@ -680,10 +703,91 @@ final class DureStore {
         workspaces.first { $0.id == id }?.name ?? ""
     }
 
+    /// 새로 시작하는 페인의 CLI — 그 페인 워크스페이스의 "기본 CLI". 모르는 값이면 claude.
+    private func defaultAgentKind(for target: PaneTarget) -> AgentKind {
+        let raw = workspaces.first { $0.id == target.workspaceID }?.defaultAgentKind ?? ""
+        return AgentKind(rawValue: raw) ?? .claude
+    }
+
+    /// Codex 페인의 cwd · 프로필 · 스레드 이름. 레포 페인과 조율자의 차이는 여기서만 갈린다(Claude 의 `launchScript` 와 같은 결).
+    private func codexFacts(for target: PaneTarget) -> (cwd: String, profile: CodexProfile, name: String) {
+        let wsName = workspaceName(id: target.workspaceID)
+        switch target {
+        case .repo(let r):
+            return (r.path, .repoPane,
+                    SessionName.repo(workspaceName: wsName, workspaceID: r.workspaceId, repoName: r.displayName))
+        case .orchestrator(let ws):
+            return (WorkspaceFolder.url(for: ws).path, .orchestrator,
+                    SessionName.orchestrator(workspaceName: wsName, workspaceID: ws))
+        }
+    }
+
+    /// 페인 전용 `codex app-server` 를 띄운다. 서버가 먼저 끝나면 TUI 가 "Reconnecting…" 으로 남으므로
+    /// 그 페인이 아직 이 세션일 때 `markDead` 한다 — 뷰가 트리에서 빠지며 PTY 가 닫혀 TUI 도 끝난다.
+    private func startCodex(_ target: PaneTarget, sessionID: String) {
+        let key = target.key
+        codexPanes.removeValue(forKey: key)?.stop()
+        var paths = CodexPaneRuntime.Paths.paths(forSession: sessionID, paneKey: key)
+        if codexPanes.values.contains(where: { $0.paths.socket == paths.socket }) {
+            // 앞 8자가 겹치는 드문 경우 — 전체 UUID 로(MCP 소켓과 같은 처리).
+            paths = .paths(forSession: sessionID, paneKey: key, fullID: true)
+        }
+        let facts = codexFacts(for: target)
+        let runtime = CodexPaneRuntime(sessionID: sessionID, cwd: facts.cwd, profile: facts.profile, paths: paths,
+                                       launcher: LiveCodexProcessLauncher(), threadName: facts.name)
+        codexPanes[key] = runtime
+        runtime.start(onThreadStarted: { thread in
+            // 단계 1 은 기록만. 전달 주소로 쓰는 것은 단계 2.
+            NSLog("[Dure] Codex 페인 \(key) 스레드 \(thread)")
+        }, onServerExit: { [weak self] in
+            self?.codexServerExited(key: key, sessionID: sessionID)
+        })
+    }
+
+    /// 서버가 TUI 보다 먼저 끝났다. 뷰만 빼면 "Reconnecting…" 의 TUI 가 보이지 않게 남는다(`PaneTermination`) —
+    /// 터미널에 끝내기를 요청하고, 그 PTY 가 끝나며 `markDead` 가 된다. 터미널이 없으면 바로 `markDead`.
+    private func codexServerExited(key: String, sessionID: String) {
+        switch PaneTermination.onServerExit(exitedSession: sessionID, paneSession: sessionIDs[key],
+                                            terminalLive: startedPanes.contains(key)) {
+        case .ignore:
+            return
+        case .markDead:
+            markDead(sessionID)
+        case .endTerminal:
+            terminalEndRequests.request(key)
+            // 뷰가 트리에 없어 요청을 못 받았으면 직접 닫는다 — 요청이 남은 채 페인이 멈춰 있지 않게.
+            DispatchQueue.main.asyncAfter(deadline: .now() + PaneTermination.fallback) { [weak self] in
+                guard let self, self.terminalEndRequests.contains(key), self.sessionIDs[key] == sessionID else { return }
+                NSLog("[Dure] Codex 페인 \(key): 터미널이 끝나지 않아 직접 닫습니다")
+                self.markDead(sessionID)
+            }
+        }
+    }
+
+    /// 뷰가 `TerminalPane.terminateRequested` 로 넘긴다.
+    func isTerminalEndRequested(_ target: PaneTarget) -> Bool { terminalEndRequests.contains(target.key) }
+
+    /// 앱 종료 — 떠 있는 Codex 서버를 전부 끈다(감시자 `cancelAll` 과 같은 결). 남기면 고아 서버가 된다.
+    func stopAllCodexServers() {
+        for runtime in codexPanes.values { runtime.stop() }
+        codexPanes = [:]
+    }
+
     /// 페인이 실행할 셸 스크립트. 레포 페인과 조율자의 차이(cwd · 설정 · 이름 · `--add-dir`)는 여기서만 갈린다.
     func launchScript(for target: PaneTarget, sessionID: String) -> String {
         // 뷰가 그릴 때마다 불린다. 기동 프롬프트는 큐에서 꺼내는 일이라 페인당 한 번만 만든다.
         if let cached = launchScripts[target.key] { return cached }
+        // Codex — TUI 는 전용 서버 소켓에 붙는다. 단계 1 은 첫 프롬프트를 싣지 않는다(큐를 꺼내지 않는다).
+        if agentKind(for: target) == .codex {
+            let facts = codexFacts(for: target)
+            let paths = codexPanes[target.key]?.paths
+                ?? CodexPaneRuntime.Paths.paths(forSession: sessionID, paneKey: target.key)
+            let script = CodexLaunch.tuiScript(cwd: facts.cwd, sessionID: sessionID, socket: paths.socket,
+                                               failMarker: paths.failMarker, log: paths.log,
+                                               profile: facts.profile, initialPrompt: nil)
+            launchScripts[target.key] = script
+            return script
+        }
         let wsName = workspaceName(id: target.workspaceID)
         let script: String
         let prompt: String?
@@ -925,8 +1029,7 @@ final class DureStore {
         } catch { NSLog("[Dure] setRole 실패: \(error)") }
     }
 
-    /// 워크스페이스 기본 CLI. 페인은 시작할 때 이 값을 미리 골라둔다 (설계문서 8절).
-    /// **단계 1 에서는 저장만 한다.** 스폰은 아직 claude 고정이라 workspace.md 도 이 값을 쓰지 않는다 (F4).
+    /// 워크스페이스 기본 CLI. **새로 시작하는 페인**이 이 값으로 뜬다(`start(_:)`). 이미 떠 있는 페인은 그대로.
     func setDefaultAgentKind(_ kind: AgentKind) {
         guard var w = selectedWorkspace else { return }
         w.defaultAgentKind = kind.rawValue

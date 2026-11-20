@@ -75,8 +75,8 @@ enum Spawn {
             }
             return cmd
         case .codex:
-            // Codex 는 세션 단위 훅 주입이 없다. `~/.codex/` 전역 설정을 써야 하며
-            // 그때는 이어붙이기·제거 기계장치가 필요하다 (D-3). 실측 전까지 구현하지 않는다.
+            // Codex 페인은 여기서 띄우지 않는다. `CodexLaunch` / `CodexPaneRuntime` 이 맡는다.
+            // 이 가지는 호출되지 않는 자리 표시다.
             return "codex"
         }
     }

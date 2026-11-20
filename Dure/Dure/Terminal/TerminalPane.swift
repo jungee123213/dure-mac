@@ -15,6 +15,9 @@ struct TerminalPane: NSViewRepresentable {
     /// 층을 바꿔도 페인이 살아 있어야 하고(D-27) 종료는 사람이 claude 안에서 한다. 감시자 묻기 페인만 켠다:
     /// 닫기 = 대화 끝이고, 안 끄면 보이지 않는 claude 가 남는다.
     var terminateOnDismantle = false
+    /// 스토어가 이 페인을 끝내라고 요청했다(Codex 서버가 먼저 죽음 — `PaneTermination`). 참이 되면 PTY 를 끝내고
+    /// `onExit` 를 부른다. 걷어낼 때 끄는 것(`terminateOnDismantle`)과 다르다 — 층 전환은 페인을 살려 둔다(D-27).
+    var terminateRequested = false
 
     func makeCoordinator() -> Coordinator { Coordinator(onExit: onExit, terminateOnDismantle: terminateOnDismantle) }
 
@@ -58,6 +61,7 @@ struct TerminalPane: NSViewRepresentable {
         if !isActive, nsView.window?.firstResponder === nsView {
             nsView.window?.makeFirstResponder(nil)
         }
+        if terminateRequested { context.coordinator.end(nsView) }
     }
 
     /// Step 0-A 실측 — claude 의 OSC 타이틀이 여기로 올라온다 (F4 보조 신호, 아직 안 쓴다).
@@ -65,6 +69,8 @@ struct TerminalPane: NSViewRepresentable {
     final class Coordinator: NSObject, LocalProcessTerminalViewDelegate {
         private let onExit: (Int32?) -> Void
         let terminateOnDismantle: Bool
+        /// `onExit` 는 한 번만 — 요청으로 끝낸 뒤 진짜 종료 신호가 와도 두 번 부르지 않는다.
+        private var exited = false
         init(onExit: @escaping (Int32?) -> Void, terminateOnDismantle: Bool) {
             self.onExit = onExit
             self.terminateOnDismantle = terminateOnDismantle
@@ -77,7 +83,21 @@ struct TerminalPane: NSViewRepresentable {
         /// **F4 의 `dead` 진입점.** 앱이 PTY 를 소유하므로(ADR-13) 훅보다 이쪽이 확실하다.
         func processTerminated(source: TerminalView, exitCode: Int32?) {
             NSLog("[Dure] PTY 종료 exitCode=\(exitCode.map(String.init) ?? "nil")")
+            guard !exited else { return }
+            exited = true
             onExit(exitCode)
+        }
+
+        /// 요청받은 종료. SwiftTerm `LocalProcess.terminate()` 는 SIGTERM 을 보내면서 자식 감시를 **취소**해
+        /// `processTerminated` 가 오지 않는다 — 그래서 `onExit` 를 여기서 부른다. `updateNSView` 안이라
+        /// (그리는 중 상태 변경을 피해) 다음 런루프로 미룬다.
+        func end(_ view: LocalProcessTerminalView) {
+            guard !exited else { return }
+            exited = true
+            NSLog("[Dure] PTY 종료 요청")
+            view.terminate()
+            let onExit = onExit
+            DispatchQueue.main.async { onExit(nil) }
         }
     }
 }
