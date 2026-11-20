@@ -66,6 +66,16 @@ struct CodexAppServerTests {
                                               cwd: "/Users/x/work/repo", ephemeral: true))
     }
 
+    /// 최종 리뷰 M3 — 스키마 `Thread.parentThreadId`(서브에이전트에만). null 이면 nil.
+    @Test func 서브에이전트_스레드는_parentThreadId_를_꺼낸다() {
+        let started = #"{"method":"thread/started","params":{"thread":{"id":"sub","cwd":"/r","ephemeral":false,"parentThreadId":"p1"}}}"#
+        #expect(parse(started) == .threadStarted(threadID: "sub", cwd: "/r", ephemeral: false, parentThreadID: "p1"))
+        let read = #"{"id":3,"result":{"thread":{"id":"sub","cwd":"/r","ephemeral":false,"parentThreadId":"p1","status":{"type":"idle"}}}}"#
+        #expect(parse(read) == .threadRead(id: 3, threadID: "sub", cwd: "/r", ephemeral: false, status: "idle", parentThreadID: "p1"))
+        let none = #"{"method":"thread/started","params":{"thread":{"id":"t","cwd":"/r","ephemeral":false,"parentThreadId":null}}}"#
+        #expect(parse(none) == .threadStarted(threadID: "t", cwd: "/r", ephemeral: false))
+    }
+
     @Test func thread_status_changed_를_해석한다() {
         let active = #"{"method":"thread/status/changed","params":{"threadId":"01a1f3ef-b58c","status":{"type":"active","activeFlags":[]}},"emittedAtMs":1795093936064}"#
         #expect(parse(active) == .threadStatus(threadID: "01a1f3ef-b58c", status: "active"))

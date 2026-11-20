@@ -116,10 +116,18 @@ final class Dispatcher {
 
     /// 레포 페인의 새 세션. 열린 배분이 있으면 `DispatchRules.onSessionStart` 로 이어받기 · 유지 · 실패를 정한다(이슈 #24).
     func didStart(repoID: String, session: String?, source: String) {
+        let open: Dispatch?
+        do { open = try db.read { try DispatchOps.outstanding(repoID: repoID, in: $0) } } catch {
+            NSLog("[Dure] 배분 세션 처리 실패: \(error)"); open = nil
+        }
         // compact 는 같은 턴 한가운데서도 일어난다 — 그때는 Stop 이 아직 온다. 그 밖의 시작은 옛 턴의 Stop 이 오지 않는다.
-        if source != "compact" { repoAwaitingStop.remove(repoID) }
+        // 단 Codex 는 SessionStart 가 스레드의 **첫 턴** 직전에 뜬다(h-queued-turn-hooks) — 방금 그 스레드에 넣은 배분이
+        // 그 첫 턴이면 같은 턴이 아직 돌고 Stop 도 온다. 그때 풀면 그 턴 중에 다음 배분이 들어가 앞 턴의 Stop 이 그것을
+        // waiting 으로 만든다(최종 리뷰 I1). Claude 의 startup 은 늘 새 세션 id 라 여기 걸리지 않는다.
+        let firstTurnOfQueued = session != nil && open?.deliveredSession == session && source == "startup"
+        if source != "compact" && !firstTurnOfQueued { repoAwaitingStop.remove(repoID) }
         do {
-            if let open = try db.read({ try DispatchOps.outstanding(repoID: repoID, in: $0) }), let session {
+            if let open, let session {
                 switch DispatchRules.onSessionStart(deliveredSession: open.deliveredSession, newSession: session, source: source) {
                 case .adopt:
                     try db.write { try DispatchOps.adoptSession(open.id, session: session, in: $0) }
@@ -251,7 +259,7 @@ final class Dispatcher {
                 if DispatchRules.givesUp(afterAttempts: n) {
                     try db.write { try DispatchOps.markFailed(next.id, reason: "전달 실패 \(n)회", now: now(), in: $0) }
                     try relay(workspaceID: next.workspaceId, dispatchID: next.id, repoID: repoID, kind: .failure,
-                              body: "소켓에 \(n)번 쓰지 못했다. 페인이 메시지를 받는 상태인지 확인하라.")
+                              body: Self.deliveryFailure(n, kind: pane.kind))
                     pumpRepo(repoID)   // 다음 것을 시도한다
                 }
                 return
@@ -267,6 +275,21 @@ final class Dispatcher {
 
     /// `answer.failure` — 질문이 나온 배분이 보내기 전에 닫혔다.
     static let answerDispatchClosed = "배분이 닫힘"
+
+    /// 전달을 포기했을 때 조율자에게 가는 글. Claude 는 인박스 소켓, Codex 는 `codex queue` 라 "소켓" 은 Claude 에만 맞다.
+    static func deliveryFailure(_ n: Int, kind: AgentKind) -> String {
+        switch kind {
+        case .claude: "소켓에 \(n)번 쓰지 못했다. 페인이 메시지를 받는 상태인지 확인하라."
+        case .codex: "전달에 \(n)번 실패했다. 페인이 메시지를 받는 상태인지 확인하라."
+        }
+    }
+
+    static func answerDeliveryFailure(_ n: Int, kind: AgentKind) -> String {
+        switch kind {
+        case .claude: "조율자 답을 소켓에 \(n)번 쓰지 못했다. 페인이 메시지를 받는 상태인지 확인하라."
+        case .codex: "조율자 답 전달에 \(n)번 실패했다. 페인이 메시지를 받는 상태인지 확인하라."
+        }
+    }
 
     /// 답이 묶인 배분이 이미 닫혔으면 그 배분. 배분 밖 답(nil)이나 열린 배분이면 nil.
     private func closedDispatch(boundTo a: Answer) throws -> Dispatch? {
@@ -292,6 +315,13 @@ final class Dispatcher {
         guard !repoAwaitingStop.contains(repoID),
               DispatchRules.canAnswer(started: pane.started, state: pane.state, open: open?.state),
               let address = pane.address else { return }
+        // Codex `/new` 는 새 스레드를 열어도 SessionStart 가 그 스레드의 첫 턴까지 미뤄진다 — 그 사이 주소는 새 스레드인데
+        // 열린 배분은 옛 스레드에 있다. 답을 지금 주소로 보내면 질문의 맥락이 없는 스레드가 받는다(최종 리뷰 I2).
+        // 큐에 둔다 — 새 스레드의 SessionStart 가 배분을 닫으면 위 `closedDispatch` 가 실패로 알린다.
+        // Claude 는 `/clear` · 재시작의 SessionStart 가 곧바로 배분을 닫아 이 경우가 없다 — 동작을 바꾸지 않게 Codex 주소로만 거른다.
+        // argv 로 실은 배분은 아직 스레드를 모른다(첫 SessionStart 가 이어받는다) — 막지 않는다.
+        if case .codex = address, let delivered = open?.deliveredSession, delivered != "argv",
+           delivered != address.sessionKey { return }
         let question = try a.questionId.flatMap { id in try db.read { try Relay.fetchOne($0, key: id)?.body } }
         let body = DispatchBody.answer(seq: bound?.seq, question: question, body: a.body)
         do {
@@ -302,7 +332,7 @@ final class Dispatcher {
             if DispatchRules.givesUp(afterAttempts: n) {
                 try db.write { try DispatchOps.markAnswerFailed(a.id, reason: "전달 실패 \(n)회", in: $0) }
                 try relay(workspaceID: a.workspaceId, dispatchID: a.dispatchId, repoID: repoID, kind: .answerFailure,
-                          body: "조율자 답을 소켓에 \(n)번 쓰지 못했다. 페인이 메시지를 받는 상태인지 확인하라.")
+                          body: Self.answerDeliveryFailure(n, kind: pane.kind))
                 pumpRepo(repoID)   // 다음 것을 시도한다
             }
             return

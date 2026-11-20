@@ -595,6 +595,68 @@ struct CodexPaneRuntimeTests {
         #expect(conn.ids("thread/loaded/list").isEmpty)
     }
 
+    /// 최종 리뷰 M1 — `thread` 없는 thread/read 성공은 `.response(ok: true)` 로 온다. 그래도 기다림에서 빠져야 보충이 끝난다.
+    @Test func thread_없는_thread_read_성공도_기다림에서_빠진다() async throws {
+        let f = try fixture(); defer { try? fm.removeItem(at: f.base) }
+        let conn = FakeConnection()
+        var started: [String] = []
+        let rt = await connected(f, conn) { started.append($0) }
+        conn.deliver(ok(try #require(conn.ids("initialize").first)))
+        _ = await eventually { !conn.ids("thread/loaded/list").isEmpty }
+        conn.deliver(loaded(conn.ids("thread/loaded/list")[0], ["bad", "t1"]))
+        _ = await eventually { conn.ids("thread/read").count == 2 }
+        let reads = conn.ids("thread/read")
+        conn.deliver(ok(reads[0]))                                    // 모양이 어긋난 성공
+        conn.deliver(read(reads[1], "t1"))
+        #expect(await eventually { rt.threadID == "t1" })              // 남은 하나로 판정이 끝난다
+        #expect(started == ["t1"])
+    }
+
+    @Test func 모양이_어긋난_응답만_와도_다음_보충이_막히지_않는다() async throws {
+        let f = try fixture(); defer { try? fm.removeItem(at: f.base) }
+        let conn = FakeConnection()
+        let rt = await connected(f, conn)
+        conn.deliver(ok(try #require(conn.ids("initialize").first)))
+        _ = await eventually { !conn.ids("thread/loaded/list").isEmpty }
+        conn.deliver(loaded(conn.ids("thread/loaded/list")[0], ["bad"]))
+        _ = await eventually { conn.ids("thread/read").count == 1 }
+        conn.deliver(ok(conn.ids("thread/read")[0]))
+        try? await Task.sleep(for: .milliseconds(50))
+        #expect(rt.threadID == nil)
+        // 다음 기회(thread/closed)에 다시 묻는다 — 기다림이 남아 있으면 recover 가 아무것도 안 보낸다.
+        conn.deliver(threadClosed("bad"))
+        await answerRecovery(conn, listIndex: 1, [("t1", "/r/app", false)])
+        #expect(await eventually { rt.threadID == "t1" })
+    }
+
+    /// 최종 리뷰 M3 — 서브에이전트 스레드(`parentThreadId` 있음)는 전달 주소가 아니다.
+    @Test func 서브에이전트_thread_started_는_주소로_잡지_않는다() async throws {
+        let f = try fixture(); defer { try? fm.removeItem(at: f.base) }
+        let conn = FakeConnection()
+        var started: [String] = []
+        let rt = await connected(f, conn) { started.append($0) }
+        conn.deliver(threadStarted("t1"))
+        #expect(await eventually { rt.threadID == "t1" })
+        conn.deliver("{\"method\":\"thread/started\",\"params\":{\"thread\":{\"id\":\"sub\",\"cwd\":\"/r/app\",\"ephemeral\":false,\"parentThreadId\":\"t1\"}}}")
+        try? await Task.sleep(for: .milliseconds(50))
+        #expect(rt.threadID == "t1")
+        #expect(started == ["t1"])
+    }
+
+    @Test func 서브에이전트_스레드는_보충에서_빠진다() async throws {
+        let f = try fixture(); defer { try? fm.removeItem(at: f.base) }
+        let conn = FakeConnection()
+        let rt = await connected(f, conn)
+        conn.deliver(ok(try #require(conn.ids("initialize").first)))
+        _ = await eventually { !conn.ids("thread/loaded/list").isEmpty }
+        conn.deliver(loaded(conn.ids("thread/loaded/list")[0], ["sub", "t1"]))
+        _ = await eventually { conn.ids("thread/read").count == 2 }
+        let reads = conn.ids("thread/read")
+        conn.deliver("{\"id\":\(reads[0]),\"result\":{\"thread\":{\"id\":\"sub\",\"cwd\":\"/r/app\",\"ephemeral\":false,\"parentThreadId\":\"t1\",\"status\":{\"type\":\"active\"}}}}")
+        conn.deliver(read(reads[1], "t1"))
+        #expect(await eventually { rt.threadID == "t1" })              // 같은 cwd 둘이 아니라 하나로 판정
+    }
+
     @Test func 보충_판정은_cwd_가_같고_임시가_아닌_스레드가_하나일_때만_고른다() {
         typealias T = CodexPaneRuntime.LoadedThread
         let cwd = "/Users/x/work/repo"
@@ -608,6 +670,8 @@ struct CodexPaneRuntimeTests {
                                             T(id: "a", cwd: cwd, ephemeral: false)], cwd: cwd) == "a")
         #expect(CodexPaneRuntime.adoptable([T(id: "n", cwd: nil, ephemeral: false)], cwd: cwd) == nil)
         #expect(CodexPaneRuntime.adoptable([], cwd: cwd) == nil)
+        #expect(CodexPaneRuntime.adoptable([T(id: "s", cwd: cwd, ephemeral: false, parentThreadID: "a"),
+                                            T(id: "a", cwd: cwd, ephemeral: false)], cwd: cwd) == "a")     // 서브에이전트 빼고
     }
 
     // MARK: - 2단계 멈춘 큐 깨우기 (thread/queue/start)

@@ -56,14 +56,16 @@ nonisolated enum CodexAppServer {
         case response(id: Int, ok: Bool)
         case hooksListResult(id: Int, entries: [HookEntry])
         /// `ephemeral == true` 는 첫 턴 중에 따로 뜨는 "제목 만들기" 스레드다 — 전달 주소로 잡지 않는다.
-        case threadStarted(threadID: String, cwd: String?, ephemeral: Bool)
+        /// `parentThreadID` 는 스키마 `Thread.parentThreadId` — 서브에이전트 스레드에만 있다(전달 주소가 아니다).
+        case threadStarted(threadID: String, cwd: String?, ephemeral: Bool, parentThreadID: String? = nil)
         /// `status.type` — `idle` · `active` · `notLoaded` · `systemError`
         case threadStatus(threadID: String, status: String)
         case threadClosed(threadID: String)
         /// `thread/loaded/list` 결과 — 결과가 `data: [문자열]` 인 응답.
         case loadedThreads(id: Int, threadIDs: [String])
         /// `thread/read` 결과 — 결과가 `thread: {id, …}` 인 응답. `status` 는 `status.type`(보충한 스레드의 처음 상태).
-        case threadRead(id: Int, threadID: String, cwd: String?, ephemeral: Bool, status: String? = nil)
+        case threadRead(id: Int, threadID: String, cwd: String?, ephemeral: Bool, status: String? = nil,
+                        parentThreadID: String? = nil)
         /// 모르는 알림 · 서버 요청 · 모양이 어긋난 메시지. 값은 `method`(없으면 빈 문자열).
         case other(String)
     }
@@ -111,7 +113,8 @@ nonisolated enum CodexAppServer {
             if let t = r?["thread"] as? [String: Any], let thread = t["id"] as? String {
                 return .threadRead(id: id, threadID: thread, cwd: t["cwd"] as? String,
                                    ephemeral: t["ephemeral"] as? Bool ?? false,
-                                   status: (t["status"] as? [String: Any])?["type"] as? String)
+                                   status: (t["status"] as? [String: Any])?["type"] as? String,
+                                   parentThreadID: t["parentThreadId"] as? String)
             }
             return .response(id: id, ok: true)
         }
@@ -123,7 +126,8 @@ nonisolated enum CodexAppServer {
         switch method {
         case "thread/started":
             guard let t = params["thread"] as? [String: Any], let id = t["id"] as? String else { return .other(method) }
-            return .threadStarted(threadID: id, cwd: t["cwd"] as? String, ephemeral: t["ephemeral"] as? Bool ?? false)
+            return .threadStarted(threadID: id, cwd: t["cwd"] as? String, ephemeral: t["ephemeral"] as? Bool ?? false,
+                                  parentThreadID: t["parentThreadId"] as? String)
         case "thread/status/changed":
             guard let id = params["threadId"] as? String,
                   let type = (params["status"] as? [String: Any])?["type"] as? String else { return .other(method) }

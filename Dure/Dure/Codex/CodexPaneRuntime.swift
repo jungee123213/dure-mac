@@ -68,13 +68,15 @@ final class CodexPaneRuntime {
         let id: String
         let cwd: String?
         let ephemeral: Bool
+        /// 서브에이전트 스레드면 부모 스레드 id(스키마 `parentThreadId`). 전달 주소가 아니다.
+        var parentThreadID: String? = nil
     }
 
-    /// 보충할 스레드 — 임시가 아니고 cwd 가 페인 cwd 인 스레드가 **하나뿐일 때만** 그 id.
+    /// 보충할 스레드 — 임시도 서브에이전트도 아니고 cwd 가 페인 cwd 인 스레드가 **하나뿐일 때만** 그 id.
     /// `/new` 뒤 약 60초는 옛 스레드도 같은 cwd 로 남는다(g-stage2 3절) — 둘이면 고르지 않고 다음 `thread/started` 를 기다린다.
     nonisolated static func adoptable(_ threads: [LoadedThread], cwd: String) -> String? {
         let target = normalizedPath(cwd)
-        let matches = threads.filter { !$0.ephemeral && $0.cwd.map(normalizedPath) == target }
+        let matches = threads.filter { !$0.ephemeral && $0.parentThreadID == nil && $0.cwd.map(normalizedPath) == target }
         return matches.count == 1 ? matches[0].id : nil
     }
 
@@ -322,9 +324,9 @@ final class CodexPaneRuntime {
     private func receive(_ data: Data, from id: ObjectIdentifier) {
         guard let conn = current(id) else { return }
         switch CodexAppServer.parse(data, pendingHooksListID: nil) {
-        case .threadStarted(let thread, _, let ephemeral):
-            // 첫 턴의 "제목 만들기" 스레드는 전달 주소가 아니다(f-stage1 판정 5).
-            guard !ephemeral, thread != threadID else { return }
+        case .threadStarted(let thread, _, let ephemeral, let parent):
+            // 첫 턴의 "제목 만들기" 스레드는 전달 주소가 아니다(f-stage1 판정 5). 서브에이전트 스레드(부모가 있는 것)도.
+            guard !ephemeral, parent == nil, thread != threadID else { return }
             adopt(thread, status: nil, on: conn)
         case .threadStatus(let thread, let status):
             statusChanged(thread, to: status)
@@ -355,18 +357,20 @@ final class CodexPaneRuntime {
                 conn.send(CodexAppServer.readThread(id: r, threadID: id))
             }
             finishRecoveryIfDone(on: conn)
-        case .threadRead(let rid, let thread, let cwd, let ephemeral, let status) where pendingReads[rid] != nil:
+        case .threadRead(let rid, let thread, let cwd, let ephemeral, let status, let parent) where pendingReads[rid] != nil:
             pendingReads[rid] = nil
-            readThreads.append(LoadedThread(id: thread, cwd: cwd, ephemeral: ephemeral))
+            readThreads.append(LoadedThread(id: thread, cwd: cwd, ephemeral: ephemeral, parentThreadID: parent))
             if let status { readStatuses[thread] = status }
             finishRecoveryIfDone(on: conn)
-        case .response(let rid, false):
+        case .response(let rid, let ok):
+            // 보충 요청의 응답이면 성공이든 실패든 기다림에서 뺀다 — 모양이 어긋난 성공(`thread` 없는 thread/read ·
+            // `data` 없는 loaded list)이 `.response(ok: true)` 로 오면 영영 안 빠져 보충이 막힌다(최종 리뷰 M1).
             if pendingReads.removeValue(forKey: rid) != nil {
-                finishRecoveryIfDone(on: conn)          // 그 사이 내려간 스레드 — 빼고 판정한다
+                finishRecoveryIfDone(on: conn)          // 그 사이 내려간 스레드 · 못 읽은 스레드 — 빼고 판정한다
             } else if rid == pendingLoadedListID {
                 pendingLoadedListID = nil
             }
-            NSLog("[Dure] Codex 페인 \(sessionID): 요청 \(rid) 이 실패했습니다")
+            if !ok { NSLog("[Dure] Codex 페인 \(sessionID): 요청 \(rid) 이 실패했습니다") }
         default:
             break
         }
