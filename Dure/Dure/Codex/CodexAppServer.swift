@@ -10,11 +10,13 @@ nonisolated enum CodexAppServer {
     // MARK: - 보내는 메시지
 
     /// 처음 붙은 클라이언트 이름이 rollout 의 originator · userAgent 앞부분이 된다 — 그래서 `dure` 로 먼저 붙는다.
+    /// `experimentalApi` 는 멈춘 큐 깨우기(`thread/queue/start`, 실험 API)에 필요하다 — 없으면 -32600(g-stage2 4절).
     static func initialize(id: Int) -> Data {
         let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
         return encode(["id": id, "method": "initialize",
                        "params": ["clientInfo": ["name": "dure", "title": "Dure",
-                                                 "version": (version?.isEmpty == false ? version! : "0")]]])
+                                                 "version": (version?.isEmpty == false ? version! : "0")],
+                                  "capabilities": ["experimentalApi": true]]])
     }
 
     static func initialized() -> Data {
@@ -30,6 +32,20 @@ nonisolated enum CodexAppServer {
         encode(["id": id, "method": "thread/name/set", "params": ["threadId": threadID, "name": name]])
     }
 
+    /// 서버에 올라와 있는 스레드 id 들(주소 보충). id 만 준다 — cwd · ephemeral 은 `readThread` 로(g-stage2 3절).
+    static func loadedThreads(id: Int) -> Data {
+        encode(["id": id, "method": "thread/loaded/list", "params": [String: Any]()])
+    }
+
+    static func readThread(id: Int, threadID: String) -> Data {
+        encode(["id": id, "method": "thread/read", "params": ["threadId": threadID]])
+    }
+
+    /// 실험 API — 중단된 턴 뒤 멈춘 큐를 다시 돌린다(g-stage2 4절). `initialize` 의 `experimentalApi` 가 있어야 한다.
+    static func startQueue(id: Int, threadID: String) -> Data {
+        encode(["id": id, "method": "thread/queue/start", "params": ["threadId": threadID]])
+    }
+
     private static func encode(_ object: [String: Any]) -> Data {
         (try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .withoutEscapingSlashes])) ?? Data()
     }
@@ -40,10 +56,16 @@ nonisolated enum CodexAppServer {
         case response(id: Int, ok: Bool)
         case hooksListResult(id: Int, entries: [HookEntry])
         /// `ephemeral == true` 는 첫 턴 중에 따로 뜨는 "제목 만들기" 스레드다 — 전달 주소로 잡지 않는다.
-        case threadStarted(threadID: String, cwd: String?, ephemeral: Bool)
+        /// `parentThreadID` 는 스키마 `Thread.parentThreadId` — 서브에이전트 스레드에만 있다(전달 주소가 아니다).
+        case threadStarted(threadID: String, cwd: String?, ephemeral: Bool, parentThreadID: String? = nil)
         /// `status.type` — `idle` · `active` · `notLoaded` · `systemError`
         case threadStatus(threadID: String, status: String)
         case threadClosed(threadID: String)
+        /// `thread/loaded/list` 결과 — 결과가 `data: [문자열]` 인 응답.
+        case loadedThreads(id: Int, threadIDs: [String])
+        /// `thread/read` 결과 — 결과가 `thread: {id, …}` 인 응답. `status` 는 `status.type`(보충한 스레드의 처음 상태).
+        case threadRead(id: Int, threadID: String, cwd: String?, ephemeral: Bool, status: String? = nil,
+                        parentThreadID: String? = nil)
         /// 모르는 알림 · 서버 요청 · 모양이 어긋난 메시지. 값은 `method`(없으면 빈 문자열).
         case other(String)
     }
@@ -80,8 +102,19 @@ nonisolated enum CodexAppServer {
         if method == nil, let id = intValue(o["id"]) {
             if o["error"] != nil { return .response(id: id, ok: false) }
             guard let result = o["result"] else { return .other("") }
-            if id == pendingHooksListID, let r = result as? [String: Any], let data = r["data"] as? [[String: Any]] {
+            let r = result as? [String: Any]
+            if id == pendingHooksListID, let data = r?["data"] as? [[String: Any]] {
                 return .hooksListResult(id: id, entries: hookEntries(data))
+            }
+            // 응답에는 method 가 없다 — 결과 모양으로 가른다. 훅 목록(`data` 가 객체 배열)은 문자열 배열이 아니라 빠진다.
+            if let ids = r?["data"] as? [String] {
+                return .loadedThreads(id: id, threadIDs: ids)
+            }
+            if let t = r?["thread"] as? [String: Any], let thread = t["id"] as? String {
+                return .threadRead(id: id, threadID: thread, cwd: t["cwd"] as? String,
+                                   ephemeral: t["ephemeral"] as? Bool ?? false,
+                                   status: (t["status"] as? [String: Any])?["type"] as? String,
+                                   parentThreadID: t["parentThreadId"] as? String)
             }
             return .response(id: id, ok: true)
         }
@@ -93,7 +126,8 @@ nonisolated enum CodexAppServer {
         switch method {
         case "thread/started":
             guard let t = params["thread"] as? [String: Any], let id = t["id"] as? String else { return .other(method) }
-            return .threadStarted(threadID: id, cwd: t["cwd"] as? String, ephemeral: t["ephemeral"] as? Bool ?? false)
+            return .threadStarted(threadID: id, cwd: t["cwd"] as? String, ephemeral: t["ephemeral"] as? Bool ?? false,
+                                  parentThreadID: t["parentThreadId"] as? String)
         case "thread/status/changed":
             guard let id = params["threadId"] as? String,
                   let type = (params["status"] as? [String: Any])?["type"] as? String else { return .other(method) }

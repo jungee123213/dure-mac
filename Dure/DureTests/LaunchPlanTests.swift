@@ -28,4 +28,16 @@ struct LaunchPlanTests {
         try Data("# r".utf8).write(to: d.appendingPathComponent("CLAUDE.md"))
         #expect(LaunchPlan.instructionsPath(for: repo) == d.appendingPathComponent("CLAUDE.md").path)
     }
+
+    @Test func Codex_페인의_레포_지시문은_AGENTS_md_가_먼저다() throws {
+        let d = try Self.tempDir()
+        defer { try? FileManager.default.removeItem(at: d) }
+        let repo = Repo(id: "a", workspaceId: "w", path: d.path)
+        #expect(LaunchPlan.instructionsPath(for: repo, kind: .codex) == nil)
+        try Data("# c".utf8).write(to: d.appendingPathComponent("CLAUDE.md"))
+        #expect(LaunchPlan.instructionsPath(for: repo, kind: .codex) == d.appendingPathComponent("CLAUDE.md").path)
+        try Data("# a".utf8).write(to: d.appendingPathComponent("AGENTS.md"))
+        #expect(LaunchPlan.instructionsPath(for: repo, kind: .codex) == d.appendingPathComponent("AGENTS.md").path)
+        #expect(LaunchPlan.instructionsPath(for: repo, kind: .claude) == d.appendingPathComponent("CLAUDE.md").path)
+    }
 }

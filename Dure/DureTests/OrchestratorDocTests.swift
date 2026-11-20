@@ -139,4 +139,29 @@ struct OrchestratorDocTests {
         let md = OrchestratorDoc.render(workspaceName: "빈", sessionPrefix: "dure-빈-0000-", repos: [])
         #expect(md.contains("등록된 레포가 없다"))
     }
+
+    static let codexMd = OrchestratorDoc.render(
+        workspaceName: "모바일", sessionPrefix: "dure-모바일-7f3a-",
+        repos: [.init(name: "back", path: "/a/back")], kind: .codex)
+
+    @Test func Codex_판은_세션_간_메시지_줄이_없다() {
+        #expect(!Self.codexMd.contains("다른 Claude 세션"))
+        #expect(!Self.codexMd.contains("SendMessage"))
+        #expect(!Self.codexMd.contains("ListAgents"))
+        #expect(!Self.codexMd.contains("Claude Code 가 막는다"))
+    }
+
+    @Test func Codex_판은_읽기_전용과_레포_경로_안내가_있다() {
+        #expect(Self.codexMd.contains("`--add-dir` 없음"))
+        #expect(Self.codexMd.contains("셸은 읽기 전용이다 — 파일을 쓰거나 git 을 바꾸지 않는다"))
+        #expect(Self.codexMd.contains("레포 지시문 경로"))
+    }
+
+    @Test func Claude_판은_레포_지시문_경로_문구만_바뀐다() {
+        #expect(Self.md.contains("레포 지시문 경로"))
+        #expect(!Self.md.contains("적힌 `CLAUDE.md` 경로"))
+        #expect(Self.md.contains("Claude Code 가 막는다"))
+        #expect(Self.md.contains("다른 Claude 세션에 직접 메시지를 보내는 길은 없다"))
+        #expect(!Self.md.contains("--add-dir"))
+    }
 }

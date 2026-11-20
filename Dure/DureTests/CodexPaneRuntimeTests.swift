@@ -60,6 +60,30 @@ struct CodexPaneRuntimeTests {
         /// 진짜 연결처럼 cancel 뒤에도 콜백이 남는다 — 늦은 메시지를 런타임이 걸러야 한다.
         func cancel() { lock.withLock { _cancelled += 1 } }
         func deliver(_ json: String) { lock.withLock { onMessage }?(Data(json.utf8)) }
+
+        /// 보낸 요청 중 그 method 의 id 들(보낸 순서).
+        func ids(_ method: String) -> [Int] {
+            sent.filter { $0["method"] as? String == method }.compactMap { $0["id"] as? Int }
+        }
+        func params(_ method: String) -> [[String: Any]] {
+            sent.filter { $0["method"] as? String == method }.compactMap { $0["params"] as? [String: Any] }
+        }
+    }
+
+    /// 깨우기 타이머 — 5초를 실제로 기다리지 않고 테스트가 직접 터뜨린다.
+    final class FakeTimer {
+        private(set) var delays: [TimeInterval] = []
+        private var works: [@MainActor @Sendable () -> Void] = []
+        var pending: Int { works.count }
+        func add(_ delay: TimeInterval, _ work: @escaping @MainActor @Sendable () -> Void) {
+            delays.append(delay)
+            works.append(work)
+        }
+        @MainActor func fire() {
+            let w = works
+            works = []
+            for work in w { work() }
+        }
     }
 
     // MARK: - 고정 예제
@@ -89,7 +113,8 @@ struct CodexPaneRuntimeTests {
     private func make(_ f: Fixture, version: String? = "codex-cli 0.167.0",
                       launcher: FakeLauncher, connection: FakeConnection = FakeConnection(),
                       entries: [CodexAppServer.HookEntry] = [], ready: Bool = true,
-                      profile: CodexProfile = .repoPane) -> CodexPaneRuntime {
+                      profile: CodexProfile = .repoPane, mcpSocket: String? = nil,
+                      timer: FakeTimer = FakeTimer()) -> CodexPaneRuntime {
         let userHome = f.user
         return CodexPaneRuntime(sessionID: "ABCD1234-0000-0000-0000-000000000000", cwd: "/r/app", profile: profile,
                          paths: f.paths, launcher: launcher,
@@ -101,7 +126,8 @@ struct CodexPaneRuntimeTests {
                          connect: { _ in connection },
                          socketReady: { _ in ready },
                          socketTimeout: 0.3,
-                         shimPath: "/x/hook")
+                         shimPath: "/x/hook", mcpSocket: mcpSocket,
+                         schedule: { timer.add($0, $1) })
     }
 
     /// 콜백은 메인 큐로 넘어온다 — 조건이 설 때까지 양보하며 기다린다.
@@ -145,6 +171,44 @@ struct CodexPaneRuntimeTests {
         "{\"method\":\"thread/closed\",\"params\":{\"threadId\":\"\(id)\"}}"
     }
 
+    private func status(_ id: String, _ type: String) -> String {
+        let flags = type == "active" ? ",\"activeFlags\":[]" : ""
+        return "{\"method\":\"thread/status/changed\",\"params\":{\"threadId\":\"\(id)\",\"status\":{\"type\":\"\(type)\"\(flags)}}}"
+    }
+
+    private func ok(_ id: Int) -> String { "{\"id\":\(id),\"result\":{}}" }
+
+    private func loaded(_ id: Int, _ threads: [String]) -> String {
+        let list = threads.map { "\"\($0)\"" }.joined(separator: ",")
+        return "{\"id\":\(id),\"result\":{\"data\":[\(list)],\"nextCursor\":null}}"
+    }
+
+    private func read(_ id: Int, _ thread: String, cwd: String = "/r/app", ephemeral: Bool = false,
+                      status: String = "idle") -> String {
+        "{\"id\":\(id),\"result\":{\"thread\":{\"id\":\"\(thread)\",\"cwd\":\"\(cwd)\",\"ephemeral\":\(ephemeral),\"status\":{\"type\":\"\(status)\"},\"turns\":[]},\"readState\":null}}"
+    }
+
+    /// 시작해서 initialize 응답까지 준다(보충이 돈다).
+    private func connected(_ f: Fixture, _ conn: FakeConnection, timer: FakeTimer = FakeTimer(),
+                           onThread: @escaping (String) -> Void = { _ in }) async -> CodexPaneRuntime {
+        let rt = make(f, launcher: FakeLauncher(), connection: conn, timer: timer)
+        rt.start(onThreadStarted: onThread, onServerExit: {})
+        await rt.startup?.value
+        return rt
+    }
+
+    /// 보충 한 바퀴 — loaded list 응답 → 스레드마다 thread/read 응답(목록 순서대로).
+    private func answerRecovery(_ conn: FakeConnection, listIndex: Int = 0,
+                                _ threads: [(id: String, cwd: String, ephemeral: Bool)]) async {
+        _ = await eventually { conn.ids("thread/loaded/list").count > listIndex }
+        guard let list = conn.ids("thread/loaded/list").dropFirst(listIndex).first else { return }
+        let before = conn.ids("thread/read").count
+        conn.deliver(loaded(list, threads.map(\.id)))
+        _ = await eventually { conn.ids("thread/read").count == before + threads.count }
+        let reads = Array(conn.ids("thread/read").dropFirst(before))
+        for (rid, t) in zip(reads, threads) { conn.deliver(read(rid, t.id, cwd: t.cwd, ephemeral: t.ephemeral)) }
+    }
+
     // MARK: - 시작
 
     @Test func 시작하면_home_을_만들고_서버_스크립트를_띄운다() async throws {
@@ -170,6 +234,16 @@ struct CodexPaneRuntimeTests {
         // 소켓이 생기면 붙어서 initialize → initialized
         #expect(conn.methods == ["initialize", "initialized"])
         #expect(rt.failure == nil)
+    }
+
+    @Test func 런타임은_MCP_소켓을_서버_스크립트에_넣는다() async throws {
+        let f = try fixture(); defer { try? fm.removeItem(at: f.base) }
+        let launcher = FakeLauncher()
+        let rt = make(f, launcher: launcher, mcpSocket: "/s/m.sock")
+        rt.start(onThreadStarted: { _ in }, onServerExit: {})
+        await rt.startup?.value
+        let script = try #require(launcher.scripts.first)
+        #expect(script.contains("'mcp_servers.dure.args=[\"-U\",\"/s/m.sock\"]'"))
     }
 
     @Test func 훅_목록에서_끌_플러그인과_옮길_사용자_훅을_서버에_준다() async throws {
@@ -416,6 +490,290 @@ struct CodexPaneRuntimeTests {
         try? await Task.sleep(for: .milliseconds(50))
         #expect(rt.threadID == nil)
         #expect(started.isEmpty)
+    }
+
+    // MARK: - 2단계 주소 보충 (thread/loaded/list → thread/read)
+
+    @Test func 연결_뒤_스레드가_없으면_loaded_list_로_보충한다() async throws {
+        let f = try fixture(); defer { try? fm.removeItem(at: f.base) }
+        let conn = FakeConnection()
+        var started: [String] = []
+        let rt = await connected(f, conn) { started.append($0) }
+        try? await Task.sleep(for: .milliseconds(30))
+        #expect(conn.ids("thread/loaded/list").isEmpty)            // initialize 응답 전에는 묻지 않는다
+
+        conn.deliver(ok(try #require(conn.ids("initialize").first)))
+        await answerRecovery(conn, [("t9", "/r/app", false)])
+        #expect(await eventually { rt.threadID == "t9" })
+        #expect(started == ["t9"])                                   // 새 스레드와 같은 길로 알린다
+        #expect(rt.address == .codex(socket: f.paths.socket, thread: "t9"))
+        #expect(conn.params("thread/read").first?["threadId"] as? String == "t9")
+        // 이름도 같은 길로 붙는다
+        #expect(conn.params("thread/name/set").first?["threadId"] as? String == "t9")
+    }
+
+    @Test func loaded_list_에_같은_cwd_스레드가_둘이면_고르지_않는다() async throws {
+        let f = try fixture(); defer { try? fm.removeItem(at: f.base) }
+        let conn = FakeConnection()
+        var started: [String] = []
+        let rt = await connected(f, conn) { started.append($0) }
+        conn.deliver(ok(try #require(conn.ids("initialize").first)))
+        // /new 직후 약 60초 — 옛 · 새 스레드가 둘 다 loaded
+        await answerRecovery(conn, [("old", "/r/app", false), ("new", "/r/app", false)])
+        try? await Task.sleep(for: .milliseconds(50))
+        #expect(rt.threadID == nil)
+        #expect(rt.address == nil)
+        #expect(started.isEmpty)
+        #expect(conn.ids("thread/name/set").isEmpty)
+
+        conn.deliver(threadStarted("next"))                          // 다음 thread/started 를 기다린다
+        #expect(await eventually { rt.threadID == "next" })
+        #expect(started == ["next"])
+    }
+
+    @Test func 옛_스레드가_내려가면_다시_보충한다() async throws {
+        let f = try fixture(); defer { try? fm.removeItem(at: f.base) }
+        let conn = FakeConnection()
+        var started: [String] = []
+        let rt = await connected(f, conn) { started.append($0) }
+        conn.deliver(ok(try #require(conn.ids("initialize").first)))
+        await answerRecovery(conn, [("old", "/r/app", false), ("new", "/r/app", false)])
+        try? await Task.sleep(for: .milliseconds(50))
+        #expect(rt.threadID == nil)
+
+        conn.deliver(threadClosed("old"))                             // 60초 뒤 옛 스레드가 내려간다
+        await answerRecovery(conn, listIndex: 1, [("new", "/r/app", false)])
+        #expect(await eventually { rt.threadID == "new" })
+        #expect(started == ["new"])
+    }
+
+    @Test func ephemeral_스레드는_보충에서_빠진다() async throws {
+        let f = try fixture(); defer { try? fm.removeItem(at: f.base) }
+        let conn = FakeConnection()
+        let rt = await connected(f, conn)
+        conn.deliver(ok(try #require(conn.ids("initialize").first)))
+        await answerRecovery(conn, [("title", "/r/app", true), ("t1", "/r/app", false)])
+        #expect(await eventually { rt.threadID == "t1" })
+    }
+
+    @Test func 이미_thread_started_를_받았으면_보충하지_않는다() async throws {
+        let f = try fixture(); defer { try? fm.removeItem(at: f.base) }
+        let conn = FakeConnection()
+        var started: [String] = []
+        let rt = await connected(f, conn) { started.append($0) }
+        conn.deliver(threadStarted("t1"))
+        conn.deliver(ok(try #require(conn.ids("initialize").first)))
+        try? await Task.sleep(for: .milliseconds(50))
+        #expect(conn.ids("thread/loaded/list").isEmpty)
+        #expect(rt.threadID == "t1")
+        #expect(started == ["t1"])
+    }
+
+    @Test func 보충_도중에_thread_started_가_오면_보충_결과를_버린다() async throws {
+        let f = try fixture(); defer { try? fm.removeItem(at: f.base) }
+        let conn = FakeConnection()
+        var started: [String] = []
+        let rt = await connected(f, conn) { started.append($0) }
+        conn.deliver(ok(try #require(conn.ids("initialize").first)))
+        _ = await eventually { !conn.ids("thread/loaded/list").isEmpty }
+        conn.deliver(loaded(conn.ids("thread/loaded/list")[0], ["old"]))
+        _ = await eventually { !conn.ids("thread/read").isEmpty }
+        conn.deliver(threadStarted("t1"))
+        conn.deliver(read(conn.ids("thread/read")[0], "old"))
+        try? await Task.sleep(for: .milliseconds(50))
+        #expect(rt.threadID == "t1")
+        #expect(started == ["t1"])
+    }
+
+    @Test func 실패한_initialize_뒤에는_보충하지_않는다() async throws {
+        let f = try fixture(); defer { try? fm.removeItem(at: f.base) }
+        let conn = FakeConnection()
+        _ = await connected(f, conn)
+        let id = try #require(conn.ids("initialize").first)
+        conn.deliver("{\"id\":\(id),\"error\":{\"code\":-32600,\"message\":\"x\"}}")
+        try? await Task.sleep(for: .milliseconds(50))
+        #expect(conn.ids("thread/loaded/list").isEmpty)
+    }
+
+    /// 최종 리뷰 M1 — `thread` 없는 thread/read 성공은 `.response(ok: true)` 로 온다. 그래도 기다림에서 빠져야 보충이 끝난다.
+    @Test func thread_없는_thread_read_성공도_기다림에서_빠진다() async throws {
+        let f = try fixture(); defer { try? fm.removeItem(at: f.base) }
+        let conn = FakeConnection()
+        var started: [String] = []
+        let rt = await connected(f, conn) { started.append($0) }
+        conn.deliver(ok(try #require(conn.ids("initialize").first)))
+        _ = await eventually { !conn.ids("thread/loaded/list").isEmpty }
+        conn.deliver(loaded(conn.ids("thread/loaded/list")[0], ["bad", "t1"]))
+        _ = await eventually { conn.ids("thread/read").count == 2 }
+        let reads = conn.ids("thread/read")
+        conn.deliver(ok(reads[0]))                                    // 모양이 어긋난 성공
+        conn.deliver(read(reads[1], "t1"))
+        #expect(await eventually { rt.threadID == "t1" })              // 남은 하나로 판정이 끝난다
+        #expect(started == ["t1"])
+    }
+
+    @Test func 모양이_어긋난_응답만_와도_다음_보충이_막히지_않는다() async throws {
+        let f = try fixture(); defer { try? fm.removeItem(at: f.base) }
+        let conn = FakeConnection()
+        let rt = await connected(f, conn)
+        conn.deliver(ok(try #require(conn.ids("initialize").first)))
+        _ = await eventually { !conn.ids("thread/loaded/list").isEmpty }
+        conn.deliver(loaded(conn.ids("thread/loaded/list")[0], ["bad"]))
+        _ = await eventually { conn.ids("thread/read").count == 1 }
+        conn.deliver(ok(conn.ids("thread/read")[0]))
+        try? await Task.sleep(for: .milliseconds(50))
+        #expect(rt.threadID == nil)
+        // 다음 기회(thread/closed)에 다시 묻는다 — 기다림이 남아 있으면 recover 가 아무것도 안 보낸다.
+        conn.deliver(threadClosed("bad"))
+        await answerRecovery(conn, listIndex: 1, [("t1", "/r/app", false)])
+        #expect(await eventually { rt.threadID == "t1" })
+    }
+
+    /// 최종 리뷰 M3 — 서브에이전트 스레드(`parentThreadId` 있음)는 전달 주소가 아니다.
+    @Test func 서브에이전트_thread_started_는_주소로_잡지_않는다() async throws {
+        let f = try fixture(); defer { try? fm.removeItem(at: f.base) }
+        let conn = FakeConnection()
+        var started: [String] = []
+        let rt = await connected(f, conn) { started.append($0) }
+        conn.deliver(threadStarted("t1"))
+        #expect(await eventually { rt.threadID == "t1" })
+        conn.deliver("{\"method\":\"thread/started\",\"params\":{\"thread\":{\"id\":\"sub\",\"cwd\":\"/r/app\",\"ephemeral\":false,\"parentThreadId\":\"t1\"}}}")
+        try? await Task.sleep(for: .milliseconds(50))
+        #expect(rt.threadID == "t1")
+        #expect(started == ["t1"])
+    }
+
+    @Test func 서브에이전트_스레드는_보충에서_빠진다() async throws {
+        let f = try fixture(); defer { try? fm.removeItem(at: f.base) }
+        let conn = FakeConnection()
+        let rt = await connected(f, conn)
+        conn.deliver(ok(try #require(conn.ids("initialize").first)))
+        _ = await eventually { !conn.ids("thread/loaded/list").isEmpty }
+        conn.deliver(loaded(conn.ids("thread/loaded/list")[0], ["sub", "t1"]))
+        _ = await eventually { conn.ids("thread/read").count == 2 }
+        let reads = conn.ids("thread/read")
+        conn.deliver("{\"id\":\(reads[0]),\"result\":{\"thread\":{\"id\":\"sub\",\"cwd\":\"/r/app\",\"ephemeral\":false,\"parentThreadId\":\"t1\",\"status\":{\"type\":\"active\"}}}}")
+        conn.deliver(read(reads[1], "t1"))
+        #expect(await eventually { rt.threadID == "t1" })              // 같은 cwd 둘이 아니라 하나로 판정
+    }
+
+    @Test func 보충_판정은_cwd_가_같고_임시가_아닌_스레드가_하나일_때만_고른다() {
+        typealias T = CodexPaneRuntime.LoadedThread
+        let cwd = "/Users/x/work/repo"
+        #expect(CodexPaneRuntime.adoptable([T(id: "a", cwd: cwd, ephemeral: false)], cwd: cwd) == "a")
+        #expect(CodexPaneRuntime.adoptable([T(id: "a", cwd: cwd + "/", ephemeral: false)], cwd: cwd) == "a")   // 끝 / 무시
+        #expect(CodexPaneRuntime.adoptable([T(id: "a", cwd: cwd, ephemeral: false),
+                                            T(id: "b", cwd: cwd, ephemeral: false)], cwd: cwd) == nil)
+        #expect(CodexPaneRuntime.adoptable([T(id: "t", cwd: cwd, ephemeral: true),
+                                            T(id: "a", cwd: cwd, ephemeral: false)], cwd: cwd) == "a")
+        #expect(CodexPaneRuntime.adoptable([T(id: "o", cwd: "/elsewhere", ephemeral: false),
+                                            T(id: "a", cwd: cwd, ephemeral: false)], cwd: cwd) == "a")
+        #expect(CodexPaneRuntime.adoptable([T(id: "n", cwd: nil, ephemeral: false)], cwd: cwd) == nil)
+        #expect(CodexPaneRuntime.adoptable([], cwd: cwd) == nil)
+        #expect(CodexPaneRuntime.adoptable([T(id: "s", cwd: cwd, ephemeral: false, parentThreadID: "a"),
+                                            T(id: "a", cwd: cwd, ephemeral: false)], cwd: cwd) == "a")     // 서브에이전트 빼고
+    }
+
+    // MARK: - 2단계 멈춘 큐 깨우기 (thread/queue/start)
+
+    @Test func 전달_뒤_5초_안에_active_가_아니면_queue_start_를_보낸다() async throws {
+        let f = try fixture(); defer { try? fm.removeItem(at: f.base) }
+        let conn = FakeConnection(), timer = FakeTimer()
+        let rt = await connected(f, conn, timer: timer)
+        conn.deliver(threadStarted("t1"))
+        #expect(await eventually { rt.threadID == "t1" })
+
+        rt.nudgeQueue()
+        #expect(timer.delays == [5])
+        timer.fire()
+        #expect(conn.params("thread/queue/start").map { $0["threadId"] as? String } == ["t1"])
+        timer.fire()                                                   // 한 번만
+        #expect(conn.ids("thread/queue/start").count == 1)
+        // 실험 API 실패는 로그만 — 런타임이 멀쩡하다
+        conn.deliver("{\"id\":\(conn.ids("thread/queue/start")[0]),\"error\":{\"code\":-32600,\"message\":\"x\"}}")
+        try? await Task.sleep(for: .milliseconds(30))
+        #expect(rt.threadID == "t1")
+        #expect(rt.failure == nil)
+    }
+
+    @Test func 전달_뒤_active_가_되면_queue_start_를_보내지_않는다() async throws {
+        let f = try fixture(); defer { try? fm.removeItem(at: f.base) }
+        let conn = FakeConnection(), timer = FakeTimer()
+        let rt = await connected(f, conn, timer: timer)
+        conn.deliver(threadStarted("t1"))
+        #expect(await eventually { rt.threadID == "t1" })
+
+        rt.nudgeQueue()
+        conn.deliver(status("other", "active"))                       // 다른 스레드는 상관없다
+        conn.deliver(status("t1", "active"))
+        try? await Task.sleep(for: .milliseconds(50))
+        timer.fire()
+        #expect(conn.ids("thread/queue/start").isEmpty)
+    }
+
+    @Test func 턴_중에_전달하면_턴이_끝난_뒤부터_5초를_잰다() async throws {
+        let f = try fixture(); defer { try? fm.removeItem(at: f.base) }
+        let conn = FakeConnection(), timer = FakeTimer()
+        let rt = await connected(f, conn, timer: timer)
+        conn.deliver(threadStarted("t1"))
+        conn.deliver(status("t1", "active"))                          // 승인 대기 등 — 큐는 턴이 끝나야 돈다
+        #expect(await eventually { rt.threadID == "t1" })
+        try? await Task.sleep(for: .milliseconds(30))
+
+        rt.nudgeQueue()
+        #expect(timer.pending == 0)                                   // 도는 턴에 queue/start 를 끼우지 않는다
+        conn.deliver(status("t1", "active"))                          // 승인 → 같은 턴(active → active)
+        try? await Task.sleep(for: .milliseconds(30))
+        #expect(timer.pending == 0)
+        conn.deliver(status("t1", "idle"))                            // 사람이 Esc 로 끊음 → 큐가 멈출 수 있다
+        #expect(await eventually { timer.pending == 1 })
+        timer.fire()
+        #expect(conn.params("thread/queue/start").map { $0["threadId"] as? String } == ["t1"])
+    }
+
+    @Test func 턴이_끝난_뒤_큐가_돌면_보내지_않는다() async throws {
+        let f = try fixture(); defer { try? fm.removeItem(at: f.base) }
+        let conn = FakeConnection(), timer = FakeTimer()
+        let rt = await connected(f, conn, timer: timer)
+        conn.deliver(threadStarted("t1"))
+        conn.deliver(status("t1", "active"))
+        #expect(await eventually { rt.threadID == "t1" })
+        try? await Task.sleep(for: .milliseconds(30))
+
+        rt.nudgeQueue()
+        conn.deliver(status("t1", "idle"))
+        conn.deliver(status("t1", "active"))                          // 큐의 다음 항목이 턴으로
+        try? await Task.sleep(for: .milliseconds(50))
+        timer.fire()
+        #expect(conn.ids("thread/queue/start").isEmpty)
+    }
+
+    @Test func 스레드가_없거나_바뀌면_깨우지_않는다() async throws {
+        let f = try fixture(); defer { try? fm.removeItem(at: f.base) }
+        let conn = FakeConnection(), timer = FakeTimer()
+        let rt = await connected(f, conn, timer: timer)
+        rt.nudgeQueue()                                                // 주소 없음
+        #expect(timer.pending == 0)
+
+        conn.deliver(threadStarted("t1"))
+        #expect(await eventually { rt.threadID == "t1" })
+        rt.nudgeQueue()
+        conn.deliver(threadStarted("t2"))                             // /new — 옛 스레드 배분은 SessionStart 가 닫는다
+        #expect(await eventually { rt.threadID == "t2" })
+        timer.fire()
+        #expect(conn.ids("thread/queue/start").isEmpty)
+    }
+
+    @Test func 멈춘_뒤에는_깨우지_않는다() async throws {
+        let f = try fixture(); defer { try? fm.removeItem(at: f.base) }
+        let conn = FakeConnection(), timer = FakeTimer()
+        let rt = await connected(f, conn, timer: timer)
+        conn.deliver(threadStarted("t1"))
+        #expect(await eventually { rt.threadID == "t1" })
+        rt.nudgeQueue()
+        rt.stop()
+        timer.fire()
+        #expect(conn.ids("thread/queue/start").isEmpty)
     }
 
     // MARK: - 경로

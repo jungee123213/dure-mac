@@ -60,6 +60,35 @@ final class CodexPaneRuntime {
     nonisolated static let defaultSocketTimeout: TimeInterval = 10
     /// `codex --version` 을 기다리는 시간.
     nonisolated static let versionTimeout: TimeInterval = 15
+    /// 전달 뒤 이만큼 턴이 시작되지 않으면 멈춘 큐로 보고 `thread/queue/start` 를 보낸다(g-stage2 4절 — 정상은 10ms 안).
+    nonisolated static let defaultNudgeDelay: TimeInterval = 5
+
+    /// 주소 보충의 재료 — `thread/loaded/list` 의 id 하나를 `thread/read` 로 읽은 것.
+    nonisolated struct LoadedThread: Equatable {
+        let id: String
+        let cwd: String?
+        let ephemeral: Bool
+        /// 서브에이전트 스레드면 부모 스레드 id(스키마 `parentThreadId`). 전달 주소가 아니다.
+        var parentThreadID: String? = nil
+    }
+
+    /// 보충할 스레드 — 임시도 서브에이전트도 아니고 cwd 가 페인 cwd 인 스레드가 **하나뿐일 때만** 그 id.
+    /// `/new` 뒤 약 60초는 옛 스레드도 같은 cwd 로 남는다(g-stage2 3절) — 둘이면 고르지 않고 다음 `thread/started` 를 기다린다.
+    nonisolated static func adoptable(_ threads: [LoadedThread], cwd: String) -> String? {
+        let target = normalizedPath(cwd)
+        let matches = threads.filter { !$0.ephemeral && $0.parentThreadID == nil && $0.cwd.map(normalizedPath) == target }
+        return matches.count == 1 ? matches[0].id : nil
+    }
+
+    /// 끝 `/` · `.` · 링크(`/var` ↔ `/private/var`)를 맞춘다. 양쪽을 같은 함수로 거르므로 비교만 맞으면 된다.
+    nonisolated static func normalizedPath(_ path: String) -> String {
+        URL(fileURLWithPath: path).standardizedFileURL.resolvingSymlinksInPath().path
+    }
+
+    /// 실제 타이머 — 메인 큐에서 `delay` 뒤에 부른다.
+    nonisolated static func mainAfter(_ delay: TimeInterval, _ work: @escaping @MainActor @Sendable () -> Void) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { MainActor.assumeIsolated { work() } }
+    }
 
     nonisolated static var defaultUserCodexHome: URL {
         FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".codex")
@@ -80,9 +109,14 @@ final class CodexPaneRuntime {
     private let socketReady: (String) -> Bool
     private let socketTimeout: TimeInterval
     private let shimPath: String
+    private let mcpSocket: String?
+    private let nudgeDelay: TimeInterval
+    private let schedule: (TimeInterval, @escaping @MainActor @Sendable () -> Void) -> Void
 
     /// 지금 TUI 가 쓰는 스레드(= 훅 `session_id`). `/new` · `/clear` 마다 바뀐다. 임시(제목) 스레드는 잡지 않는다.
     private(set) var threadID: String?
+    /// 두레가 배분을 넣을 주소 — 서버 소켓 + 지금 스레드. 스레드를 아직 모르면 nil(배분은 큐에 남는다).
+    var address: PaneAddress? { threadID.map { .codex(socket: paths.socket, thread: $0) } }
     /// 시작하지 못했거나 서버가 먼저 끝난 이유. 스토어가 페인 문제로 옮긴다.
     private(set) var failure: String?
     /// 시작 작업. 테스트가 끝날 때까지 기다린다.
@@ -98,6 +132,19 @@ final class CodexPaneRuntime {
     private var onThreadStarted: ((String) -> Void)?
     private var onServerExit: (() -> Void)?
 
+    // 주소 보충 — initialize 응답 뒤 스레드를 모르면 thread/loaded/list → id 마다 thread/read.
+    private var initializeID: Int?
+    private var initialized = false
+    private var pendingLoadedListID: Int?
+    private var pendingReads: [Int: String] = [:]
+    private var readThreads: [LoadedThread] = []
+    private var readStatuses: [String: String] = [:]
+
+    // 멈춘 큐 깨우기 — 지금 스레드의 마지막 상태(`thread/status/changed`), 깨울 스레드, 타이머 세대.
+    private var threadStatus: String?
+    private var nudgeThread: String?
+    private var nudgeGeneration = 0
+
     init(sessionID: String, cwd: String, profile: CodexProfile, paths: Paths, launcher: CodexProcessLaunching,
          threadName: String? = nil,
          userCodexHome: URL = CodexPaneRuntime.defaultUserCodexHome,
@@ -108,7 +155,10 @@ final class CodexPaneRuntime {
          connect: @escaping (String) -> any CodexServerConnecting = { CodexAppServerConnection(socketPath: $0) },
          socketReady: @escaping (String) -> Bool = { CodexPaneRuntime.isSocket($0) },
          socketTimeout: TimeInterval = CodexPaneRuntime.defaultSocketTimeout,
-         shimPath: String? = nil) {
+         shimPath: String? = nil,
+         mcpSocket: String? = nil,
+         nudgeDelay: TimeInterval = CodexPaneRuntime.defaultNudgeDelay,
+         schedule: @escaping (TimeInterval, @escaping @MainActor @Sendable () -> Void) -> Void = CodexPaneRuntime.mainAfter) {
         self.sessionID = sessionID
         self.cwd = cwd
         self.profile = profile
@@ -118,9 +168,12 @@ final class CodexPaneRuntime {
         self.userCodexHome = userCodexHome
         self.versionOutput = versionOutput
         self.inventory = inventory
+        self.mcpSocket = mcpSocket
         self.connect = connect
         self.socketReady = socketReady
         self.socketTimeout = socketTimeout
+        self.nudgeDelay = nudgeDelay
+        self.schedule = schedule
         // 기본 인자는 격리 밖에서 평가된다 — 메인액터 값(`HookBridge.shimURL`)은 본문에서 읽는다.
         self.shimPath = shimPath ?? HookBridge.shimURL.path
     }
@@ -155,6 +208,19 @@ final class CodexPaneRuntime {
         try? FileManager.default.removeItem(atPath: paths.failMarker)
         onThreadStarted = nil
         onServerExit = nil
+        nudgeThread = nil
+        nudgeGeneration += 1
+    }
+
+    /// 스토어가 이 페인으로 전달(`codex queue`)에 성공한 직후 부른다. `codex queue` 의 종료 0 은 턴 시작을 보장하지 않는다 —
+    /// 중단된 턴 뒤 큐가 멈춘다(g-stage2 4절). 그래서 `nudgeDelay` 안에 지금 스레드가 `active` 로 바뀌지 않으면
+    /// 실험 API `thread/queue/start` 를 한 번 보낸다. 지금 턴이 도는 중(`active`)이면 그 턴이 끝난(`active` 가 아닌) 때부터 잰다 —
+    /// 도는 턴에 큐를 끼워 넣지 않는다. 실패는 로그만(그 배분은 `delivered` 로 남고 사람이 본다).
+    func nudgeQueue() {
+        guard !stopped, connection != nil, let thread = threadID else { return }
+        nudgeThread = thread
+        nudgeGeneration += 1
+        if threadStatus != "active" { armNudge() }
     }
 
     // MARK: - 시작 순서
@@ -191,7 +257,7 @@ final class CodexPaneRuntime {
         let script = CodexLaunch.serverScript(cwd: cwd, sessionID: sessionID, home: paths.home.path,
                                               socket: paths.socket,
                                               hookArguments: CodexHooks.configArguments(groups, extraTrust: configTrust),
-                                              disabledPlugins: disabled)
+                                              disabledPlugins: disabled, mcpSocket: mcpSocket)
 
         // `Process.run` 은 메인 밖에서. 그 사이 stop 이 오면 늦게 도착한 handle 을 바로 끈다.
         let launcher = launcher, log = paths.log
@@ -237,7 +303,9 @@ final class CodexPaneRuntime {
         }, onClose: { [weak self] in
             DispatchQueue.main.async { MainActor.assumeIsolated { self?.connectionClosed(id) } }
         })
-        conn.send(CodexAppServer.initialize(id: requestID()))
+        let initID = requestID()
+        initializeID = initID
+        conn.send(CodexAppServer.initialize(id: initID))
         conn.send(CodexAppServer.initialized())
     }
 
@@ -256,23 +324,131 @@ final class CodexPaneRuntime {
     private func receive(_ data: Data, from id: ObjectIdentifier) {
         guard let conn = current(id) else { return }
         switch CodexAppServer.parse(data, pendingHooksListID: nil) {
-        case .threadStarted(let thread, _, let ephemeral):
-            // 첫 턴의 "제목 만들기" 스레드는 전달 주소가 아니다(f-stage1 판정 5).
-            guard !ephemeral, thread != threadID else { return }
-            threadID = thread
-            if !named, let threadName {
-                named = true
-                conn.send(CodexAppServer.setThreadName(id: requestID(), threadID: thread, name: threadName))
-            }
-            onThreadStarted?(thread)
+        case .threadStarted(let thread, _, let ephemeral, let parent):
+            // 첫 턴의 "제목 만들기" 스레드는 전달 주소가 아니다(f-stage1 판정 5). 서브에이전트 스레드(부모가 있는 것)도.
+            guard !ephemeral, parent == nil, thread != threadID else { return }
+            adopt(thread, status: nil, on: conn)
+        case .threadStatus(let thread, let status):
+            statusChanged(thread, to: status)
         case .threadClosed(let thread):
             // TUI 가 떠난 옛 스레드는 60초 뒤에 내려온다 — 지금 스레드일 때만 뜻이 있다(판정 6).
-            if thread == threadID { threadID = nil }
-        case .response(let rid, false):
-            NSLog("[Dure] Codex 페인 \(sessionID): 요청 \(rid) 이 실패했습니다")
+            if thread == threadID {
+                threadID = nil
+                threadStatus = nil
+            }
+            // 보충이 둘 중 하나를 못 골랐던 경우 — 옛 스레드가 내려가면 이제 하나뿐일 수 있다.
+            if threadID == nil { recover(on: conn) }
+        case .response(let rid, let ok) where rid == initializeID:
+            initializeID = nil
+            guard ok else {
+                NSLog("[Dure] Codex 페인 \(sessionID): initialize 가 실패했습니다")
+                return
+            }
+            initialized = true
+            if threadID == nil { recover(on: conn) }
+        case .loadedThreads(let rid, let ids) where rid == pendingLoadedListID:
+            pendingLoadedListID = nil
+            guard threadID == nil else { return }
+            readThreads = []
+            readStatuses = [:]
+            for id in ids {
+                let r = requestID()
+                pendingReads[r] = id
+                conn.send(CodexAppServer.readThread(id: r, threadID: id))
+            }
+            finishRecoveryIfDone(on: conn)
+        case .threadRead(let rid, let thread, let cwd, let ephemeral, let status, let parent) where pendingReads[rid] != nil:
+            pendingReads[rid] = nil
+            readThreads.append(LoadedThread(id: thread, cwd: cwd, ephemeral: ephemeral, parentThreadID: parent))
+            if let status { readStatuses[thread] = status }
+            finishRecoveryIfDone(on: conn)
+        case .response(let rid, let ok):
+            // 보충 요청의 응답이면 성공이든 실패든 기다림에서 뺀다 — 모양이 어긋난 성공(`thread` 없는 thread/read ·
+            // `data` 없는 loaded list)이 `.response(ok: true)` 로 오면 영영 안 빠져 보충이 막힌다(최종 리뷰 M1).
+            if pendingReads.removeValue(forKey: rid) != nil {
+                finishRecoveryIfDone(on: conn)          // 그 사이 내려간 스레드 · 못 읽은 스레드 — 빼고 판정한다
+            } else if rid == pendingLoadedListID {
+                pendingLoadedListID = nil
+            }
+            if !ok { NSLog("[Dure] Codex 페인 \(sessionID): 요청 \(rid) 이 실패했습니다") }
         default:
             break
         }
+    }
+
+    /// 새 스레드(`thread/started`)와 보충한 스레드가 같은 길로 간다 — 이름 붙이기 · 스토어 알림(큐 흘리기).
+    private func adopt(_ thread: String, status: String?, on conn: any CodexServerConnecting) {
+        threadID = thread
+        threadStatus = status
+        nudgeThread = nil                     // 옛 스레드의 배분은 SessionStart 규칙이 닫는다
+        nudgeGeneration += 1
+        if !named, let threadName {
+            named = true
+            conn.send(CodexAppServer.setThreadName(id: requestID(), threadID: thread, name: threadName))
+        }
+        onThreadStarted?(thread)
+    }
+
+    // MARK: - 주소 보충
+
+    /// 두레가 TUI 보다 늦게 붙으면 `thread/started` 를 놓친다 — 서버에 올라와 있는 스레드에서 찾는다.
+    private func recover(on conn: any CodexServerConnecting) {
+        guard initialized, threadID == nil, pendingLoadedListID == nil, pendingReads.isEmpty else { return }
+        let r = requestID()
+        pendingLoadedListID = r
+        conn.send(CodexAppServer.loadedThreads(id: r))
+    }
+
+    private func finishRecoveryIfDone(on conn: any CodexServerConnecting) {
+        guard pendingLoadedListID == nil, pendingReads.isEmpty else { return }
+        let threads = readThreads, statuses = readStatuses
+        readThreads = []
+        readStatuses = [:]
+        // 그 사이 thread/started 가 왔으면 그것이 맞다.
+        guard threadID == nil, !threads.isEmpty else { return }
+        guard let thread = Self.adoptable(threads, cwd: cwd) else {
+            NSLog("[Dure] Codex 페인 \(sessionID): 올라온 스레드 \(threads.count)개에서 주소를 고르지 못했습니다 — 다음 thread/started 를 기다립니다")
+            return
+        }
+        NSLog("[Dure] Codex 페인 \(sessionID): 올라와 있던 스레드 \(thread) 를 주소로 씁니다")
+        adopt(thread, status: statuses[thread], on: conn)
+    }
+
+    // MARK: - 멈춘 큐 깨우기
+
+    private func statusChanged(_ thread: String, to status: String) {
+        guard thread == threadID else { return }
+        let was = threadStatus
+        threadStatus = status
+        guard nudgeThread == thread else { return }
+        if status == "active" {
+            // 새 턴이 시작됐다 — 큐가 돈다. (active → active 는 같은 턴의 플래그 변화라 아니다.)
+            if was != "active" {
+                nudgeThread = nil
+                nudgeGeneration += 1
+            }
+        } else if was == "active" {
+            // 턴이 끝났거나 끊겼다 — 넣어 둔 것이 지금부터 돌아야 한다.
+            armNudge()
+        }
+    }
+
+    private func armNudge() {
+        nudgeGeneration += 1
+        let generation = nudgeGeneration
+        schedule(nudgeDelay) { [weak self] in self?.nudgeDue(generation) }
+    }
+
+    private func nudgeDue(_ generation: Int) {
+        guard !stopped, generation == nudgeGeneration, let thread = nudgeThread, thread == threadID else { return }
+        nudgeThread = nil
+        guard let conn = connection else {
+            NSLog("[Dure] Codex 페인 \(sessionID): 큐를 깨워야 하는데 app-server 연결이 없습니다")
+            return
+        }
+        let r = requestID()
+        conn.send(CodexAppServer.startQueue(id: r, threadID: thread))
+        NSLog("[Dure] Codex 페인 \(sessionID): 전달 뒤 \(Self.seconds(nudgeDelay))초 안에 턴이 시작되지 않아 큐를 다시 돌립니다 — thread/queue/start \(thread) (요청 \(r))")
     }
 
     private func connectionClosed(_ id: ObjectIdentifier) {

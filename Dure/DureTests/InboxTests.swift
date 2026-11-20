@@ -114,6 +114,82 @@ struct InboxTests {
         #expect(got.value.count == 1)
         #expect(throws: Inbox.Problem.self) { try LiveInbox(registry: reg).send("hi", toClaudeSession: "nope") }
     }
+
+    // MARK: - 받는 페인 종류로 출구 고르기 (2단계 Task 3)
+
+    /// 이 테스트는 셸을 띄우지 않는다 — 리졸버의 `resolve` 를 가짜로 꽂는다.
+    static func resolver(_ toolchain: CodexToolchain?, calls: LockedBox<Int> = LockedBox(0),
+                         queue: DispatchQueue = DispatchQueue(label: "test.resolver")) -> CodexToolchainResolver {
+        CodexToolchainResolver(queue: queue) { calls.mutate { $0 += 1 }; return toolchain }
+    }
+
+    @Test @MainActor func Claude_주소는_인박스_소켓으로_간다() throws {
+        let dir = try MCPServerTests.shortDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let path = dir.appendingPathComponent("live.sock").path
+        let got = LockedBox<[String]>([])
+        let server = MCPServer(path: path) { line, reply in got.mutate { $0.append(line) }; reply(nil) }
+        try server.start()
+        defer { server.stop() }
+        let reg = try Self.registry(["5.json": #"{"sessionId":"s5","messagingSocketPath":"\#(path)"}"#])
+        defer { try? FileManager.default.removeItem(at: reg) }
+        let runner = CodexQueueSenderTests.FakeArgvRunner()
+        let out = LivePaneMessaging(inbox: LiveInbox(registry: reg), codexToolchain: Self.resolver(nil), runner: runner)
+        try out.send("hi", to: .claude(session: "s5"))
+        Thread.sleep(forTimeInterval: 0.3)
+        #expect(got.value.count == 1 && got.value.first?.contains(#""content":"hi""#) == true)
+        #expect(runner.calls.isEmpty)
+        #expect(throws: Inbox.Problem.self) { try out.send("hi", to: .claude(session: "nope")) }
+    }
+
+    @Test @MainActor func Codex_주소는_codex_queue_로_간다() throws {
+        let runner = CodexQueueSenderTests.FakeArgvRunner()
+        let resolver = Self.resolver(CodexToolchain(codexPath: "/nvm/bin/codex", path: "/nvm/bin:/usr/bin"))
+        resolver.start(); resolver.queue.sync {}
+        let out = LivePaneMessaging(codexToolchain: resolver, runner: runner)
+        try out.send("일", to: .codex(socket: "/s.sock", thread: "T1"))
+        let call = try #require(runner.calls.first)
+        #expect(call.executable == "/nvm/bin/codex")
+        #expect(call.arguments == ["queue", "--remote", "unix:///s.sock", "--thread", "T1", "--message", "일"])
+        #expect(call.environment["PATH"] == "/nvm/bin:/usr/bin" && call.environment["DURE_SESSION"] == nil)
+    }
+
+    /// 아직 못 구했으면 던진다(재시도 횟수에 든다) — 그리고 구하기를 다시 시작해 다음 재시도 때는 간다.
+    @Test @MainActor func codex_경로를_아직_모르면_던지고_구하기를_시작한다() throws {
+        let runner = CodexQueueSenderTests.FakeArgvRunner()
+        let calls = LockedBox(0)
+        let resolver = Self.resolver(CodexToolchain(codexPath: "/c", path: "/p"), calls: calls)
+        let out = LivePaneMessaging(codexToolchain: resolver, runner: runner)
+        #expect(throws: CodexQueueSender.Problem.codexNotResolved) {
+            try out.send("일", to: .codex(socket: "/s.sock", thread: "T1"))
+        }
+        resolver.queue.sync {}
+        #expect(calls.value == 1 && runner.calls.isEmpty)
+        try out.send("일", to: .codex(socket: "/s.sock", thread: "T1"))
+        #expect(runner.calls.count == 1)
+    }
+
+    /// 멈춘 큐 깨우기(2단계 Task 4) — Codex 전달이 **성공했을 때만** 스토어에 알린다(그 페인 런타임이 5초를 잰다).
+    @Test @MainActor func Codex_전달이_성공하면_전달_알림을_부른다() throws {
+        let resolver = Self.resolver(CodexToolchain(codexPath: "/c", path: "/p"))
+        resolver.start(); resolver.queue.sync {}
+        let seen = LockedBox<[String]>([])
+        var out = LivePaneMessaging(codexToolchain: resolver, runner: CodexQueueSenderTests.FakeArgvRunner())
+        out.onCodexDelivered = { socket, thread in seen.mutate { $0.append("\(socket) \(thread)") } }
+        try out.send("일", to: .codex(socket: "/s.sock", thread: "T1"))
+        #expect(seen.value == ["/s.sock T1"])
+
+        var failing = LivePaneMessaging(codexToolchain: resolver,
+                                        runner: CodexQueueSenderTests.FakeArgvRunner(.init(status: 1, stderr: "x", timedOut: false)))
+        failing.onCodexDelivered = { socket, thread in seen.mutate { $0.append("\(socket) \(thread)") } }
+        #expect(throws: CodexQueueSender.Problem.self) { try failing.send("일", to: .codex(socket: "/s.sock", thread: "T2")) }
+        #expect(seen.value == ["/s.sock T1"])
+    }
+
+    @Test func 주소의_세션_열쇠는_Claude_세션이나_Codex_스레드다() {
+        #expect(PaneAddress.claude(session: "cc-a").sessionKey == "cc-a")
+        #expect(PaneAddress.codex(socket: "/s", thread: "T1").sessionKey == "T1")
+    }
 }
 
 /// 테스트 전용 — 소켓 큐와 테스트 스레드가 같이 만지는 값.

@@ -31,6 +31,37 @@ struct MCPHandlerTests {
         #expect(r["id"] as? Int == 0)
     }
 
+    // Task 1 M3 에서 Codex 0.167.0 이 실제로 보낸 줄(g-stage2.md)
+    static let codexInit = #"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{"experimental":{"codex/auth-change":{}},"elicitation":{"form":{},"url":{}}},"clientInfo":{"name":"codex-mcp-client","title":"Codex","version":"0.167.0"}}}"#
+    static let codexCall = #"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"_meta":{"callId":"exec-e733f2b9-e1af-4ebd-91a9-0bb6dcea6841","threadId":"01a1f6a3-x","progressToken":1},"name":"echo","arguments":{"x":"s2"}}}"#
+
+    @Test func Codex_클라이언트의_initialize_에_답한다() throws {
+        let r = try #require(Self.respond(Self.codexInit))
+        #expect(r["id"] as? Int == 0)
+        let result = try #require(r["result"] as? [String: Any])
+        #expect(result["protocolVersion"] as? String == "2025-06-18")
+        #expect((result["serverInfo"] as? [String: Any])?["name"] as? String == "dure")
+        let list = try #require(Self.respond(#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"_meta":{"progressToken":0}}}"#))
+        #expect(((list["result"] as? [String: Any])?["tools"] as? [[String: Any]])?.first?["name"] as? String == "echo")
+    }
+
+    @Test func Codex_클라이언트의_tools_call_은_toolUseId_없이도_된다() throws {
+        let r = try #require(Self.respond(#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"echo","arguments":{"x":"s2"}}}"#) { c in
+            .init(text: "받음: \(c.arguments["x"] ?? "")")
+        })
+        let content = try #require(((r["result"] as? [String: Any])?["content"] as? [[String: Any]])?.first)
+        #expect(content["text"] as? String == "받음: s2")
+    }
+
+    @Test func Codex_의_callId_를_toolUseId_대신_쓴다() {
+        var got: MCPToolCall?
+        _ = Self.respond(Self.codexCall) { c in got = c; return .init(text: "") }
+        #expect(got?.toolUseId == "exec-e733f2b9-e1af-4ebd-91a9-0bb6dcea6841")
+        // 둘 다 있으면 claudecode/toolUseId 가 먼저
+        _ = Self.respond(#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"_meta":{"claudecode/toolUseId":"toolu_9","callId":"exec-1"},"name":"echo","arguments":{}}}"#) { c in got = c; return .init(text: "") }
+        #expect(got?.toolUseId == "toolu_9")
+    }
+
     @Test func 알림에는_답하지_않는다() {
         #expect(MCPHandler.respond(toLine: #"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
                                    tools: Self.tools, serverName: "dure", call: { _ in .init(text: "") }) == nil)

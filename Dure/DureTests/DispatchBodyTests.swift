@@ -220,4 +220,54 @@ struct DispatchBodyTests {
         #expect(!s.contains("질문:"))
         #expect(s.hasPrefix("[두레] 조율자 답 (배분 #2)\nA\n"))
     }
+
+    // MARK: - Codex 판 (2단계 Task 5)
+
+    static func allForms() -> [Dispatch] {
+        [row(mode: .newIssue, title: "제목", body: "본문", scope: .pr, hint: "feat/#N/x"),
+         row(mode: .continueWork, scope: .pr, issue: 3, branch: "feat/#3/x"),
+         row()]
+    }
+
+    @Test func Codex_판에는_heredoc_과_명령_치환이_없다() {
+        for d in Self.allForms() {
+            let s = DispatchBody.dispatch(d, repoName: "android", kind: .codex)
+            #expect(!s.contains("$("), "\(d.gitMode as Any)")
+            #expect(!s.contains("<<"))
+        }
+    }
+
+    @Test func Codex_판은_AGENTS_md_를_먼저_가리킨다() {
+        for d in Self.allForms().dropLast() {
+            let s = DispatchBody.dispatch(d, repoName: "android", kind: .codex)
+            #expect(s.contains("레포 AGENTS.md(없으면 CLAUDE.md)"))
+            #expect(!s.contains("레포 CLAUDE.md 의"))
+        }
+    }
+
+    @Test func Codex_판은_작은따옴표_인용_규칙을_적는다() {
+        let s = DispatchBody.dispatch(Self.allForms()[1], repoName: "android", kind: .codex)
+        #expect(s.contains("--title '<제목>' --body '<본문>'. 안의 작은따옴표는 '\\'' 로 쓴다."))
+        #expect(s.contains("git commit -m '<메시지>' 한 덩어리로(여러 줄 가능, 같은 인용 규칙)"))
+        let n = DispatchBody.dispatch(Self.allForms()[0], repoName: "android", kind: .codex)
+        #expect(n.contains("git commit -m '<메시지>'"))
+        #expect(n.contains("작은따옴표 한 덩어리로 넘긴다"))
+    }
+
+    @Test func Claude_판은_그대로다() {
+        for d in Self.allForms() {
+            let s = DispatchBody.dispatch(d, repoName: "android")
+            #expect(s == DispatchBody.dispatch(d, repoName: "android", kind: .claude))
+            #expect(!s.contains("AGENTS.md"))
+            #expect(!s.contains("git commit -m"))
+            if d.gitMode != nil { #expect(s.contains("<<'EOF'")) }
+        }
+    }
+
+    @Test func 따옴표와_달러가_든_이슈_제목도_Codex_판에_그대로_실린다() {
+        let d = Self.row(mode: .newIssue, title: "it's $HOME `x`", body: "a'b $(x)", scope: .commit)
+        let s = DispatchBody.dispatch(d, repoName: "android", kind: .codex)
+        #expect(s.contains("제목: it's $HOME `x`"))
+        #expect(s.contains("a'b $(x)"))
+    }
 }
