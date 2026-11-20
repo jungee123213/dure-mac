@@ -121,6 +121,9 @@ final class CodexPaneRuntime {
     private(set) var threadID: String?
     /// 두레가 배분을 넣을 주소 — 서버 소켓 + 지금 스레드. 스레드를 아직 모르면 nil(배분은 큐에 남는다).
     var address: PaneAddress? { threadID.map { .codex(socket: paths.socket, thread: $0) } }
+    /// 지금 스레드에서 턴이 도는 중인가 — 서버의 `thread/status/changed`(`active`)로 안다. 훅 파일에서 오는 칩 상태와 달리
+    /// 소켓 메시지와 같은 순서로 바뀐다. 한도가 풀릴 때 "사람이 이 페인에서 턴을 돌리는 중" 판정에 쓴다.
+    var isTurnActive: Bool { threadID != nil && threadStatus == "active" }
     /// 시작하지 못했거나 서버가 먼저 끝난 이유. 스토어가 페인 문제로 옮긴다.
     private(set) var failure: String?
     /// 시작 작업. 테스트가 끝날 때까지 기다린다.
@@ -135,6 +138,8 @@ final class CodexPaneRuntime {
     private var nextRequestID = 1
     private var onThreadStarted: ((String) -> Void)?
     private var onServerExit: (() -> Void)?
+    private var onRateLimits: ((CodexRateLimits, Bool) -> Void)?
+    private var onUsageLimit: ((String) -> Void)?
 
     // 주소 보충 — initialize 응답 뒤 스레드를 모르면 thread/loaded/list → id 마다 thread/read.
     private var initializeID: Int?
@@ -187,11 +192,18 @@ final class CodexPaneRuntime {
     }
 
     /// 한 번만 시작한다. 콜백은 메인에서 부른다. `onServerExit` 는 `stop()` 없이 서버가 끝났을 때만.
-    func start(onThreadStarted: @escaping (String) -> Void, onServerExit: @escaping () -> Void) {
+    /// `onRateLimits` — 한도를 읽을 때마다(`replaces`: `read` 응답이면 true = 통째로, `updated` 알림이면 false = 합침).
+    /// `onUsageLimit` — 재시도 없는 `usageLimitExceeded` 가 났을 때 그 스레드 id. 지금 스레드의 재시도 없는 HTTP 429 도
+    /// (`codexErrorInfo` 모양과 상관없이) 한도 초과로 본다 — 그때는 한도도 다시 읽어 실제 리셋 시각 · 풀림을 읽은 값으로 정한다.
+    func start(onThreadStarted: @escaping (String) -> Void, onServerExit: @escaping () -> Void,
+               onRateLimits: @escaping (CodexRateLimits, _ replaces: Bool) -> Void = { _, _ in },
+               onUsageLimit: @escaping (String) -> Void = { _ in }) {
         guard !began, !stopped else { return }
         began = true
         self.onThreadStarted = onThreadStarted
         self.onServerExit = onServerExit
+        self.onRateLimits = onRateLimits
+        self.onUsageLimit = onUsageLimit
         // TUI 스크립트는 표식이 **있기만** 해도 끝난다 — 지난 기동의 찌꺼기를 지금 지운다(기다리면 늦는다).
         Self.removeSocket(paths.socket)
         try? FileManager.default.removeItem(atPath: paths.failMarker)
@@ -216,6 +228,8 @@ final class CodexPaneRuntime {
         try? FileManager.default.removeItem(atPath: paths.failMarker)
         onThreadStarted = nil
         onServerExit = nil
+        onRateLimits = nil
+        onUsageLimit = nil
         nudgeThread = nil
         nudgeGeneration += 1
     }
@@ -229,6 +243,14 @@ final class CodexPaneRuntime {
         nudgeThread = thread
         nudgeGeneration += 1
         if threadStatus != "active" { armNudge() }
+    }
+
+    /// 한도를 다시 읽는다 — 응답은 `onRateLimits(_, true)` 로 온다. 연결이 없거나 initialize 전이면 보내지 않고 false.
+    @discardableResult
+    func readRateLimits() -> Bool {
+        guard !stopped, initialized, let conn = connection else { return false }
+        conn.send(CodexAppServer.readRateLimits(id: requestID()))
+        return true
     }
 
     // MARK: - 시작 순서
@@ -366,7 +388,21 @@ final class CodexPaneRuntime {
                 return
             }
             initialized = true
+            readRateLimits()      // 연결 직후 서버가 먼저 알려 주는 한도는 없다(j-stage4 1절) — 우리가 읽는다
             if threadID == nil { recover(on: conn) }
+        case .rateLimits(let rid, let limits):
+            onRateLimits?(limits, rid != nil)
+        case .turnError(let thread, let error, let willRetry, let httpStatus):
+            guard !willRetry else { return }
+            if error == "usageLimitExceeded" {
+                onUsageLimit?(thread)
+            } else if httpStatus == 429 {
+                // 한도 초과인데 모양이 다른 실패. 지금 스레드의 턴이면 그 턴은 Stop 없이 끊겼다 — 한도 초과와 같은 길로 보내
+                // 끊긴 배분을 기억하게 한다(안 그러면 계정만 막히고 배분은 영영 일하는 중으로 남는다). 한도는 다시 읽어
+                // 리셋 시각 · 풀림을 읽은 값으로 고친다 — 한도가 아니었으면 곧 풀리고 이어 하기가 간다.
+                if thread == threadID { onUsageLimit?(thread) }
+                readRateLimits()
+            }
         case .loadedThreads(let rid, let ids) where rid == pendingLoadedListID:
             pendingLoadedListID = nil
             guard threadID == nil else { return }

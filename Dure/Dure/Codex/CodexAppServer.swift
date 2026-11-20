@@ -46,6 +46,11 @@ nonisolated enum CodexAppServer {
         encode(["id": id, "method": "thread/queue/start", "params": ["threadId": threadID]])
     }
 
+    /// 한도 읽기. 리셋 크레딧 상세는 필요 없다(실측 j-stage4 3절 — `credits` 만 null 로 줄어든다).
+    static func readRateLimits(id: Int) -> Data {
+        encode(["id": id, "method": "account/rateLimits/read", "params": ["excludeResetCreditDetails": true]])
+    }
+
     private static func encode(_ object: [String: Any]) -> Data {
         (try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .withoutEscapingSlashes])) ?? Data()
     }
@@ -66,6 +71,11 @@ nonisolated enum CodexAppServer {
         /// `thread/read` 결과 — 결과가 `thread: {id, …}` 인 응답. `status` 는 `status.type`(보충한 스레드의 처음 상태).
         case threadRead(id: Int, threadID: String, cwd: String?, ephemeral: Bool, status: String? = nil,
                         parentThreadID: String? = nil)
+        /// 한도. 응답이면 `id`, `account/rateLimits/updated` 알림이면 nil. 알림은 희소하다 — `merged(into:)` 로 합친다.
+        case rateLimits(id: Int?, CodexRateLimits)
+        /// `error` 알림(턴 실패). `codexError` 는 `codexErrorInfo` 가 문자열이면 그 값, 객체면 키 이름.
+        /// `httpStatus` 는 객체 안의 `httpStatusCode`.
+        case turnError(threadID: String, codexError: String?, willRetry: Bool, httpStatus: Int?)
         /// 모르는 알림 · 서버 요청 · 모양이 어긋난 메시지. 값은 `method`(없으면 빈 문자열).
         case other(String)
     }
@@ -103,6 +113,15 @@ nonisolated enum CodexAppServer {
             if o["error"] != nil { return .response(id: id, ok: false) }
             guard let result = o["result"] else { return .other("") }
             let r = result as? [String: Any]
+            // 한도 응답 — 다른 응답 모양 판별보다 먼저. `rateLimitsByLimitId.codex` 가 있으면 그것, 없으면 `rateLimits`.
+            if let top = r?["rateLimits"] as? [String: Any] {
+                let byID = (r?["rateLimitsByLimitId"] as? [String: Any])?["codex"] as? [String: Any]
+                // 위 계열 표에 codex 가 없어 최상위를 쓸 때도 `limitId` 를 본다 — 다른 계열이면 값 없음.
+                if byID == nil, let limit = top["limitId"] as? String, limit != "codex" { return .response(id: id, ok: true) }
+                var limits = rateLimits(byID ?? top)
+                limits.ordinaryUsageAllowed = r?["ordinaryUsageAllowed"] as? Bool
+                return .rateLimits(id: id, limits)
+            }
             if id == pendingHooksListID, let data = r?["data"] as? [[String: Any]] {
                 return .hooksListResult(id: id, entries: hookEntries(data))
             }
@@ -135,9 +154,41 @@ nonisolated enum CodexAppServer {
         case "thread/closed":
             guard let id = params["threadId"] as? String else { return .other(method) }
             return .threadClosed(threadID: id)
+        case "account/rateLimits/updated":
+            guard let raw = params["rateLimits"] as? [String: Any] else { return .other(method) }
+            // 다른 한도 계열(`codex_other` …)은 버린다 — `limitId` 가 없거나 `codex` 만 받는다.
+            if let limit = raw["limitId"] as? String, limit != "codex" { return .other(method) }
+            return .rateLimits(id: nil, rateLimits(raw))
+        case "error":
+            guard let thread = params["threadId"] as? String else { return .other(method) }
+            let info = (params["error"] as? [String: Any])?["codexErrorInfo"]
+            var name: String?
+            var status: Int?
+            if let s = info as? String {
+                name = s
+            } else if let d = info as? [String: Any], let key = d.keys.sorted().first {
+                name = key
+                status = intValue((d[key] as? [String: Any])?["httpStatusCode"])
+            }
+            return .turnError(threadID: thread, codexError: name, // `willRetry` 가 없으면 끝난 실패로 본다(보수적).
+                              willRetry: params["willRetry"] as? Bool ?? false,
+                              httpStatus: status)
         default:
             return .other(method)
         }
+    }
+
+    /// `RateLimitSnapshot` → 값. 모르는 키는 무시하고 `null` 창은 nil.
+    private static func rateLimits(_ o: [String: Any]) -> CodexRateLimits {
+        func window(_ v: Any?) -> CodexRateLimits.Window? {
+            // `usedPercent` 는 스키마 필수 — 없으면 창 전체를 모름으로 둔다.
+            guard let w = v as? [String: Any], let used = intValue(w["usedPercent"]) else { return nil }
+            return CodexRateLimits.Window(usedPercent: used,
+                                          windowMinutes: intValue(w["windowDurationMins"]),
+                                          resetsAt: intValue(w["resetsAt"]))
+        }
+        return CodexRateLimits(primary: window(o["primary"]), secondary: window(o["secondary"]),
+                               planType: o["planType"] as? String, reachedType: o["rateLimitReachedType"] as? String)
     }
 
     /// JSONSerialization 은 숫자를 NSNumber 로 준다. Bool 은 id 로 받지 않는다.

@@ -270,4 +270,44 @@ struct DispatchBodyTests {
         #expect(s.contains("제목: it's $HOME `x`"))
         #expect(s.contains("a'b $(x)"))
     }
+
+    // MARK: - Codex 한도 (4단계 Task 4)
+
+    static let seoul = TimeZone(identifier: "Asia/Seoul")!
+
+    @Test func 한도_안내는_다시_볼_시각과_큐에_쌓인다는_말을_싣는다() {
+        // 05:07 UTC = 14:07 서울
+        let s = DispatchBody.limitNotice(until: 5 * 3600 + 7 * 60, timeZone: Self.seoul)
+        #expect(s.contains("14:07"))
+        #expect(s.contains("Codex 페인 배분은 그때까지 큐에 쌓인다"))
+        #expect(!s.contains("$(") && !s.contains("<<"))
+    }
+
+    @Test func 시각은_H_mm_이다() {
+        #expect(DispatchBody.hourMinute(0, timeZone: Self.seoul) == "9:00")
+        #expect(DispatchBody.hourMinute(5 * 3600 + 7 * 60, timeZone: Self.seoul) == "14:07")
+    }
+
+    @Test func 이어_하기는_머리와_원래_배분_전문을_싣는다() {
+        for d in Self.allForms() {
+            let s = DispatchBody.resumeAfterLimit(d, repoName: "android", kind: .codex)
+            #expect(s.hasPrefix("[두레] "))
+            #expect(s.contains("#7"))
+            #expect(s.contains("한도가 풀렸다"))
+            #expect(s.contains("한도로 끊겼다 — 이어서 하라"))
+            #expect(s.hasSuffix(DispatchBody.dispatch(d, repoName: "android", kind: .codex)))
+            #expect(!s.contains("$(") && !s.contains("<<"))
+        }
+    }
+
+    @Test func 한도_relay_는_레포_이름_없이_Codex_한도_머리를_단다() {
+        let s = DispatchBody.relay(.limit, seq: nil, repoName: "?", body: "본문", time: "14:07")
+        #expect(s == "[두레] Codex 한도 (14:07)\n본문")
+        let r = DispatchBody.relay(.limit, seq: 3, repoName: "android", body: "본문", time: "14:07")
+        #expect(r == "[두레] Codex 한도 (배분 #3, 14:07)\n본문")
+    }
+
+    @Test func 풀림_안내는_정해진_문구다() {
+        #expect(DispatchBody.limitReleased == "Codex 한도가 풀렸다 — 멈춘 배분을 다시 보낸다.")
+    }
 }

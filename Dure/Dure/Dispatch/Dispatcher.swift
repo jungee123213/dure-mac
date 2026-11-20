@@ -9,6 +9,10 @@ import GRDB
 /// 나가는 것: 받는 페인 종류에 맞는 출구(`PaneMessaging` — Claude 인박스 소켓 · Codex `codex queue`) 또는 기동 프롬프트(`initialPrompt`). 판단은 `DispatchRules`, 행은 `DispatchOps`.
 ///
 /// 스토어의 상태는 `Lookups` 클로저로 받는다 — 스토어는 실제 DB 를 쓰므로 여기서 직접 잡으면 테스트가 안 된다.
+///
+/// Codex 계정 한도(4단계, D-46): 스토어가 Codex 페인 · Codex 조율자의 뷰에 `limitedUntil` 을 채우면 그쪽으로는 아무것도 보내지
+/// 않는다(큐에 남김). 한도로 끊긴 턴에는 Stop 이 없다(j-stage4 2절) — `didHitUsageLimit` 이 끊긴 배분을 기억하고,
+/// `didReleaseUsageLimit` 이 그 페인에 "이어서 하라" 를 한 번 보낸 뒤 큐를 전부 흘린다.
 @MainActor
 final class Dispatcher {
 
@@ -18,6 +22,11 @@ final class Dispatcher {
         /// 메시지를 넣을 곳. Claude 는 현재 cc_session_id, Codex 는 서버 소켓 + 스레드 id. 모르면 nil — 큐에 남는다.
         var address: PaneAddress?
         var kind: AgentKind = .claude
+        /// Codex 계정 한도로 막혀 있으면 다시 볼 시각. 스토어가 Codex 페인 · Codex 조율자에만 채운다 — Claude 는 늘 nil.
+        var limitedUntil: Int? = nil
+        /// Codex 만 — 서버의 스레드 상태로 본 "지금 스레드에서 턴이 도는 중". 한도가 풀릴 때 사람이 친 턴에 끼어들지 않는 판정에
+        /// 쓴다(훅 파일로 오는 `state` 는 소켓 메시지와 순서가 엇갈릴 수 있다). Claude 는 쓰지 않는다 — `state` 로 본다.
+        var turnActive: Bool = false
     }
 
     struct Lookups {
@@ -31,6 +40,8 @@ final class Dispatcher {
         /// 페인은 놀고 있었는데 소켓에 못 썼다. `queuedBusy` 로 답하면 조율자가 오지 않을 `Stop` 을
         /// 기다리므로 따로 알린다. 재시도는 `retryPending()`(앱 주기 틱)이 맡는다.
         case deliveryFailed(seq: Int, attempts: Int)
+        /// 떠 있는 Codex 페인인데 계정 한도로 막혀 있다. `until` 이후 풀리면 저절로 간다.
+        case queuedLimited(seq: Int, until: Int)
     }
 
     /// 조율자 `answer` 의 결과(이슈 #43). `EnqueueOutcome` 과 같은 결에 셋을 더했다 —
@@ -39,6 +50,7 @@ final class Dispatcher {
     enum AnswerOutcome: Equatable {
         case delivered, queuedBusy, queuedNotStarted
         case deliveryFailed(attempts: Int)
+        case queuedLimited(until: Int)
         case dispatchClosed(seq: Int)
         case noQuestion
         case answerPending
@@ -57,6 +69,23 @@ final class Dispatcher {
     /// `UserPromptSubmit` 이 안 뜨면 그대로라 믿을 수 없다. 이 집합이 없으면 이전 턴의 Stop 이 새 배분을 waiting 으로 만든다.
     /// argv 로 실은 배분은 넣지 않는다. 메모리에만 둔다 — 앱을 다시 켜면 `recoverOnLaunch` 가 열린 배분을 닫고 가드는 비어 있다.
     private var repoAwaitingStop: Set<String> = []
+    /// Codex 한도로 끊긴 턴에 열려 있던 배분(레포 id → 배분 id). 닫지 않고 두었다가 풀리면 한 번 이어 하게 한다. 메모리에만 —
+    /// 앱을 다시 켜면 `recoverOnLaunch` 가 열린 배분을 닫는다.
+    private var limitInterrupted: [String: String] = [:]
+    /// 이번 막힘에 한도 안내를 이미 보낸 워크스페이스. 막힌 동안의 두 번째 신호는 다시 알리지 않는다. 풀리면 비운다.
+    private var limitNoticed: Set<String> = []
+    /// 워크스페이스마다 조율자에게 마지막으로 보낸 묶음의 relay id. 그 턴이 한도로 실패하면 묶음은 읽히지 않았다 —
+    /// 다시 큐로 돌린다. 그 턴의 Stop(= 읽음) · 페인 종료에서 지운다.
+    private var lastOrchestratorBundle: [String: [String]] = [:]
+    /// 한도로 끊긴 조율자 턴에서 큐로 되돌린 relay. 다음 묶음이 이것을 실으면 "다시 보낸다" 한 줄을 앞에 붙인다(조율자가
+    /// 일부를 이미 읽고 dispatch · answer 했을 수 있다). 실어 보내면 지운다.
+    private var resentRelays: Set<String> = []
+    /// 배분마다 이번 실행에서 보낸 이어 하기 수. `maxResumes` 를 채운 배분은 더 이어 하지 않고 조율자에게 한 번 알린다 —
+    /// 풀림 → 이어 하기 → 곧바로 한도 실패가 끝없이 되풀이되지 않게. 메모리에만(앱을 다시 켜면 열린 배분은 닫힌다).
+    private var resumeCounts: [String: Int] = [:]
+    /// 이어 하기를 그만뒀다고 이미 알린 배분.
+    private var resumeGaveUp: Set<String> = []
+    static let maxResumes = 3
 
     init(db: DatabaseQueue, messaging: PaneMessaging, lookups: Lookups,
          now: @escaping () -> Int = { Int(Date().timeIntervalSince1970) }) {
@@ -77,7 +106,10 @@ final class Dispatcher {
         if let after, after.state == .queued, after.attempts > 0 {
             return .deliveryFailed(seq: d.seq, attempts: after.attempts)
         }
-        return lookups.repoPane(repo.id).started ? .queuedBusy(seq: d.seq) : .queuedNotStarted(seq: d.seq)
+        let pane = lookups.repoPane(repo.id)
+        // 안 뜬 페인은 "안 떠 있다" 가 먼저다 — 한도가 풀려도 사람이 시작해야 간다.
+        if pane.started, let until = pane.limitedUntil { return .queuedLimited(seq: d.seq, until: until) }
+        return pane.started ? .queuedBusy(seq: d.seq) : .queuedNotStarted(seq: d.seq)
     }
 
     /// 조율자의 답(이슈 #43). 그 레포의 미답 질문이 없으면 아무것도 쓰지 않는다 — 답이 "큐를 건너뛰는 배분" 이 되면 안 된다.
@@ -101,7 +133,9 @@ final class Dispatcher {
         let after = try db.read { try Answer.fetchOne($0, key: a.id) }
         if after?.state == .delivered { return .delivered }
         if let after, after.attempts > 0 { return .deliveryFailed(attempts: after.attempts) }
-        return lookups.repoPane(repo.id).started ? .queuedBusy : .queuedNotStarted
+        let pane = lookups.repoPane(repo.id)
+        if pane.started, let until = pane.limitedUntil { return .queuedLimited(until: until) }
+        return pane.started ? .queuedBusy : .queuedNotStarted
     }
 
     func relay(workspaceID: String, dispatchID: String?, repoID: String?, kind: RelayKind, body: String) throws {
@@ -148,6 +182,8 @@ final class Dispatcher {
     /// 배분이 아닌 턴(사람이 직접 친 것)이나 이미 `complete` 한 배분의 Stop 은 큐만 흘린다.
     func didStop(repoID: String, lastMessage: String?) {
         repoAwaitingStop.remove(repoID)   // 먼저 푼다 — 아래 pump 가 다음 배분을 넣을 수 있어야 한다
+        // 한도로 끊긴 턴에는 Stop 이 없다 — 한도 뒤 Stop 은 실제로 돈 턴(사람이 이어 갔거나 이어 하기 턴)이라 이어 하기를 보내지 않는다.
+        limitInterrupted.removeValue(forKey: repoID)
         do {
             if let open = try db.read({ try DispatchOps.outstanding(repoID: repoID, in: $0) }) {
                 try db.write { try DispatchOps.markWaiting(open.id, lastMessage: lastMessage, in: $0) }
@@ -182,6 +218,7 @@ final class Dispatcher {
 
     func didStopOrchestrator(workspaceID: String) {
         orchestratorAwaitingStop.remove(workspaceID)
+        lastOrchestratorBundle.removeValue(forKey: workspaceID)   // 그 턴이 묶음을 읽고 끝났다
         pumpOrchestrator(workspaceID)
     }
 
@@ -195,6 +232,7 @@ final class Dispatcher {
     /// 조율자 페인이 죽었다. 그 세션의 Stop 은 오지 않는다.
     func didDieOrchestrator(workspaceID: String) {
         orchestratorAwaitingStop.remove(workspaceID)
+        lastOrchestratorBundle.removeValue(forKey: workspaceID)
     }
 
     func didDie(repoID: String) {
@@ -221,18 +259,138 @@ final class Dispatcher {
     /// 앱 주기 틱(30초)에서 부른다. 소켓 실패는 훅이 다시 오지 않으므로 여기서만 재시도된다.
     /// 시도한 적이 있는(`attempts > 0`) 레포만 민다 — 나머지는 훅이 알아서 흘린다.
     func retryPending() {
+        pumpQueued(retriedOnly: true)
+    }
+
+    /// 큐에 뭔가 있는 레포 · 워크스페이스를 민다. `retriedOnly` 면 레포는 시도한 적이 있는 것만.
+    private func pumpQueued(retriedOnly: Bool) {
         do {
             let (repos, workspaces) = try db.read { db -> (Set<String>, Set<String>) in
-                let d = try Dispatch.filter(Column("state") == DispatchState.queued.rawValue && Column("attempts") > 0)
-                    .fetchAll(db)
-                let a = try Answer.filter(Column("state") == AnswerState.queued.rawValue && Column("attempts") > 0)
-                    .fetchAll(db)
+                var dq = Column("state") == DispatchState.queued.rawValue
+                var aq = Column("state") == AnswerState.queued.rawValue
+                if retriedOnly { dq = dq && Column("attempts") > 0; aq = aq && Column("attempts") > 0 }
+                let d = try Dispatch.filter(dq).fetchAll(db)
+                let a = try Answer.filter(aq).fetchAll(db)
                 let r = try Relay.filter(Column("state") == RelayState.queued.rawValue).fetchAll(db)
                 return (Set(d.map(\.repoId) + a.map(\.repoId)), Set(r.map(\.workspaceId)))
             }
             for id in repos.sorted() { pumpRepo(id) }
             for id in workspaces.sorted() { pumpOrchestrator(id) }
-        } catch { NSLog("[Dure] 배분 재시도 실패: \(error)") }
+        } catch { NSLog("[Dure] 배분 큐 흘리기 실패: \(error)") }
+    }
+
+    // MARK: - Codex 계정 한도 (4단계, D-46)
+
+    /// 재시도 없는 `usageLimitExceeded` 가 그 페인(레포 페인이면 `repoID`, 조율자면 nil)의 턴을 끊었다. 그 턴에는 Stop 이 없다.
+    /// - 레포 페인: 일하는 중(`delivered`)인 배분이 있으면 닫지 않고 기억한다(풀리면 이어 하기). `repoAwaitingStop` 은 그대로 —
+    ///   이어 하기 턴의 Stop 이 푼다. 응답 대기(`waiting`)면 끊긴 턴은 사람이 친 것이라 이어 하지 않는다. 기억할 것이 없으면
+    ///   Stop 대기를 푼다(배분 밖 답의 턴이 끊겼으면 영영 막힌다).
+    /// - 조율자: 그 턴에 넘긴 묶음은 읽히지 않았다 — 다시 큐로 돌리고 Stop 대기를 푼다(풀린 뒤 펌프로 다시 간다).
+    /// 조율자에게는 막힘마다 워크스페이스당 한 번만 알린다. 조율자도 막혀 있으면 그 안내도 큐에 남는다.
+    /// `announce == false` 면(풀린 직후 다시 막힘 — `CodexLimitState.quietAfterRelease`) 막기만 하고 알리지 않는다.
+    func didHitUsageLimit(repoID: String?, workspaceID: String, until: Int, announce: Bool = true) {
+        do {
+            var dispatchID: String?
+            if let repoID {
+                if let open = try db.read({ try DispatchOps.outstanding(repoID: repoID, in: $0) }), open.state == .delivered {
+                    limitInterrupted[repoID] = open.id
+                    dispatchID = open.id
+                } else {
+                    repoAwaitingStop.remove(repoID)
+                }
+            } else {
+                if let ids = lastOrchestratorBundle.removeValue(forKey: workspaceID) {
+                    try db.write { try DispatchOps.requeueRelays(ids, in: $0) }
+                    resentRelays.formUnion(ids)
+                }
+                orchestratorAwaitingStop.remove(workspaceID)
+            }
+            guard announce, limitNoticed.insert(workspaceID).inserted else { return }
+            try relay(workspaceID: workspaceID, dispatchID: dispatchID, repoID: repoID, kind: .limit,
+                      body: DispatchBody.limitNotice(until: until))
+        } catch { NSLog("[Dure] Codex 한도 처리 실패: \(error)") }
+    }
+
+    /// 한도가 풀렸다(`read` 값으로 판정 — 스토어가 `limitedUntil` 을 먼저 비운다). 끊긴 배분이 아직 열려 있으면 그 페인에
+    /// 이어 하기를 한 번 보내고, 알렸던 워크스페이스에 풀림을 알린 뒤 큐를 전부 흘린다. 두 번 불려도 이어 하기는 한 번이다.
+    func didReleaseUsageLimit() {
+        let interrupted = limitInterrupted
+        limitInterrupted = [:]
+        let workspaces = limitNoticed   // 알린 곳에만 풀림을 알린다
+        limitNoticed = []
+        for (repoID, id) in interrupted.sorted(by: { $0.key < $1.key }) {
+            do {
+                guard let d = try db.read({ try Dispatch.fetchOne($0, key: id) }),
+                      DispatchOps.openStates.contains(d.state.rawValue) else {
+                    repoAwaitingStop.remove(repoID)   // 그 사이 닫혔다 — 끊긴 턴의 Stop 은 오지 않는다
+                    continue
+                }
+                try resumeAfterLimit(d, repoID: repoID)
+            } catch { NSLog("[Dure] 한도 뒤 이어 하기 실패: \(error)") }
+        }
+        for ws in workspaces.sorted() {
+            do {
+                try relay(workspaceID: ws, dispatchID: nil, repoID: nil, kind: .limit, body: DispatchBody.limitReleased)
+            } catch { NSLog("[Dure] 한도 풀림 안내 실패: \(error)") }
+        }
+        pumpQueued(retriedOnly: false)
+    }
+
+    private func resumeAfterLimit(_ d: Dispatch, repoID: String) throws {
+        let pane = lookups.repoPane(repoID)
+        if pane.limitedUntil != nil {   // 아직 막힌 페인이면 다음 풀림까지 둔다
+            limitInterrupted[repoID] = d.id
+            return
+        }
+        // 사람이 이미 그 페인에서 턴을 돌리고 있다 — 끼어들지 않는다. 그 턴의 Stop 이 Stop 대기를 풀고 보통 흐름으로 간다.
+        // Codex 는 서버의 스레드 상태로 본다 — 훅 칩(`state`)은 늦게 오거나 엇갈려 페인이 멈춘 채 남을 수 있다.
+        if pane.kind == .codex ? pane.turnActive : (pane.state == .running) { return }
+        // 그 사이 새 스레드를 열었으면(`/new`) 그 스레드는 배분의 맥락이 없다 — 새 스레드의 SessionStart 가 배분을 닫는다.
+        if case .codex? = pane.address, let delivered = d.deliveredSession, delivered != "argv",
+           delivered != pane.address?.sessionKey {
+            repoAwaitingStop.remove(repoID)
+            return
+        }
+        // 이어 하기가 되풀이해 한도로 끊겼다 — 더 보내지 않는다. 배분은 열어 둔다(사람 · 조율자가 정한다). 끊긴 턴의 Stop 은
+        // 오지 않으니 Stop 대기를 푼다.
+        if resumeCounts[d.id, default: 0] >= Self.maxResumes {
+            repoAwaitingStop.remove(repoID)
+            if resumeGaveUp.insert(d.id).inserted {
+                try relay(workspaceID: d.workspaceId, dispatchID: d.id, repoID: repoID, kind: .limit,
+                          body: Self.resumeGivenUp(d.seq))
+            }
+            return
+        }
+        guard let address = pane.address else {
+            repoAwaitingStop.remove(repoID)
+            try relay(workspaceID: d.workspaceId, dispatchID: d.id, repoID: repoID, kind: .limit,
+                      body: Self.resumeNotSent(d.seq))
+            return
+        }
+        do {
+            try messaging.send(DispatchBody.resumeAfterLimit(d, repoName: lookups.repoName(repoID), kind: pane.kind), to: address)
+        } catch {
+            NSLog("[Dure] 배분 #\(d.seq) 이어 하기 전달 실패: \(error)")
+            repoAwaitingStop.remove(repoID)
+            try relay(workspaceID: d.workspaceId, dispatchID: d.id, repoID: repoID, kind: .limit,
+                      body: Self.resumeNotSent(d.seq))
+            return
+        }
+        resumeCounts[d.id, default: 0] += 1
+        repoAwaitingStop.insert(repoID)
+        // 끊긴 뒤 사람이 친 턴이 Stop 으로 응답 대기를 만들었을 수 있다 — 다시 일하는 중으로.
+        do { try db.write { try DispatchOps.reopen(d.id, in: $0) } } catch {
+            NSLog("[Dure] 배분 #\(d.seq) 이어 하기 보냈지만 기록 실패: \(error)")
+        }
+    }
+
+    static func resumeNotSent(_ seq: Int) -> String {
+        "배분 #\(seq) 을 이어 하라고 그 페인에 보내지 못했다. 배분은 열려 있다 — 사람에게 그 페인에서 이어 가게 하라고 알린다."
+    }
+
+    static func resumeGivenUp(_ seq: Int) -> String {
+        "배분 #\(seq) 은 이어 하기가 \(maxResumes)번 모두 한도로 끊겨 더 이어 하라고 보내지 않았다. 배분은 열려 있다 — "
+            + "사람에게 그 페인에서 이어 가게 하거나 배분을 닫으라고 알린다."
     }
 
     // MARK: - 흐름
@@ -246,7 +404,7 @@ final class Dispatcher {
                 try pumpAnswer(next, repoID: repoID, pane: pane, open: open)
                 return
             }
-            guard !repoAwaitingStop.contains(repoID),
+            guard pane.limitedUntil == nil, !repoAwaitingStop.contains(repoID),
                   DispatchRules.isIdle(started: pane.started, state: pane.state, hasOutstanding: open != nil),
                   let address = pane.address,
                   let next = try db.read({ try DispatchOps.queued(repoID: repoID, in: $0) }).first else { return }
@@ -312,7 +470,7 @@ final class Dispatcher {
         }
         let bound = try a.dispatchId.flatMap { id in try db.read { try Dispatch.fetchOne($0, key: id) } }
         // 열린 배분이 `delivered` 면 그 턴(argv 첫 턴 포함)이 아직 돈다 — `canAnswer` 가 막는다(검토 2).
-        guard !repoAwaitingStop.contains(repoID),
+        guard pane.limitedUntil == nil, !repoAwaitingStop.contains(repoID),
               DispatchRules.canAnswer(started: pane.started, state: pane.state, open: open?.state),
               let address = pane.address else { return }
         // Codex `/new` 는 새 스레드를 열어도 SessionStart 가 그 스레드의 첫 턴까지 미뤄진다 — 그 사이 주소는 새 스레드인데
@@ -350,14 +508,17 @@ final class Dispatcher {
     func pumpOrchestrator(_ workspaceID: String) {
         do {
             let pane = lookups.orchestratorPane(workspaceID)
-            guard DispatchRules.isIdle(started: pane.started, state: pane.state,
+            guard pane.limitedUntil == nil,
+                  DispatchRules.isIdle(started: pane.started, state: pane.state,
                                        hasOutstanding: orchestratorAwaitingStop.contains(workspaceID)),
                   let address = pane.address else { return }
             let queued = try db.read { try DispatchOps.queuedRelays(workspaceID: workspaceID, in: $0) }
             guard !queued.isEmpty else { return }
-            try messaging.send(DispatchBody.bundle(try queued.map(render)), to: address)
+            try messaging.send(try bundleBody(queued), to: address)
             // 보냈으면 그 턴이 끝날 때까지 다음 묶음은 쌓아 둔다(아래 기록이 실패해도 보낸 것은 보낸 것이다).
             orchestratorAwaitingStop.insert(workspaceID)
+            lastOrchestratorBundle[workspaceID] = queued.map(\.id)
+            resentRelays.subtract(queued.map(\.id))
             try db.write { try DispatchOps.markRelaysDelivered(queued.map(\.id), now: now(), in: $0) }
         } catch { NSLog("[Dure] 조율자행 전달 실패: \(error)") }
     }
@@ -367,14 +528,17 @@ final class Dispatcher {
     /// 배분만 싣는다. 조율자 답은 싣지 않는다 — 새 세션은 질문의 맥락이 없다(설계 3절). 답은 `SessionStart` 뒤 `pumpRepo` 로 간다.
     func initialPrompt(forRepo repoID: String) -> String? {
         do {
-            let kind = lookups.repoPane(repoID).kind
+            let pane = lookups.repoPane(repoID)
+            let kind = pane.kind
             // 뷰가 다시 그려지며 두 번 불릴 수 있다. 이미 argv 로 실은 것이 열려 있으면 같은 것을 다시 준다 —
             // 다음 것을 꺼내면 보내지도 않은 배분이 `delivered` 가 된다. 소켓으로 간 것이 열려 있으면 실을 것이 없다.
             if let open = try db.read({ try DispatchOps.outstanding(repoID: repoID, in: $0) }) {
                 guard open.deliveredSession == "argv" else { return nil }
                 return DispatchBody.dispatch(open, repoName: lookups.repoName(repoID), kind: kind)
             }
-            guard let next = try db.read({ try DispatchOps.queued(repoID: repoID, in: $0) }).first else { return nil }
+            // Codex 한도로 막혀 있으면 싣지 않는다 — 그 첫 턴도 한도로 실패한다. 풀리면 `pumpRepo` 가 보낸다.
+            guard pane.limitedUntil == nil,
+                  let next = try db.read({ try DispatchOps.queued(repoID: repoID, in: $0) }).first else { return nil }
             try db.write { try DispatchOps.markDelivered(next.id, session: "argv", now: now(), in: $0) }
             return DispatchBody.dispatch(next, repoName: lookups.repoName(repoID), kind: kind)
         } catch { NSLog("[Dure] 기동 프롬프트 실패: \(error)"); return nil }
@@ -382,17 +546,26 @@ final class Dispatcher {
 
     func initialPrompt(forOrchestrator workspaceID: String) -> String? {
         do {
+            guard lookups.orchestratorPane(workspaceID).limitedUntil == nil else { return nil }
             let queued = try db.read { try DispatchOps.queuedRelays(workspaceID: workspaceID, in: $0) }
             guard !queued.isEmpty else { return nil }
             // 먼저 만든다 — 렌더가 실패했는데 전달로 찍히면 묶음이 사라진다.
-            let bundle = DispatchBody.bundle(try queued.map(render))
+            let bundle = try bundleBody(queued)
             try db.write { try DispatchOps.markRelaysDelivered(queued.map(\.id), now: now(), in: $0) }
+            resentRelays.subtract(queued.map(\.id))
             // 첫 프롬프트도 한 턴이다 — 그 Stop 전에 소켓으로 다음 것을 넣지 않는다. 단 곧 올 `SessionStart` 가
             // 지운다(`didStartOrchestrator`) — `/clear` 처럼 Stop 없이 세션이 바뀌는 길에서 표식이 박히지 않게 하는
             // 쪽을 골랐다. 그래서 SessionStart 와 첫 `UserPromptSubmit` 사이 짧은 틈에 온 relay 는 바로 갈 수 있다.
             orchestratorAwaitingStop.insert(workspaceID)
+            lastOrchestratorBundle[workspaceID] = queued.map(\.id)
             return bundle
         } catch { NSLog("[Dure] 조율자 기동 프롬프트 실패: \(error)"); return nil }
+    }
+
+    /// 묶음 글. 한도로 끊긴 턴에서 되돌린 relay 가 섞였으면 앞에 "다시 보낸다" 한 줄.
+    private func bundleBody(_ queued: [Relay]) throws -> String {
+        let body = DispatchBody.bundle(try queued.map(render))
+        return queued.contains(where: { resentRelays.contains($0.id) }) ? DispatchBody.limitResent + "\n\n" + body : body
     }
 
     private func render(_ r: Relay) throws -> String {

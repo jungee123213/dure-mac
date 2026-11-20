@@ -404,6 +404,21 @@ enum AppDatabase {
             try db.create(index: "idx_answer_repo_state", on: "answer", columns: ["repo_id", "state"])
         }
 
+        // v10 — Codex 사용 한도의 마지막 값. 창마다 한 행(`(kind, window)`), 쌓지 않는다.
+        m.registerMigration("v10_rate_limit") { db in
+            try db.create(table: "rate_limit") { t in
+                t.column("kind", .text).notNull()
+                t.column("window", .text).notNull()
+                t.column("used_percent", .integer).notNull()
+                t.column("window_minutes", .integer)
+                t.column("resets_at", .integer)
+                t.column("plan_type", .text)
+                t.column("reached_type", .text)
+                t.column("seen_at", .integer).notNull()
+                t.primaryKey(["kind", "window"])
+            }
+        }
+
         return m
     }
 }

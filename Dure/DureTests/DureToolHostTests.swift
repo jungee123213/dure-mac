@@ -335,4 +335,27 @@ struct DureToolHostTests {
         let (d, ctx, _) = world()
         #expect(DureToolHost.call(.init(name: "nope", arguments: [:], toolUseId: nil), side: .orchestrator, context: ctx, dispatcher: d).isError)
     }
+
+    // MARK: - Codex 한도 (4단계 Task 4)
+
+    @Test func dispatch_는_Codex_한도로_대기면_그렇게_말한다() throws {
+        let (d, ctx, w) = world()
+        w.repoPanes["r1"] = .init(started: true, state: .done, address: .codex(socket: "/s", thread: "T"),
+                                  kind: .codex, limitedUntil: 5000)
+        let r = DureToolHost.call(.init(name: "dispatch", arguments: ["repo": "android", "instruction": "x"], toolUseId: nil),
+                                  side: .orchestrator, context: ctx, dispatcher: d)
+        #expect(!r.isError && r.text.contains("#1") && r.text.contains("Codex 한도로 대기"))
+        #expect(r.text.contains(DispatchBody.hourMinute(5000)) && r.text.contains("이후 저절로 간다"))
+        #expect(w.inbox.sent.isEmpty)
+    }
+
+    @Test func answer_는_Codex_한도로_대기면_그렇게_말한다() throws {
+        let (d, ctx, w) = world()
+        try w.d.relay(workspaceID: "w1", dispatchID: nil, repoID: "r1", kind: .question, body: "어느 쪽?")
+        w.repoPanes["r1"] = .init(started: true, state: .done, address: .codex(socket: "/s", thread: "T"),
+                                  kind: .codex, limitedUntil: 5000)
+        let r = DureToolHost.call(.init(name: "answer", arguments: ["repo": "android", "answer": "왼쪽"], toolUseId: nil),
+                                  side: .orchestrator, context: ctx, dispatcher: d)
+        #expect(!r.isError && r.text.contains("Codex 한도로 대기") && r.text.contains("이후 저절로 간다"))
+    }
 }

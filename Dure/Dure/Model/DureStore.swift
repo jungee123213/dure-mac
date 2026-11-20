@@ -99,8 +99,19 @@ final class DureStore {
     /// 이슈 #38 — 마지막에 보던 워크스페이스를 기억하는 곳. 앱은 `UserDefaults.standard`.
     @ObservationIgnored private let settings: SettingsStore
 
-    init(settings: SettingsStore = UserDefaults.standard) {
+    /// Codex 4단계 — 계정 한도(D-46). Codex 페인은 모두 같은 로그인이라 하나를 같이 쓴다. 판단은 `CodexLimitState`,
+    /// 전달 멈춤 · 이어 하기는 `Dispatcher`. 여기는 런타임 콜백을 잇고 저장 · 다시 보기 타이머 · 알림만 한다. 관측 대상 — 대시보드가 읽는다.
+    private(set) var codexLimit = CodexLimitState()
+    @ObservationIgnored private var codexLimitLoaded = false
+    /// 다시 보기 타이머 세대. 새로 걸거나 풀리면 올려 앞서 건 것을 무른다.
+    @ObservationIgnored private var limitRecheckToken = 0
+    /// 다시 보기 타이머(테스트에서 바꿀 수 있게). 실제는 메인 큐.
+    @ObservationIgnored private let schedule: (TimeInterval, @escaping @MainActor @Sendable () -> Void) -> Void
+
+    init(settings: SettingsStore = UserDefaults.standard,
+         schedule: @escaping (TimeInterval, @escaping @MainActor @Sendable () -> Void) -> Void = CodexPaneRuntime.mainAfter) {
         self.settings = settings
+        self.schedule = schedule
     }
 
     /// 페인 키 → `DURE_SESSION` (ADR-14). 페인 하나당 UUID 하나.
@@ -156,6 +167,13 @@ final class DureStore {
             repos = rs
             ccSessions = try AppDatabase.queue.read {
                 try CCSession.order(Column("started_at")).fetchAll($0)
+            }
+            // 지난 한도 값은 보이기만 한다 — 막힘 판정은 다음 실제 값(연결 직후 `read`)에서. 한 번만(load 는 여러 번 불린다).
+            // 따로 `try?` — 이 읽기가 실패해도 아래 워크스페이스 고르기를 건너뛰지 않게.
+            if !codexLimitLoaded {
+                codexLimitLoaded = true
+                let rows = try? AppDatabase.queue.read { try RateLimitWindow.fetchAll($0) }
+                codexLimit.limits = rows.flatMap { CodexRateLimits(windows: $0) }
             }
             if selectedWorkspaceID == nil {
                 selectedWorkspaceID = LastWorkspace.pick(saved: LastWorkspace.saved(in: settings),
@@ -536,8 +554,12 @@ final class DureStore {
         // Codex — 주소는 그 페인 전용 서버 소켓 + 지금 스레드. 스레드를 아직 모르면 nil 이라 큐에 남는다 —
         // 스레드가 잡히면(`thread/started` · 보충) `startCodex` 의 알림이 큐를 흘린다.
         if agentKind(for: target) == .codex {
+            // 계정 한도로 막혀 있으면 Dispatcher 가 이 페인으로 아무것도 보내지 않는다(큐에 남김).
+            // 턴이 도는 중인가는 서버의 스레드 상태로 — 훅 파일로 오는 칩 상태는 소켓 메시지와 순서가 엇갈릴 수 있다.
+            let runtime = codexPanes[target.key]
             return .init(started: hasStarted(target), state: state(for: target),
-                         address: codexPanes[target.key]?.address, kind: .codex)
+                         address: runtime?.address, kind: .codex, limitedUntil: codexLimit.blockedUntil,
+                         turnActive: runtime?.isTurnActive ?? false)
         }
         return .init(started: hasStarted(target), state: state(for: target),
                      address: session.flatMap { currentSession(for: $0)?.ccSessionId }.map { .claude(session: $0) })
@@ -764,7 +786,101 @@ final class DureStore {
             self.dispatchVersion += 1
         }, onServerExit: { [weak self] in
             self?.codexServerExited(key: key, sessionID: sessionID)
+        }, onRateLimits: { [weak self] limits, replaces in
+            // 계정 값이라 어느 페인에서 왔든 같다.
+            self?.codexRateLimitsSeen(limits, replaces: replaces)
+        }, onUsageLimit: { [weak self, weak runtime] thread in
+            guard let self else { return }
+            // 계정 상태는 어느 스레드에서 왔든 막는다(같은 로그인). 페인 칩 · 배분은 지금 스레드의 턴만 —
+            // 서브에이전트 스레드나 `/new` 앞의 옛 스레드면 이 페인의 배분 턴이 끊긴 게 아니다.
+            let current = runtime.map { self.codexPanes[key] === $0 && self.sessionIDs[key] == sessionID
+                && thread == $0.threadID } ?? false
+            self.codexUsageLimitHit(target, sessionID: sessionID, paneTurn: current)
         })
+    }
+
+    // MARK: - Codex 계정 한도 (4단계, D-46)
+
+    private func nowSeconds() -> Int { Int(Date().timeIntervalSince1970) }
+
+    private func codexRateLimitsSeen(_ l: CodexRateLimits, replaces: Bool) {
+        let change = codexLimit.observe(l, replaces: replaces, now: nowSeconds())
+        if let merged = codexLimit.limits {
+            do {
+                try AppDatabase.queue.write { db in
+                    // 통째 값(`read`)에 없는 창은 이제 없는 창이다 — 표에 남기면 다음 기동 때 되살아난다.
+                    for name in RateLimitWindow.absentWindows(l, replaces: replaces) {
+                        _ = try RateLimitWindow.deleteOne(db, key: ["kind": RateLimitWindow.codexKind, "window": name])
+                    }
+                    for row in RateLimitWindow.rows(l, merged: merged, seenAt: nowSeconds()) { try row.insert(db) }
+                }
+            } catch { NSLog("[Dure] Codex 한도 저장 실패: \(error)") }
+        }
+        applyLimitChange(change, dureSession: nil)
+    }
+
+    /// 재시도 없는 `usageLimitExceeded`(또는 지금 스레드의 429) — 계정이 막혔다. 계정 상태는 늘 바꾼다.
+    /// `paneTurn` 이면(그 페인 지금 스레드의 턴) 그 턴이 한도로 끊겼다. 그 턴에는 Stop 훅이 없다(j-stage4 2절):
+    /// 턴은 끝났으니 Stop 이 하는 일 중 칩만 `done` 으로 바꾼다. `Dispatcher.didStop` 은 부르지 않는다 — 배분을 응답 대기로 돌리지 않는다.
+    /// 레포 페인인지 조율자인지는 런타임이 모른다 — 페인 키(`target`)로 가른다.
+    private func codexUsageLimitHit(_ target: PaneTarget, sessionID: String, paneTurn: Bool) {
+        if paneTurn { setState(.done, for: sessionID) }
+        let announce = !codexLimit.isQuiet(now: nowSeconds())
+        applyLimitChange(codexLimit.usageLimitHit(now: nowSeconds()), dureSession: sessionID)
+        guard paneTurn, let until = codexLimit.blockedUntil else { return }
+        switch target {
+        case .repo(let r): dispatcher.didHitUsageLimit(repoID: r.id, workspaceID: r.workspaceId, until: until, announce: announce)
+        case .orchestrator(let ws): dispatcher.didHitUsageLimit(repoID: nil, workspaceID: ws, until: until, announce: announce)
+        }
+        dispatchVersion += 1
+    }
+
+    /// 막힘이면 사람에게 알리고 다시 보기를 건다. 시각만 바뀌면 타이머만. 풀리면 알림 없이 전달을 다시 연다
+    /// (`codexLimit` 을 먼저 바꿨으므로 Dispatcher 가 읽는 페인 뷰의 `limitedUntil` 은 이미 nil).
+    private func applyLimitChange(_ change: CodexLimitState.Change, dureSession: String?) {
+        switch change {
+        case .none:
+            return
+        case .blocked(let until):
+            armLimitRecheck()
+            // 풀린 직후 다시 막혔으면(되풀이) 알리지 않는다 — 막기만.
+            if !codexLimit.isQuiet(now: nowSeconds()) {
+                Notifier.post(title: "Codex 한도가 찼습니다", body: "\(DispatchBody.hourMinute(until)) 에 다시 확인합니다",
+                              dureSession: dureSession ?? "")
+            }
+        case .rescheduled:
+            armLimitRecheck()
+        case .released:
+            limitRecheckToken += 1
+            dispatcher.didReleaseUsageLimit()
+        }
+        dispatchVersion += 1
+    }
+
+    /// `blockedUntil + resetGrace` 에 다시 읽는다. 한 번에 `recheckInterval` 넘게 재우지 않는다 — 메인 큐 타이머는 맥이 잠든 동안
+    /// 흐르지 않아, 주간 리셋처럼 먼 시각을 한 번에 걸면 깨어난 뒤 한참 늦는다. 깨어날 때마다 벽시계로 다시 잰다.
+    private func armLimitRecheck() {
+        guard let until = codexLimit.blockedUntil else { return }
+        limitRecheckToken += 1
+        let token = limitRecheckToken
+        let wait = min(max(0, until + CodexLimitState.resetGrace - nowSeconds()), CodexLimitState.recheckInterval)
+        schedule(TimeInterval(wait)) { [weak self] in
+            guard let self, self.limitRecheckToken == token, let until = self.codexLimit.blockedUntil else { return }
+            if self.nowSeconds() < until + CodexLimitState.resetGrace {
+                self.armLimitRecheck()
+            } else {
+                self.recheckCodexLimit()
+            }
+        }
+    }
+
+    /// 살아 있는 Codex 런타임 하나로 `read` 를 보낸다 — 응답(`replaces`)이 풀거나 다시 건다. 먼저 간격 뒤 다시 보기를 걸어 둔다:
+    /// 읽을 런타임이 없거나 응답이 안 와도 막힌 채 굳지 않게(`recheckFailed`).
+    private func recheckCodexLimit() {
+        codexLimit.recheckFailed(now: nowSeconds())
+        armLimitRecheck()
+        for runtime in codexPanes.values where runtime.readRateLimits() { return }
+        NSLog("[Dure] Codex 한도 다시 보기: 읽을 수 있는 Codex 페인이 없어 \(CodexLimitState.recheckInterval)초 뒤 다시 봅니다")
     }
 
     /// Codex 전달(`codex queue`) 성공 직후 — 받은 페인 런타임이 5초 안에 턴이 안 서면 멈춘 큐를 깨운다.

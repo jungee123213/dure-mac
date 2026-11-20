@@ -63,6 +63,8 @@ enum DureToolHost {
                 case .deliveryFailed(let n, let attempts):
                     // 페인은 놀고 있는데 소켓 쓰기만 실패했다. 큐 대기라고 하면 조율자가 오지 않을 Stop 을 기다린다.
                     return .init(text: "\(head(n)) · 전달 실패(\(attempts)회) — 페인 소켓에 쓰지 못했다. 두레가 30초 안에 다시 시도한다. 3회 실패하면 실패로 닫고 알린다.")
+                case .queuedLimited(let n, let until):
+                    return .init(text: "\(head(n)) · 큐 대기 — Codex 한도로 대기 — \(DispatchBody.hourMinute(until)) 이후 저절로 간다. 다시 dispatch 하지 않는다.")
                 }
             case "answer":
                 guard let repo = DureTools.resolveRepo(call.arguments["repo"] ?? "", in: ctx.repos) else {
@@ -84,6 +86,8 @@ enum DureToolHost {
                     return .init(text: "\(name) 페인이 안 떠 있다. 사람이 시작하면 답이 간다. 사람에게 알려라.")
                 case .deliveryFailed(let attempts):
                     return .init(text: "\(name) 에 답 전달 실패(\(attempts)회) — 페인 소켓에 쓰지 못했다. 두레가 30초 안에 다시 시도한다. 3회 실패하면 실패로 닫고 알린다.")
+                case .queuedLimited(let until):
+                    return .init(text: "\(name) 페인이 Codex 한도로 대기 — \(DispatchBody.hourMinute(until)) 이후 저절로 간다. 다시 answer 하지 않는다.")
                 case .dispatchClosed(let seq):
                     // 툴 오류가 곧 보고다 — 이 실패는 relay 로 다시 오지 않는다.
                     return .init(text: "배분 #\(seq) 이 이미 닫혀 답을 전하지 못했다. 사람에게 알려라. 사람이 '진행' 하면 질문과 답을 instruction 에 넣어 다시 dispatch 한다(원래 배분 종류대로).", isError: true)
