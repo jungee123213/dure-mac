@@ -112,6 +112,27 @@ struct UsageStatsTests {
         #expect(s.orchestrator.tokens == 7)
     }
 
+    @Test func usageIncludesCodexTurns() throws {
+        let u = try unit(.issueBranch, root: "/r/app")
+        try turn(u, input: 10)
+        let id = UUID().uuidString
+        try db.write { db in
+            try ObsTurn(id: id, unitId: u, eventId: id, ccSessionId: "c", transcriptPath: "/t2", lineNo: 1,
+                        origin: .terminal, promptKind: .human, ts: 1000, prompt: "x", tokensInput: 5, tokensOutput: 5,
+                        agentKind: .codex).insert(db)
+        }
+        let o = try unit(.orchestrator, ws: "w1")
+        let oid = UUID().uuidString
+        try db.write { db in
+            try ObsTurn(id: oid, unitId: o, eventId: oid, ccSessionId: "c2", transcriptPath: "/t3", lineNo: 1,
+                        origin: .dureOrchestrator, promptKind: .human, ts: 1000, prompt: "x", tokensInput: 3,
+                        agentKind: .codex).insert(db)
+        }
+        let s = try summary()
+        #expect(s.byRepoPath["/r/app"]?.tokens == 20)
+        #expect(s.orchestrator.tokens == 3)
+    }
+
     @Test func 툴_수는_레포별로_센다() throws {
         let a = try turn(try unit(.issueBranch, root: "/r/app"))
         for _ in 0..<3 { try tool(a) }

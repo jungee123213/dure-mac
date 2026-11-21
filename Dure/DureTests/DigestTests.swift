@@ -147,4 +147,28 @@ struct DigestTests {
         i.baseline = TokenAccounting.Baseline(samples: 2, perTurn: 100, perLine: nil)
         #expect(DigestBuilder.render(i).contains("터미널 전용 이슈 작업이 2개뿐이라 판단 보류"))
     }
+
+    private static func codexTurn(_ id: String, ts: Int) -> ObsTurn {
+        var t = turn(id, ts: ts, prompt: "코덱스 작업")
+        t.agentKind = .codex
+        return t
+    }
+
+    @Test func digestNamesCliPerTurn() {
+        let s = DigestBuilder.render(DigestInput(unit: Self.unit, turns: [Self.turn("a", ts: 100, prompt: "클로드 작업"),
+                                                                          Self.codexTurn("b", ts: 200)], tools: [], timeZone: Self.utc))
+        let heads = s.split(separator: "\n").filter { $0.hasPrefix("### T") }
+        #expect(heads.count == 2)
+        #expect(!heads[0].contains("[codex]"))
+        #expect(heads[1].contains("[codex]"))
+    }
+
+    @Test func digestHeaderCountsCli() {
+        let both = DigestBuilder.render(DigestInput(unit: Self.unit, turns: [Self.turn("a", ts: 100, prompt: "x"),
+                                                                             Self.turn("c", ts: 150, prompt: "y"),
+                                                                             Self.codexTurn("b", ts: 200)], tools: [], timeZone: Self.utc))
+        #expect(both.contains("CLI: claude 2턴 · codex 1턴"))
+        let one = DigestBuilder.render(DigestInput(unit: Self.unit, turns: [Self.turn("a", ts: 100, prompt: "x")], tools: [], timeZone: Self.utc))
+        #expect(!one.contains("CLI:"))
+    }
 }

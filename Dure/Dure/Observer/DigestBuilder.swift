@@ -93,6 +93,8 @@ nonisolated enum DigestBuilder {
         }
         if let d = i.diffStat { o += "- 변경: \(d)\n" }
         o += "- 사람 턴 \(u.humanTurns) · 배분 받은 턴 \(u.peerTurns) · 파일 수정 툴 \(u.editCount)회 · 전체 턴 \(turns.count)\n"
+        let claudeTurns = turns.filter { $0.agentKind == .claude }.count, codexTurns = turns.count - claudeTurns
+        if claudeTurns > 0 && codexTurns > 0 { o += "- CLI: claude \(claudeTurns)턴 · codex \(codexTurns)턴\n" }
         let sessions = Dictionary(grouping: turns, by: \.ccSessionId)
         o += "\n세션:\n"
         for (sid, ts) in sessions.sorted(by: { $0.value[0].ts < $1.value[0].ts }) {
@@ -111,6 +113,7 @@ nonisolated enum DigestBuilder {
                 if idx >= edgeTurns && idx < n - edgeTurns { continue }
             }
             var head = "### T\(idx + 1) · \(clock(t.ts, tz)) · \(originLabel(t.origin)) · `\(t.ccSessionId.prefix(8))` · e:\(shortEvent(t.eventId))"
+            if t.agentKind == .codex { head += " · [codex]" }
             if t.promptKind != .human { head += " · \(t.promptKind.rawValue)" }
             if let ms = t.durationMs { head += " · \(ms / 1000)초" }
             o += head + "\n\n" + quote(clip(t.prompt, promptLimit)) + "\n\n"
