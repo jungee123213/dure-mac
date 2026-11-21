@@ -88,7 +88,8 @@ final class ObserverStore {
     }
 
     private var collectConfig: CollectConfig {
-        CollectConfig(projectsDir: dirs.projects, excludes: dirs.collectExcludes(settings), workspacesRoot: dirs.workspacesRoot.path)
+        CollectConfig(projectsDir: dirs.projects, codexSessionsDir: dirs.codexSessions, excludes: dirs.collectExcludes(settings),
+                      workspacesRoot: dirs.workspacesRoot.path)
     }
 
     // MARK: - 수집

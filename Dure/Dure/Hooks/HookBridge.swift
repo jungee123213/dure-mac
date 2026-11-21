@@ -3,7 +3,8 @@ import Foundation
 /// 앱이 띄우는 에이전트 종류.
 /// 둘 다 띄운다. Codex 는 페인마다 app-server 를 거친다 (D-44).
 /// 이벤트 줄에 이 값이 들어가므로 **지금** 넣는다. 나중에 포맷을 바꾸면 이미 쌓인 줄과 섞인다.
-enum AgentKind: String, Codable, CaseIterable {
+/// `nonisolated` — 감시자 표(`ObsTurn.agentKind`)가 백그라운드 수집에서 쓴다.
+nonisolated enum AgentKind: String, Codable, CaseIterable {
     case claude
     case codex
 }
