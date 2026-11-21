@@ -9,8 +9,7 @@ import Foundation
 /// 구별해서 적는다 — git 을 못 읽은 것을 `clean` 으로 적으면 조율자가 변경이 없다고
 /// 읽어버린다 (D-13).
 ///
-/// **`nonisolated` 를 붙이지 않는다** — `AgentKind` 가 MainActor 라 참조에서 경고가 난다.
-/// 순수 함수지만 메인에서 불려도 비용이 없다.
+/// **`nonisolated` 를 붙이지 않는다** — 순수 함수라 메인에서 불려도 비용이 없다.
 enum WorkspaceDoc {
 
     struct RepoLine {

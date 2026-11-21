@@ -419,6 +419,13 @@ enum AppDatabase {
             }
         }
 
+        // v11 — 감시자 턴을 돌린 CLI(Codex 지원 5단계). 이미 쌓인 턴은 전부 Claude 트랜스크립트에서 왔다.
+        m.registerMigration("v11_obs_agent_kind") { db in
+            try db.alter(table: "obs_turn") { t in
+                t.add(column: "agent_kind", .text).notNull().defaults(to: "claude")
+            }
+        }
+
         return m
     }
 }

@@ -4,6 +4,8 @@ import GRDB
 
 nonisolated struct CollectConfig: Sendable {
     var projectsDir: URL
+    /// 사용자 Codex home 의 `sessions`(rollout). nil 이면 Codex 는 수집하지 않는다(테스트 · 설정).
+    var codexSessionsDir: URL? = nil
     /// 감시자 자신의 폴더가 반드시 들어 있어야 한다(`ObserverDirs.collectExcludes`).
     var excludes: [String]
     var workspacesRoot: String
@@ -42,11 +44,42 @@ nonisolated enum ObsCollector {
         return mains + subs
     }
 
+    /// Codex `sessions/YYYY/MM/DD/rollout-*.jsonl`. 본 세션 먼저, 서브에이전트 파일 나중 — 서브에이전트는 부모 턴이
+    /// 이미 있어야 붙는다. 서브에이전트인지는 파일 이름에 없어 머리(첫 줄)를 읽어 가른다.
+    /// `.jsonl.zst`(오래 쉰 rollout 을 Codex 가 압축한 것)는 고르지 않는다 — macOS 기본 라이브러리에 zstd 가 없다.
+    static func codexFiles(in dir: URL) -> [URL] {
+        var mains: [URL] = [], subs: [URL] = []
+        for f in rolloutFiles(in: dir) {
+            if codexHead(f.path).state?.isSubagent == true { subs.append(f) } else { mains.append(f) }
+        }
+        return mains + subs
+    }
+
+    /// `rollout-*.jsonl` 을 아래 폴더까지 찾는다. 경로는 `dir` 표기 그대로(커서 열쇠가 된다), 경로 순.
+    static func rolloutFiles(in dir: URL) -> [URL] {
+        let fm = FileManager.default
+        var out: [URL] = []
+        func walk(_ u: URL, depth: Int) {
+            guard depth < 6 else { return }
+            for entry in (try? fm.contentsOfDirectory(at: u, includingPropertiesForKeys: [.isDirectoryKey])) ?? [] {
+                if (try? entry.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true {
+                    walk(entry, depth: depth + 1)
+                } else if entry.pathExtension == "jsonl", entry.lastPathComponent.hasPrefix("rollout-") {
+                    out.append(entry)
+                }
+            }
+        }
+        walk(dir, depth: 0)
+        return out.sorted { $0.path < $1.path }
+    }
+
     static func collect(db: DatabaseQueue, config: CollectConfig, resolver: RepoResolving) throws -> Report {
         gate.lock(); defer { gate.unlock() }
         let excluded = Set(try db.read { try String.fetchAll($0, sql: "SELECT session_id FROM observer_session") })
         var total = Report()
-        for f in jsonlFiles(in: config.projectsDir) {
+        var files = jsonlFiles(in: config.projectsDir)
+        if let codex = config.codexSessionsDir { files += codexFiles(in: codex) }
+        for f in files {
             total += try ingest(file: f, db: db, config: config, resolver: resolver, excludedSessions: excluded)
         }
         // 백필 · 앱을 꺼 둔 동안 섞인 머지 전후 턴을 나눈다. 옮길 게 없으면 쓰지 않는다(멱등).
@@ -73,14 +106,45 @@ nonisolated enum ObsCollector {
         let cursor = try db.read { try ObsCursor.fetchOne($0, key: path) }
         if let cursor, cursor.mtime == mtime, cursor.size == size { return Report() }
 
-        let first = firstLine(path)
-        let fingerprint = first.uuid
+        // 파일 종류로 파서를 고른다. Claude 는 줄마다 세션을 갖고, Codex 는 머리(`session_meta`, 첫 줄)에만 있다.
+        let kind: AgentKind = isCodex(file, config: config) ? .codex : .claude
+        let head: (fingerprint: String?, ts: Int?, codex: CodexObsParser.State?)
+        switch kind {
+        case .claude:
+            let first = firstLine(path)
+            head = (first.uuid, first.ts, nil)
+        case .codex:
+            let first = codexHead(path)
+            head = (first.state?.sessionId, first.ts, first.state)
+        }
+        let fingerprint = head.fingerprint
         var offset = cursor?.byteOffset ?? 0, lineNo = cursor?.lineNo ?? 0
         if let old = cursor?.fingerprint, old != fingerprint { offset = 0; lineNo = 0 }   // 교체된 파일
+
+        // 세지 않는 Codex 파일 — 가져온 Claude 세션(legacy, Claude 트랜스크립트와 이중이 된다) · 부모 표시가 없는
+        // 서브에이전트(본 세션으로 세지 않는다). 커서만 끝으로 옮겨 다시 읽지 않는다.
+        if let codex = head.codex, codex.skip || (codex.isSubagent && codex.parentThreadId == nil) {
+            try db.write { db in
+                try ObsCursor(path: path, byteOffset: size, lineNo: lineNo, mtime: mtime, size: size, fingerprint: fingerprint,
+                              recentBad: cursor?.recentBad ?? 0, recentTotal: cursor?.recentTotal ?? 0,
+                              unknownTypes: cursor?.unknownTypes ?? 0).save(db)
+            }
+            return Report()
+        }
         guard let batch = TranscriptReader.read(path: path, offset: offset, lineNo: lineNo) else { return Report() }
 
         // 1. 트랜잭션 밖: 파싱 · 레포 조회 · 브랜치 복원(git 프로세스)
-        var parsed = batch.lines.map { (no: $0.no, events: ObsParser.parse($0.data)) }
+        var parsed: [(no: Int, events: [ObsParser.Event]?)]
+        switch kind {
+        case .claude:
+            parsed = batch.lines.map { (no: $0.no, events: ObsParser.parse($0.data)) }
+        case .codex:
+            // 이어 읽기면 머리를 다시 읽은 상태에서 시작한다(세션 · cwd). 처음부터면 머리 줄을 또 만나도 첫 것을 지킨다.
+            var parser = CodexObsParser(state: head.codex ?? .init())
+            parsed = batch.lines.map { (no: $0.no, events: parser.parse($0.data, lineNo: $0.no)) }
+        }
+        // Codex 턴은 브랜치 없이 온다(파서) — reflog 가 못 정하면 파일 머리 `session_meta.git.branch`(스레드 시작 때 값)로.
+        let fallbackBranch = kind == .codex ? head.codex?.gitBranch : nil
         var repos: [String: RepoInfo?] = [:]
         for line in parsed {
             for e in line.events ?? [] {
@@ -88,12 +152,23 @@ nonisolated enum ObsCollector {
             }
         }
         parsed = parsed.map { line in
-            (no: line.no, events: line.events?.map { recoverBranch($0, repos: repos, resolver: resolver) })
+            (no: line.no, events: line.events?.map {
+                recoverBranch($0, repos: repos, resolver: resolver, fallback: fallbackBranch)
+            })
         }
 
         // 2. 짧은 트랜잭션
         var report = Report(filesRead: 1)
-        var state = FileState(path: path, firstTs: first.ts)
+        var state = FileState(path: path, firstTs: head.ts, agentKind: kind)
+        switch kind {
+        case .claude:
+            state.pinsParent = URL(fileURLWithPath: path).deletingLastPathComponent().lastPathComponent == "subagents"
+        case .codex:
+            // Codex 서브에이전트는 따로 rollout 파일이다 — Claude `subagents/` 파일처럼 파일 하나가 부모 턴 하나.
+            state.pinsParent = head.codex?.isSubagent == true
+            state.parentThreads = [head.codex?.parentThreadId, head.codex?.rootSessionId].compactMap { $0 }
+                .filter { $0 != head.codex?.sessionId }
+        }
         var start = 0
         while start < parsed.count {
             let slice = parsed[start..<min(start + max(config.chunk, 1), parsed.count)]
@@ -115,7 +190,10 @@ nonisolated enum ObsCollector {
 
         // 부모 턴을 못 찾은 서브에이전트 파일: 부모 세션 파일이 아직 수집 전이면 커서를 올리지 않고 다음 수집에서 다시 읽는다.
         // 부모 파일이 아예 없거나 이미 수집됐는데 턴이 없으면(지워짐 · 제외된 세션) 영원히 붙잡지 않고 줄을 건너뛴다.
-        if state.parentMissing, try db.read({ try parentFilePending(path, db: $0) }) { return Report() }
+        if state.parentMissing {
+            let parents = kind == .codex ? codexParentFiles(state.parentThreads, config: config) : claudeParentFile(path)
+            if try db.read({ try parentFilePending(parents, db: $0) }) { return Report() }
+        }
 
         // 청크마다 비교하면 경계에 걸린 턴의 중간 꼬리가 "원본" 이 되어 다시 읽기마다 두 번 올라간다 —
         // 파일 전체를 읽은 뒤 처음과 끝만 한 번 비교한다. 중간에 죽으면 커서가 안 가므로 파일 전체를 다시 읽는다.
@@ -138,6 +216,12 @@ nonisolated enum ObsCollector {
         let path: String
         /// 파일 첫 줄의 시각. 틱마다 새 FileState 가 만들어져도 부모가 갈라지지 않게 부모 선택의 기준으로 쓴다.
         var firstTs: Int?
+        /// 이 파일을 쓴 CLI — 턴 행의 `agent_kind`.
+        var agentKind: AgentKind
+        /// 서브에이전트 전용 파일(Claude `<세션>/subagents/x.jsonl` · Codex 서브에이전트 rollout) — 부모 턴을 파일 단위로 못 박는다.
+        var pinsParent = false
+        /// Codex 서브에이전트의 부모 · 루트 스레드 id. 부모 파일이 아직 수집 전인지 볼 때 쓴다.
+        var parentThreads: [String] = []
         var turnID: String?
         var looked = false
         /// 서브에이전트 파일 하나는 부모 턴 하나 — 처음 정한 부모를 파일 안에서 계속 쓴다.
@@ -192,7 +276,8 @@ nonisolated enum ObsCollector {
             var unit = try unitFor(ctx, repo: repos[ctx.cwd] ?? nil, db: db, config: config)
             let turn = ObsTurn(unitId: unit.id, eventId: eventId, ccSessionId: ctx.sessionId, transcriptPath: state.path,
                                lineNo: lineNo, origin: try origin(ctx, db: db, config: config), promptKind: kind,
-                               entrypoint: ctx.entrypoint, ts: ctx.ts, prompt: String(prompt.prefix(8000)), permissionMode: mode)
+                               entrypoint: ctx.entrypoint, ts: ctx.ts, prompt: String(prompt.prefix(8000)), permissionMode: mode,
+                               agentKind: state.agentKind)
             try turn.insert(db, onConflict: .ignore)
             let stored = try ObsTurn.filter(Column("event_id") == eventId).fetchOne(db)
             state.turnID = stored?.id
@@ -319,7 +404,8 @@ nonisolated enum ObsCollector {
     private static func subagentParent(_ ctx: ObsParser.Context, _ state: inout FileState, db: Database) throws -> ObsTurn? {
         // 옛 형식의 메인 기록 안 isSidechain 줄은 파일 단위로 못 박지 않는다 — 한 파일에 턴이 여럿이라
         // 못 박으면 뒤 턴의 사용량이 첫 턴으로 간다. 줄마다 직전 턴에 붙인다(#27 이전 동작).
-        guard URL(fileURLWithPath: state.path).deletingLastPathComponent().lastPathComponent == "subagents" else {
+        // Codex 서브에이전트 줄의 세션 id 는 루트 스레드다(파서) — 같은 규칙으로 루트 세션의 그 시각 직전 턴을 고른다.
+        guard state.pinsParent else {
             return try parentTurn(ctx, ts: ctx.ts, db: db)
         }
         if state.parentMissing { return nil }
@@ -334,15 +420,35 @@ nonisolated enum ObsCollector {
         return parent
     }
 
-    /// `<세션>/subagents/x.jsonl` 의 부모 세션 파일 `<세션>.jsonl` 이 있는데 아직 수집(커서)되지 않았는가.
-    private static func parentFilePending(_ path: String, db: Database) throws -> Bool {
-        let url = URL(fileURLWithPath: path)
-        let dir = url.deletingLastPathComponent()
-        guard dir.lastPathComponent == "subagents" else { return false }
-        let main = dir.deletingLastPathComponent().appendingPathExtension("jsonl").path
-        // 있지만 읽을 수 없는 부모 파일은 틱마다 이 서브에이전트를 붙잡는다(허용).
-        guard FileManager.default.fileExists(atPath: main) else { return false }
-        return try ObsCursor.fetchOne(db, key: main) == nil
+    /// 부모 세션 파일 중 하나라도 있는데 아직 수집(커서)되지 않았는가.
+    /// 있지만 읽을 수 없는 부모 파일은 틱마다 이 서브에이전트를 붙잡는다(허용).
+    private static func parentFilePending(_ parents: [String], db: Database) throws -> Bool {
+        for p in parents where FileManager.default.fileExists(atPath: p) {
+            if try ObsCursor.fetchOne(db, key: p) == nil { return true }
+        }
+        return false
+    }
+
+    /// `<세션>/subagents/x.jsonl` 의 부모 세션 파일 `<세션>.jsonl`.
+    private static func claudeParentFile(_ path: String) -> [String] {
+        let dir = URL(fileURLWithPath: path).deletingLastPathComponent()
+        guard dir.lastPathComponent == "subagents" else { return [] }
+        return [dir.deletingLastPathComponent().appendingPathExtension("jsonl").path]
+    }
+
+    /// Codex 부모 rollout — 파일 이름 끝의 uuid 가 스레드 id 다(실측). 날짜 폴더가 다를 수 있어 이름으로 찾는다.
+    private static func codexParentFiles(_ threads: [String], config: CollectConfig) -> [String] {
+        guard let dir = config.codexSessionsDir, !threads.isEmpty else { return [] }
+        return rolloutFiles(in: dir).filter { f in threads.contains { f.lastPathComponent.hasSuffix("-\($0).jsonl") } }
+            .map(\.path)
+    }
+
+    /// 파일이 Codex `sessions` 아래인가. `/var` ↔ `/private/var` 같은 표기 차이에 흔들리지 않게 실제 경로로 비교한다.
+    static func isCodex(_ file: URL, config: CollectConfig) -> Bool {
+        guard let dir = config.codexSessionsDir else { return false }
+        let base = dir.standardizedFileURL.resolvingSymlinksInPath().path
+        let path = file.standardizedFileURL.resolvingSymlinksInPath().path
+        return path.hasPrefix(base.hasSuffix("/") ? base : base + "/")
     }
 
     /// 서브에이전트 줄은 자기 파일에 턴이 없다 — 같은 세션에서 그 시각 직전의 사람 턴에 붙인다.
@@ -360,13 +466,21 @@ nonisolated enum ObsCollector {
     }
 
     /// 이슈 #32 — `#` 이 든 브랜치는 트랜스크립트에 `"HEAD"` 로 남는다. 턴 시작의 브랜치가 `HEAD` 이거나 없으면
-    /// 그 레포 reflog 로 그 시각의 브랜치를 되살린다. 못 하면 그대로 둔다(지금처럼 날짜 단위).
-    static func recoverBranch(_ e: ObsParser.Event, repos: [String: RepoInfo?], resolver: RepoResolving) -> ObsParser.Event {
+    /// 그 레포 reflog 로 그 시각의 브랜치를 되살린다. 못 하면 `fallback`(Codex 파일 머리의 브랜치, `HEAD` 는 제외)을,
+    /// 그것도 없으면 그대로 둔다(지금처럼 날짜 단위). Claude 는 `fallback` 이 nil — 전과 같다.
+    /// 레포를 못 찾은 cwd 에는 메우지 않는다 — 단위는 어차피 레포 없음이고, 옮겨진 레포 판정(`resolve`)은 기록된 브랜치만 본다.
+    static func recoverBranch(_ e: ObsParser.Event, repos: [String: RepoInfo?], resolver: RepoResolving,
+                              fallback: String? = nil) -> ObsParser.Event {
         guard case .turnStart(var ctx, let prompt, let kind, let mode) = e,
               ctx.gitBranch == nil || ctx.gitBranch == "HEAD",
-              let repo = repos[ctx.cwd] ?? nil,
-              let recovered = resolver.branch(atRoot: repo.root, ts: ctx.ts) else { return e }
-        ctx.gitBranch = recovered
+              let repo = repos[ctx.cwd] ?? nil else { return e }
+        if let recovered = resolver.branch(atRoot: repo.root, ts: ctx.ts) {
+            ctx.gitBranch = recovered
+        } else if let fallback, !fallback.isEmpty, fallback != "HEAD" {
+            ctx.gitBranch = fallback
+        } else {
+            return e
+        }
         return .turnStart(ctx, prompt: prompt, kind: kind, permissionMode: mode)
     }
 
@@ -404,6 +518,25 @@ nonisolated enum ObsCollector {
 
     /// 파일 지문 — 첫 줄의 `uuid`. 앞 64KB 만 읽는다.
     static func firstLineUUID(_ path: String) -> String? { firstLine(path).uuid }
+
+    /// Codex rollout 머리(`session_meta`, 첫 줄)와 그 시각. 머리는 지시문(`base_instructions`) 때문에 길어(실측 27KB)
+    /// 줄 끝까지 읽는다 — 64KB 씩, 4MB 까지. 서브에이전트 파일의 첫 줄 시각은 띄운 순간이라 부모 턴을 고르는 기준이 된다.
+    static func codexHead(_ path: String) -> (state: CodexObsParser.State?, ts: Int?) {
+        guard let h = FileHandle(forReadingAtPath: path) else { return (nil, nil) }
+        defer { try? h.close() }
+        var data = Data()
+        while data.count < 4 << 20 {
+            guard let chunk = try? h.read(upToCount: 65_536), !chunk.isEmpty else { return (nil, nil) }   // 머리가 아직 다 안 써졌다
+            let from = data.count
+            data.append(chunk)
+            if let nl = data[from...].firstIndex(of: UInt8(ascii: "\n")) {
+                let line = data[data.startIndex..<nl]
+                let ts = ((try? JSONSerialization.jsonObject(with: line)) as? [String: Any])?["timestamp"] as? String
+                return (CodexObsParser.header(line), ts.flatMap(ObsParser.epoch))
+            }
+        }
+        return (nil, nil)
+    }
 
     /// 첫 줄의 uuid 와 시각. 서브에이전트 파일의 첫 줄은 띄운 순간의 프롬프트라, 부모 턴을 고르는 기준 시각이 된다.
     static func firstLine(_ path: String) -> (uuid: String?, ts: Int?) {

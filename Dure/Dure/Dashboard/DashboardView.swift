@@ -98,7 +98,7 @@ struct DashboardView: View {
                     }
                     .pickerStyle(.segmented).labelsHidden().fixedSize()
                 }
-                Text("사용량 · 툴 에러는 감시자 수집 기준 — 이 워크스페이스 레포에서 일어난 것(터미널 포함)")
+                Text("사용량 · 툴 에러는 감시자 수집 기준 — 이 워크스페이스 레포에서 일어난 것(터미널 · Codex 포함)")
                     .font(.caption2).foregroundStyle(.secondary)
                 if let limit = CodexLimitText.line(store.codexLimit.limits, blocked: store.codexLimit.isBlocked) {
                     Text(limit)

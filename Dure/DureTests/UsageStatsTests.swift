@@ -112,6 +112,27 @@ struct UsageStatsTests {
         #expect(s.orchestrator.tokens == 7)
     }
 
+    @Test func usageIncludesCodexTurns() throws {
+        let u = try unit(.issueBranch, root: "/r/app")
+        try turn(u, input: 10)
+        let id = UUID().uuidString
+        try db.write { db in
+            try ObsTurn(id: id, unitId: u, eventId: id, ccSessionId: "c", transcriptPath: "/t2", lineNo: 1,
+                        origin: .terminal, promptKind: .human, ts: 1000, prompt: "x", tokensInput: 5, tokensOutput: 5,
+                        agentKind: .codex).insert(db)
+        }
+        let o = try unit(.orchestrator, ws: "w1")
+        let oid = UUID().uuidString
+        try db.write { db in
+            try ObsTurn(id: oid, unitId: o, eventId: oid, ccSessionId: "c2", transcriptPath: "/t3", lineNo: 1,
+                        origin: .dureOrchestrator, promptKind: .human, ts: 1000, prompt: "x", tokensInput: 3,
+                        agentKind: .codex).insert(db)
+        }
+        let s = try summary()
+        #expect(s.byRepoPath["/r/app"]?.tokens == 20)
+        #expect(s.orchestrator.tokens == 3)
+    }
+
     @Test func 툴_수는_레포별로_센다() throws {
         let a = try turn(try unit(.issueBranch, root: "/r/app"))
         for _ in 0..<3 { try tool(a) }
@@ -165,6 +186,18 @@ struct UsageStatsTests {
         try tool(t, "Bash", error: true, head: "Exit code 2")
         let s = try summary()
         #expect(s.errors.isEmpty && s.bareExitExcluded == 4)
+    }
+
+    /// Codex 툴 실패도 같은 규칙 — 사람의 승인 창 거절(`declined`)은 빼고, 출력 없는 셸 실패는 종료 코드뿐으로 센다.
+    @Test func codex_거절과_출력_없는_실패는_오류_목록에_없다() throws {
+        let t = try turn(try unit(.issueBranch, root: "/r/app"))
+        try tool(t, "Bash", error: true, head: CodexObsParser.declinedHead, denied: true)
+        try tool(t, "Edit", error: true, head: CodexObsParser.declinedHead, denied: true)
+        try tool(t, "Bash", error: true, head: "Exit code 1")
+        try tool(t, "Bash", error: true, head: "error: boom")
+        let s = try summary()
+        #expect(s.errors.map(\.head) == ["error: boom"] && s.bareExitExcluded == 1)
+        #expect(!UsageStats.isHumanRejection("Declined by user"))
     }
 
     @Test func 에러는_상위_10개까지() throws {

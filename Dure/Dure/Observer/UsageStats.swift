@@ -68,7 +68,8 @@ nonisolated enum UsageStats {
     /// 사람이 거절한 툴 호출. 툴이 실패한 게 아니다. `denied` 플래그로 거르지 않는 이유 — 분류기 거부 · 오류도
     /// `denied` 로 찍히는데 그건 허용 목록 · 환경을 고칠 일이라 남긴다.
     static func isHumanRejection(_ head: String?) -> Bool {
-        head?.hasPrefix("The user doesn't want to proceed with this tool use") ?? false
+        guard let head else { return false }
+        return head.hasPrefix("The user doesn't want to proceed with this tool use") || head == CodexObsParser.declinedHead
     }
 
     /// 첫 줄이 `Exit code <숫자>` 뿐인 Bash 실패 — 무엇이 실패했는지 알 수 없고 grep 무매치 같은 정상 실패가 많다.

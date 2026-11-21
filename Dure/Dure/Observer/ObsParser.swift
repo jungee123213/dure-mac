@@ -140,15 +140,20 @@ nonisolated enum ObsParser {
                        eventId: root["uuid"] as? String)
     }
 
-    private static func plain(_ content: Any?) -> String {
+    /// 글 블록(`[{type:"text",text}]`) 또는 문자열에서 글만 꺼낸다. Codex 파서와 함께 쓴다 —
+    /// Codex 답 항목(`AgentMessage`)은 블록 type 이 `Text` 라 `textTypes` 로 받는다.
+    static func plain(_ content: Any?, textTypes: Set<String> = ["text"]) -> String {
         if let s = content as? String { return s }
         if let blocks = content as? [[String: Any]] {
-            return blocks.compactMap { $0["type"] as? String == "text" ? $0["text"] as? String : nil }.joined(separator: "\n")
+            return blocks.compactMap { b in
+                guard let t = b["type"] as? String, textTypes.contains(t) else { return nil }
+                return b["text"] as? String
+            }.joined(separator: "\n")
         }
         return ""
     }
 
-    private static func firstLine(_ s: String, max: Int) -> String {
+    static func firstLine(_ s: String, max: Int) -> String {
         String((s.split(separator: "\n", omittingEmptySubsequences: true).first ?? "").prefix(max))
     }
 

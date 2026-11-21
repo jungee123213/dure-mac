@@ -131,6 +131,8 @@ nonisolated struct ObsTurn: Codable, Identifiable, Hashable, FetchableRecord, Pe
     var tokensCacheRead: Int = 0
     var sidechainTokens: Int = 0
     var model: String?
+    /// 턴을 돌린 CLI(v11). 기존 행은 Claude.
+    var agentKind: AgentKind = .claude
 
     static let databaseTableName = "obs_turn"
     enum CodingKeys: String, CodingKey {
@@ -140,7 +142,7 @@ nonisolated struct ObsTurn: Codable, Identifiable, Hashable, FetchableRecord, Pe
         case durationMs = "duration_ms", answerTail = "answer_tail", sidechainTools = "sidechain_tools"
         case tokensInput = "tokens_input", tokensOutput = "tokens_output"
         case tokensCacheCreation = "tokens_cache_creation", tokensCacheRead = "tokens_cache_read"
-        case sidechainTokens = "sidechain_tokens"
+        case sidechainTokens = "sidechain_tokens", agentKind = "agent_kind"
     }
 
     /// 청구 기준(F6 `headline` 과 같은 정의 — 캐시 읽기 제외). 서브에이전트는 따로.

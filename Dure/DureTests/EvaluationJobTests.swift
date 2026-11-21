@@ -257,6 +257,20 @@ struct EvaluationJobTests {
         #expect(input.tools.map(\.toolUseId) == ["x"])
     }
 
+    /// Codex 서브에이전트 rollout 은 경로에 `subagents/` 가 없다 — "툴의 파일 ≠ 그 턴의 파일" 로 똑같이 뺀다.
+    @Test func 코덱스_서브에이전트_툴도_다이제스트_입력에서_빠진다() throws {
+        try db.write {
+            try ObsTool(turnId: "t1", transcriptPath: "/c/2026/11/20/rollout-2026-11-20T01-00-00-sub-1.jsonl",
+                        toolUseId: "exec-1", name: "Bash", target: "ls", startedTs: 1203, resultTs: 1204).insert($0)
+            try ObsTool(turnId: "t1", transcriptPath: "/gone/a.jsonl", toolUseId: "y", name: "Agent",
+                        target: "/root/sub", startedTs: 1205).insert($0)
+        }
+        let input = try db.read { db in
+            try EvaluationJob.gather(try #require(try WorkUnit.fetchOne(db, key: "u1")), dirs: dirs, db: db)
+        }
+        #expect(input.tools.map(\.toolUseId) == ["x", "y"])
+    }
+
     /// R10a — 같은 세션이어도 단위 시간 창 밖의 승인 요청은 제외.
     @Test func 단위_창_밖의_승인_요청은_제외() throws {
         try db.write {

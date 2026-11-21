@@ -36,7 +36,24 @@ nonisolated enum DigestBuilder {
     static let charLimit = 90_000
     static let edgeTurns = 50
 
-    static func shortEvent(_ id: String) -> String { String(id.prefix(8)) }
+    /// 근거 주소 `e:` 8자. 다이제스트 렌더 · `EvidenceIndex` 조회 · 리포트가 모두 이것 하나로 짓는다.
+    /// Claude 사건 id(줄 `uuid`, v4)는 앞 8자 그대로. Codex 사건 id(`"<스레드>:<줄>"`)는 스레드가 UUIDv7 이라 앞 8자가
+    /// 시각 비트 — 한 세션의 모든 턴과 ~65초 안에 만든 세션들이 겹친다. 그래서 `:` 가 든 id 는 전체의 FNV-1a 32비트 hex 8자.
+    static func shortEvent(_ id: String) -> String {
+        guard id.contains(":") else { return String(id.prefix(8)) }
+        var h: UInt32 = 0x811c_9dc5
+        for b in id.utf8 { h = (h ^ UInt32(b)) &* 0x0100_0193 }
+        let hex = String(h, radix: 16)
+        return String(repeating: "0", count: 8 - hex.count) + hex
+    }
+
+    /// 세션 표시 8자. Codex 스레드 id(UUIDv7, 버전 자리 `7`)는 앞 8자가 시각이라 겹친다 — 끝 8자(무작위 비트)를 보인다.
+    /// Claude 세션 id(v4)는 앞 8자 그대로.
+    static func shortSession(_ id: String) -> String {
+        let chars = Array(id)
+        let isV7 = chars.count == 36 && chars[8] == "-" && chars[13] == "-" && chars[14] == "7"
+        return isV7 ? String(id.suffix(8)) : String(id.prefix(8))
+    }
 
     /// 턴 번호(T · O)의 기준 정렬. `EvidenceIndex` 도 이걸 써야 화면 번호와 저장된 번호가 맞는다.
     static func ordered(_ turns: [ObsTurn]) -> [ObsTurn] {
@@ -93,10 +110,12 @@ nonisolated enum DigestBuilder {
         }
         if let d = i.diffStat { o += "- 변경: \(d)\n" }
         o += "- 사람 턴 \(u.humanTurns) · 배분 받은 턴 \(u.peerTurns) · 파일 수정 툴 \(u.editCount)회 · 전체 턴 \(turns.count)\n"
+        let claudeTurns = turns.filter { $0.agentKind == .claude }.count, codexTurns = turns.count - claudeTurns
+        if claudeTurns > 0 && codexTurns > 0 { o += "- CLI: claude \(claudeTurns)턴 · codex \(codexTurns)턴\n" }
         let sessions = Dictionary(grouping: turns, by: \.ccSessionId)
         o += "\n세션:\n"
         for (sid, ts) in sessions.sorted(by: { $0.value[0].ts < $1.value[0].ts }) {
-            var line = "- `\(sid.prefix(8))` · \(originLabel(ts[0].origin)) · 턴 \(ts.count)"
+            var line = "- `\(shortSession(sid))` · \(originLabel(ts[0].origin)) · 턴 \(ts.count)"
             if let e = ts[0].entrypoint { line += " · \(e)" }
             if let m = ts.compactMap(\.model).last { line += " · \(m)" }
             if i.missingTranscripts.contains(ts[0].transcriptPath) { line += " · (원본 삭제됨)" }
@@ -110,7 +129,8 @@ nonisolated enum DigestBuilder {
                 if idx == edgeTurns { o += "… T\(edgeTurns + 1)~T\(n - edgeTurns) 생략 (\(n - edgeTurns * 2)턴) …\n\n" }
                 if idx >= edgeTurns && idx < n - edgeTurns { continue }
             }
-            var head = "### T\(idx + 1) · \(clock(t.ts, tz)) · \(originLabel(t.origin)) · `\(t.ccSessionId.prefix(8))` · e:\(shortEvent(t.eventId))"
+            var head = "### T\(idx + 1) · \(clock(t.ts, tz)) · \(originLabel(t.origin)) · `\(shortSession(t.ccSessionId))` · e:\(shortEvent(t.eventId))"
+            if t.agentKind == .codex { head += " · [codex]" }
             if t.promptKind != .human { head += " · \(t.promptKind.rawValue)" }
             if let ms = t.durationMs { head += " · \(ms / 1000)초" }
             o += head + "\n\n" + quote(clip(t.prompt, promptLimit)) + "\n\n"

@@ -174,10 +174,14 @@ nonisolated enum EvaluationJob {
 
     static func gather(_ u: WorkUnit, dirs: ObserverDirs, db: Database) throws -> DigestInput {
         let turns = try ObsTurn.filter(Column("unit_id") == u.id).order(Column("ts"), Column("line_no")).fetchAll(db)
-        let turnIDs = turns.map(\.id)
-        let tools = turnIDs.isEmpty ? [] : try ObsTool.filter(turnIDs.contains(Column("turn_id")))
-            // 서브에이전트 툴은 부모 턴의 sidechainTools 가 이미 센다 — 다시 넣으면 이중 계산
-            .filter(!Column("transcript_path").like("%/subagents/%")).fetchAll(db)
+        // 서브에이전트 툴은 부모 턴의 sidechainTools 가 이미 센다 — 다시 넣으면 이중 계산. 서브에이전트 툴 행은 자기 파일
+        // (Claude `<세션>/subagents/x.jsonl` · Codex 서브에이전트 rollout)에 있고 부모 턴은 본 세션 파일에 있다 —
+        // "툴의 파일 ≠ 그 턴의 파일" 로 두 CLI 를 한 규칙으로 뺀다. (옛 형식 본 기록 안 isSidechain 줄은 같은 파일이라 남는다 — 전과 같다.)
+        let tools = try ObsTool.fetchAll(db, sql: """
+            SELECT o.* FROM obs_tool o JOIN obs_turn t ON t.id = o.turn_id
+            WHERE t.unit_id = ? AND o.transcript_path = t.transcript_path
+            ORDER BY o.rowid
+            """, arguments: [u.id])
         let sessions = Array(Set(turns.map(\.ccSessionId)))
         let permissions = sessions.isEmpty ? [] : try ObsPermission.filter(sessions.contains(Column("cc_session_id")))
             // 같은 세션의 다른 작업 시간대 승인 요청이 섞이지 않게 단위 창으로 자른다
