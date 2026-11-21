@@ -163,6 +163,49 @@ struct DigestTests {
         #expect(heads[1].contains("[codex]"))
     }
 
+    /// Codex 사건 id 는 `"<UUIDv7 스레드>:<줄>"` — 앞 8자가 시각 비트라 한 세션의 모든 턴 · ~65초 안의 세션이 겹친다.
+    /// `e:` 는 id 전체의 해시 8자라 턴마다 다르고, `EvidenceIndex` 가 같은 함수로 각 턴을 찾는다. Claude(v4 uuid)는 앞 8자 그대로.
+    @Test func codexEvidenceKeysAreDistinctPerTurn() throws {
+        let s1 = "01a1f907-8088-7c32-807a-74c16a4ed148", s2 = "01a1f907-9999-7d11-a1b2-0123456789ab"
+        func codex(_ id: String, session: String, line: Int, ts: Int, prompt: String) -> ObsTurn {
+            var t = ObsTurn(id: id, unitId: "u", eventId: "\(session):\(line)", ccSessionId: session,
+                            transcriptPath: "/c/rollout-\(session).jsonl", lineNo: line, origin: .dureRepo, promptKind: .human,
+                            ts: ts, prompt: prompt)
+            t.agentKind = .codex
+            return t
+        }
+        let turns = [codex("a", session: s1, line: 4, ts: 100, prompt: "첫째 턴 프롬프트"),
+                     codex("b", session: s1, line: 40, ts: 200, prompt: "둘째 턴 프롬프트"),
+                     codex("c", session: s2, line: 4, ts: 300, prompt: "다른 세션 프롬프트"),
+                     Self.turn("d", ts: 400, prompt: "클로드 턴 프롬프트")]
+        let keys = turns.map { DigestBuilder.shortEvent($0.eventId) }
+        #expect(Set(keys).count == 4 && keys.allSatisfy { $0.count == 8 })
+        #expect(keys[3] == "evd-0000")                                       // Claude 는 앞 8자 그대로
+        #expect(keys[0].allSatisfy(\.isHexDigit) && DigestBuilder.shortEvent("\(s1):4") == keys[0])   // 안정적
+
+        let index = EvidenceIndex(turns: turns)
+        for (k, t) in zip(keys, DigestBuilder.ordered(turns)) {
+            #expect(index[k]?.eventId == t.eventId && index[k]?.sessionId == t.ccSessionId)
+        }
+        #expect(index[keys[1]]?.turn == 2 && index[keys[2]]?.turn == 3)
+        let (ok, bad) = FindingValidator.validate([EvalFinding(group: "habit", kind: "prompt", key: "codex-turn-two",
+                                                               title: "t", detail: "d",
+                                                               evidence: [.init(event: keys[1], quote: "둘째 턴 프롬프트")],
+                                                               severity: 1, confidence: "high")], index: index)
+        #expect(bad.isEmpty && ok.first?.evidence.first?.eventId == "\(s1):40")
+        // 리포트의 근거 줄도 같은 `e:` · 세션 표시.
+        let report = ReportRenderer.render(title: "r", summary: "s", notes: nil, findings: ok, rejected: 0)
+        #expect(report.contains("`6a4ed148` · e:\(keys[1])"))
+
+        // 다이제스트 머리는 같은 `e:` 와 세션의 구별되는 끝 8자를 보인다. Claude 세션은 앞 8자.
+        let digest = DigestBuilder.render(DigestInput(unit: Self.unit, turns: turns, tools: [], timeZone: Self.utc))
+        for k in keys { #expect(digest.contains("e:\(k)")) }
+        #expect(digest.contains("`6a4ed148`") && digest.contains("`456789ab`") && !digest.contains("`01a1f907`"))
+        #expect(digest.contains("`aaaaaaaa`"))
+        #expect(DigestBuilder.shortSession(s1) == "6a4ed148" && DigestBuilder.shortSession("aaaaaaaa-1111") == "aaaaaaaa")
+        #expect(DigestBuilder.shortSession("3f2b8c1d-1234-4abc-9def-0123456789ab") == "3f2b8c1d")
+    }
+
     @Test func digestHeaderCountsCli() {
         let both = DigestBuilder.render(DigestInput(unit: Self.unit, turns: [Self.turn("a", ts: 100, prompt: "x"),
                                                                              Self.turn("c", ts: 150, prompt: "y"),

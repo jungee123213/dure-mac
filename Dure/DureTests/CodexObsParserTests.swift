@@ -211,7 +211,41 @@ struct CodexObsParserTests {
         let events = try last([CFx.command(id: "c1", ["/bin/zsh", "-lc", "git push --force"], status: "declined",
                                            exit: 0, output: "rejected by user")])
         guard case let .toolResult(_, _, isError, head, denied) = events[1] else { Issue.record(""); return }
-        #expect(isError && denied && head == "rejected by user")
+        // 출력 글이 아니라 고정 문구 — 대시보드가 사람의 거절로 알아보고 툴 오류로 세지 않는다.
+        #expect(isError && denied && head == CodexObsParser.declinedHead)
+        #expect(UsageStats.isHumanRejection(head))
+    }
+
+    /// 출력 없는 셸 실패는 Claude 와 같은 `Exit code N` — 빈 errorHead 가 대시보드에 빈 줄로 뜨지 않게.
+    @Test func emptyOutputFailureHasExitCodeHead() throws {
+        for output in ["", "\n  \n"] {
+            let events = try last([CFx.command(id: "c1", ["/bin/zsh", "-lc", "grep x y"], status: "failed", exit: 1,
+                                               output: output)])
+            guard case let .toolResult(_, _, isError, head, denied) = events[1] else { Issue.record("\(events)"); return }
+            #expect(isError && !denied && head == "Exit code 1")
+            #expect(UsageStats.isBareExitCode(tool: "Bash", head: head))
+        }
+        // 출력이 있으면 그 첫 줄 그대로.
+        guard case let .toolResult(_, _, _, kept, _) = try last([CFx.command(id: "c2", ["ls"], exit: 2, output: "nope")])[1]
+        else { Issue.record(""); return }
+        #expect(kept == "nope")
+    }
+
+    /// 툴 시각은 항목의 `started_at_ms` · `completed_at_ms`(epoch ms → 초) — 줄 시각(끝난 때)만 쓰면 시작과 끝이 같다.
+    @Test func toolTimesFromItemMilliseconds() throws {
+        let item: [String: Any] = ["type": "CommandExecution", "id": "c1", "command": ["/bin/zsh", "-lc", "sleep 1; ls"],
+                                   "status": "completed", "aggregated_output": "", "exit_code": 0]
+        let line = CFx.event("item_completed", ["thread_id": "th-1", "turn_id": "t1", "item": item,
+                                                "started_at_ms": 1_795_136_388_250, "completed_at_ms": 1_795_136_400_900])
+        let events = try last([line])
+        guard case let .toolUse(ctx, _, _, _) = events[0], case let .toolResult(ts, _, _, _, _) = events[1] else {
+            Issue.record("\(events)"); return
+        }
+        #expect(ctx.ts == 1_795_136_388 && ts == 1_795_136_400)
+        // 항목 시각이 없거나 ms 가 아니면(옛 모양 · 지어낸 값) 줄 시각.
+        guard case let .toolUse(c2, _, _, _) = try last([CFx.command(id: "c2", ["ls"])])[0],
+              case let .toolResult(t2, _, _, _, _) = try last([CFx.command(id: "c2", ["ls"])])[1] else { Issue.record(""); return }
+        #expect(c2.ts == CFx.epoch && t2 == CFx.epoch)
     }
 
     /// 셸로 감싼 꼴만 마지막 원소 — 셸 아닌 argv 는 잇는다.
@@ -439,7 +473,6 @@ struct CodexObsParserTests {
         #expect(out[5] == [.ignored])
         var p = CodexObsParser()
         _ = run([sub, started], parser: &p)
-        #expect(p.state.parentTurnId == "t1")
         #expect(p.parse(Fx.data(CFx.event("turn_aborted", ["turn_id": "st1", "reason": "interrupted"])), lineNo: 3)
                 == [.ignored])
         // 이어 읽기로 시작을 못 본 서브 턴의 끝도 마찬가지.
@@ -539,6 +572,13 @@ struct CodexObsParserTests {
         #expect(uses.count == 14)
         let errors = events.filter { if case let .toolResult(_, _, isError, _, _) = $0 { isError } else { false } }
         #expect(errors.count == 5)   // 셸 실패 2 · 패치 검증 실패 3
+        // 툴 시각은 항목의 시작 · 끝 — 중단 뒤 끝난 셸 30초 · `sleep 3` 셸 3초가 보인다(줄 시각만 쓰면 0).
+        var started: [String: Int] = [:], spans: [Int] = []
+        for e in events {
+            if case let .toolUse(ctx, id, "Bash", _) = e { started[id] = ctx.ts }
+            if case let .toolResult(ts, id, _, _, _) = e, let s = started[id] { spans.append(ts - s) }
+        }
+        #expect(spans.sorted() == [0, 0, 0, 0, 0, 3, 30])
 
         let usage = events.filter { if case let .assistant(_, nil, id?, _, _) = $0 { !id.isEmpty } else { false } }
         #expect(usage.count == 26)

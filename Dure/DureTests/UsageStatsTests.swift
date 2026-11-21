@@ -188,6 +188,18 @@ struct UsageStatsTests {
         #expect(s.errors.isEmpty && s.bareExitExcluded == 4)
     }
 
+    /// Codex 툴 실패도 같은 규칙 — 사람의 승인 창 거절(`declined`)은 빼고, 출력 없는 셸 실패는 종료 코드뿐으로 센다.
+    @Test func codex_거절과_출력_없는_실패는_오류_목록에_없다() throws {
+        let t = try turn(try unit(.issueBranch, root: "/r/app"))
+        try tool(t, "Bash", error: true, head: CodexObsParser.declinedHead, denied: true)
+        try tool(t, "Edit", error: true, head: CodexObsParser.declinedHead, denied: true)
+        try tool(t, "Bash", error: true, head: "Exit code 1")
+        try tool(t, "Bash", error: true, head: "error: boom")
+        let s = try summary()
+        #expect(s.errors.map(\.head) == ["error: boom"] && s.bareExitExcluded == 1)
+        #expect(!UsageStats.isHumanRejection("Declined by user"))
+    }
+
     @Test func 에러는_상위_10개까지() throws {
         let t = try turn(try unit(.issueBranch, root: "/r/app"))
         for i in 0..<12 { try tool(t, "Read", error: true, head: "e\(i)") }

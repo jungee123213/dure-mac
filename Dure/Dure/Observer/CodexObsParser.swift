@@ -15,7 +15,7 @@ nonisolated struct CodexObsParser {
         /// 이 파일의 스레드(`session_meta.id`).
         var sessionId: String?
         var cwd: String?
-        /// 표시용으로만 남긴다. Context 의 브랜치 · 출처 판정에는 쓰지 않는다(아래 `context`).
+        /// 스레드 시작 때 브랜치. Context 에는 싣지 않는다(아래 `context`) — 수집기가 reflog 복원에 실패했을 때만 대신 쓴다.
         var gitBranch: String?
         var originator: String?
         var isSubagent = false
@@ -27,10 +27,9 @@ nonisolated struct CodexObsParser {
         var skip = false
         /// 지금 열린 **사용자** 턴(`UserMessage` 의 turn id).
         var turnId: String?
-        /// 마지막 `task_started` 의 턴 · 트리거 · 부모 턴(서브에이전트 파일에서 부모 파일의 턴 id).
+        /// 마지막 `task_started` 의 턴 · 트리거.
         var taskTurnId: String?
         var turnTrigger: String?
-        var parentTurnId: String?
     }
 
     var state: State
@@ -123,11 +122,10 @@ nonisolated struct CodexObsParser {
             let attribution = p["turn_attribution"] as? [String: Any]
             state.taskTurnId = p["turn_id"] as? String
             state.turnTrigger = attribution?["turn_trigger"] as? String
-            if let parent = attribution?["parent_turn_id"] as? String { state.parentTurnId = parent }
             return [.ignored]
         case "item_completed":
             guard let item = p["item"] as? [String: Any] else { return nil }
-            return self.item(item, turn: p["turn_id"] as? String, root: root, lineNo: lineNo)
+            return self.item(item, turn: p["turn_id"] as? String, timing: Self.timing(p), root: root, lineNo: lineNo)
         case "task_complete":
             guard endsUserTurn(p["turn_id"] as? String) else { return [.ignored] }
             return [Self.durationMs(p).map { .turnDuration(ms: $0) } ?? .ignored]
@@ -150,7 +148,8 @@ nonisolated struct CodexObsParser {
         return state.taskTurnId != turn
     }
 
-    private mutating func item(_ item: [String: Any], turn: String?, root: [String: Any], lineNo: Int) -> [Event]? {
+    private mutating func item(_ item: [String: Any], turn: String?, timing: Timing, root: [String: Any],
+                               lineNo: Int) -> [Event]? {
         let kind = item["type"] as? String ?? ""
         switch kind {
         case "UserMessage":
@@ -168,7 +167,7 @@ nonisolated struct CodexObsParser {
             // 사람이 TUI 에서 친 `!명령` 은 에이전트 툴이 아니다.
             if item["source"] as? String == "user_shell" { return [.ignored] }
             guard let ctx = context(root, lineNo: lineNo) else { return nil }
-            return Self.tool(item, ctx: ctx)
+            return Self.tool(item, ctx: ctx, timing: timing)
         case "SubAgentActivity":
             // 서브에이전트 띄우기 하나에 `started` 하나(실측, id = 띄운 호출의 call_id) — 이것만 `Agent` 툴로 센다
             // (Claude `Agent` 와 같은 뜻). `completed` 와 협업 툴 항목(`CollabAgentToolCall` — `wait` 등)은 무시.
@@ -211,19 +210,41 @@ nonisolated struct CodexObsParser {
                 .toolResult(ts: ctx.ts, toolUseId: id, isError: true, errorHead: String(line.prefix(200)), denied: false)]
     }
 
+    /// `item_completed` 의 항목 시작 · 끝(초). 줄 시각은 끝난 때라 시작과 끝이 같아진다 — 항목 시각이 있으면 그걸 쓴다
+    /// (`Signals` 지연 판정). 실측 값은 epoch ms 다. 그보다 작은 값(형식이 다른 것)은 버린다.
+    typealias Timing = (start: Int?, end: Int?)
+
+    static func timing(_ p: [String: Any]) -> Timing {
+        func seconds(_ key: String) -> Int? {
+            guard let ms = p[key] as? Int, ms >= 1_000_000_000_000 else { return nil }
+            return ms / 1000
+        }
+        return (seconds("started_at_ms"), seconds("completed_at_ms"))
+    }
+
+    /// 사람이 승인 창에서 거절한 툴(`declined`)의 errorHead. 출력 글이 아니라 고정 문구 — `UsageStats.isHumanRejection` 이
+    /// Claude 의 거절 문구처럼 알아보고 툴 오류로 세지 않는다.
+    static let declinedHead = "Declined by user in Codex approval"
+
     /// 툴 호출 항목 → 호출 + 결과. Claude 툴 이름에 맞춘다(셸 `Bash` · 파일 수정 `Edit` · MCP `mcp__<서버>__<툴>`).
-    private static func tool(_ item: [String: Any], ctx: Context) -> [Event]? {
+    private static func tool(_ item: [String: Any], ctx: Context, timing: Timing) -> [Event]? {
         guard let id = item["id"] as? String else { return nil }
         let status = item["status"] as? String
         // `declined` 는 사람이 승인 창에서 거절한 것 — Claude 의 거부(`denied`)와 같다.
         let failed = status == "failed", declined = status == "declined"
-        let name: String, target: String?, isError: Bool, errorText: String
+        let name: String, target: String?, isError: Bool
+        var errorText: String
         switch item["type"] as? String {
         case "CommandExecution":
             name = "Bash"
             target = commandLine(item["command"]).map { String($0.prefix(120)) }
-            isError = failed || declined || (item["exit_code"] as? Int ?? 0) != 0
+            let exit = item["exit_code"] as? Int
+            isError = failed || declined || (exit ?? 0) != 0
             errorText = item["aggregated_output"] as? String ?? ""
+            // 출력 없는 실패는 Claude 의 `Exit code N` 과 같은 모양으로 — 대시보드가 빈 줄 대신 "종료 코드만" 으로 거른다.
+            if let exit, exit != 0, errorText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                errorText = "Exit code \(exit)"
+            }
         case "FileChange":
             // 한 항목이 여러 파일을 고칠 수 있다. 사전 순서는 JSON 에서 보존되지 않아 정렬해 첫 경로로 정한다.
             name = "Edit"
@@ -238,9 +259,12 @@ nonisolated struct CodexObsParser {
             isError = failed || declined || result?["isError"] as? Bool == true
             errorText = mcpError(item, result: result)
         }
+        if declined { errorText = declinedHead }
         let head = isError ? ObsParser.firstLine(errorText, max: 200) : ""
-        return [.toolUse(ctx, id: id, name: name, target: target),
-                .toolResult(ts: ctx.ts, toolUseId: id, isError: isError, errorHead: head.isEmpty ? nil : head,
+        var started = ctx
+        if let s = timing.start { started.ts = s }
+        return [.toolUse(started, id: id, name: name, target: target),
+                .toolResult(ts: timing.end ?? ctx.ts, toolUseId: id, isError: isError, errorHead: head.isEmpty ? nil : head,
                             denied: declined)]
     }
 
@@ -299,7 +323,7 @@ nonisolated struct CodexObsParser {
 
     /// 서브에이전트 줄은 Claude 서브에이전트 줄처럼 루트 세션 id 를 갖고(`isSidechain`), 사건 id 는 자기 스레드로 짓는다.
     /// 브랜치는 nil — `session_meta.git.branch` 는 스레드 시작 때 값이라 세션 중 만든 브랜치를 모른다. 수집기의
-    /// reflog 복원(D-40)이 턴 시각으로 정한다. 출처는 `originator` 로 가르지 못한다(서버에 처음 붙은 클라이언트 이름).
+    /// reflog 복원(D-40)이 턴 시각으로 정하고, 못 정하면 이 값(`state.gitBranch`)으로 메운다. 출처는 `originator` 로 가르지 못한다(서버에 처음 붙은 클라이언트 이름).
     private func context(_ root: [String: Any], lineNo: Int) -> Context? {
         guard let own = state.sessionId, let cwd = state.cwd,
               let tsString = root["timestamp"] as? String, let ts = ObsParser.epoch(tsString) else { return nil }

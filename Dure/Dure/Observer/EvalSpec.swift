@@ -160,7 +160,7 @@ nonisolated enum ReportRenderer {
                 if let s = f.suggestion, !s.isEmpty { o += "\n- 제안: \(s)\n" }
                 if let a = f.applyText, !a.isEmpty { o += "- 적용: `\(a)`\n" }
                 for e in f.evidence {
-                    o += "- 근거: \(e.display) · `\(e.sessionId.prefix(8))` · e:\(e.eventId.prefix(8)) — “\(e.quote)”\n"
+                    o += "- 근거: \(e.display) · `\(DigestBuilder.shortSession(e.sessionId))` · e:\(DigestBuilder.shortEvent(e.eventId)) — “\(e.quote)”\n"
                 }
             }
         }

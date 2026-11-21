@@ -216,6 +216,72 @@ struct ObsCollectorCodexTests {
         #expect(try turns()[0].sidechainTools == 2 && turns()[0].sidechainTokens == 9)
     }
 
+    /// 평가 다이제스트는 서브에이전트 툴을 부모 턴의 `서브에이전트 툴 ×N` 으로만 센다 — 툴 목록 · 신호에 다시 넣지 않는다.
+    @Test func codexSubagentToolsNotDoubleCountedInDigest() throws {
+        try rollout("2026-11-20T01-00-00-th-1", [
+            at("2026-11-20T01:00:00.000Z", CFx.meta(session: "th-1")),
+            at("2026-11-20T01:00:00.000Z", CFx.taskStarted(turn: "t1")),
+            at("2026-11-20T01:00:00.000Z", CFx.turnContext()),
+            at("2026-11-20T01:00:00.000Z", CFx.userItem("조사해", turn: "t1")),
+            at("2026-11-20T01:00:01.000Z", CFx.item(["type": "SubAgentActivity", "id": "call_14", "kind": "started",
+                                                     "agent_thread_id": "sub-1", "agent_path": "/root/sub"], turn: "t1")),
+            at("2026-11-20T01:00:40.000Z", CFx.agentItem("부모 답", turn: "t1")),
+        ])
+        try rollout("2026-11-20T00-00-00-sub-1", subagentLines("sub-1", parent: "th-1"))
+        try collect()
+        let u = try unit()
+        let dirs = ObserverDirs(root: dir.appendingPathComponent("observer"), claudeHome: dir.appendingPathComponent("claude-home"),
+                                workspacesRoot: dir.appendingPathComponent("workspaces"),
+                                settingsDir: dir.appendingPathComponent("settings"))
+        let input = try db.read { try EvaluationJob.gather(u, dirs: dirs, db: $0) }
+        #expect(input.tools.map(\.name) == ["Agent"])
+        #expect(try db.read { try ObsTool.fetchCount($0) } == 3)      // 행은 그대로 — 다이제스트 입력에서만 뺀다
+        let digest = DigestBuilder.render(input)
+        #expect(digest.contains("- 툴: Agent×1") && digest.contains("서브에이전트 툴 ×2"))
+        #expect(!digest.contains("실패한 툴"))      // 서브 명령 실패는 부모 턴 실패로 다시 세지 않는다
+    }
+
+    /// Codex 턴은 브랜치 없이 온다 — reflog 가 정하고, 못 정하면 파일 머리 `session_meta.git.branch` 로 메운다.
+    @Test func codexBranchFallsBackToHeader() throws {
+        try rollout("2026-11-20T01-00-00-th-1", oneTurn())
+        try collect()                               // reflog 없음(FakeResolver.branches 빔) → 머리의 브랜치
+        var u = try unit()
+        #expect(u.branch == "feat/#54/x" && u.issueNo == 54 && u.kind == .issueBranch)
+
+        // reflog 가 정하면 그쪽이 이긴다(세션 중 만든 브랜치).
+        let fresh = try Fx.memoryDB()
+        let reflog = FakeResolver(repos: resolver.repos, branches: ["/r/ios": "fix/#60/later"])
+        _ = try ObsCollector.collect(db: fresh, config: config, resolver: reflog)
+        u = try fresh.read { try #require(try WorkUnit.fetchOne($0)) }
+        #expect(u.branch == "fix/#60/later" && u.issueNo == 60)
+    }
+
+    @Test func codexBranchFallbackSkipsHeadAndMissing() throws {
+        for (i, branch) in ["HEAD", nil].enumerated() {
+            var lines = oneTurn(session: "th-\(i)")
+            lines[0] = CFx.meta(session: "th-\(i)", branch: branch)
+            try rollout("2026-11-20T01-00-00-th-\(i)", lines)
+        }
+        try collect()
+        let units = try db.read { try WorkUnit.fetchAll($0) }
+        // 전과 같이 `HEAD` 단위(place 가 nil 을 HEAD 로 본다) — 머리의 `HEAD` 를 브랜치로 메우지 않는다.
+        #expect(!units.isEmpty && units.allSatisfy { $0.branch == "HEAD" && $0.issueNo == nil })
+        #expect(try turns().count == 2)
+    }
+
+    /// Claude 이벤트는 `fallback` 을 받지 않는다(nil) — 복원 못 하면 그대로.
+    @Test func recoverBranchFallbackOnlyWhenGiven() {
+        let ctx = ObsParser.Context(sessionId: "s", cwd: "/r/ios", gitBranch: "HEAD", ts: 1, entrypoint: nil,
+                                    isSidechain: false, eventId: "e")
+        let e = ObsParser.Event.turnStart(ctx, prompt: "p", kind: .human, permissionMode: nil)
+        let repos: [String: RepoInfo?] = ["/r/ios": resolver.repos["/r/ios"]]
+        #expect(ObsCollector.recoverBranch(e, repos: repos, resolver: resolver) == e)
+        guard case let .turnStart(c, _, _, _) = ObsCollector.recoverBranch(e, repos: repos, resolver: resolver,
+                                                                           fallback: "feat/#1/a") else { Issue.record(""); return }
+        #expect(c.gitBranch == "feat/#1/a")
+        #expect(ObsCollector.recoverBranch(e, repos: repos, resolver: resolver, fallback: "HEAD") == e)
+    }
+
     func subagentLines(_ id: String, parent: String?) -> [String] {
         [subMeta(id, parent: parent, ts: "2026-11-20T01:00:02.000Z"),
          at("2026-11-20T01:00:02.000Z", Fx.json(["timestamp": "x", "ordinal": 1, "type": "event_msg", "payload": [

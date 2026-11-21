@@ -70,12 +70,13 @@ nonisolated struct EvidenceIndex: Sendable {
 
     private mutating func add(_ t: ObsTurn, turn: Int, label: String?) {
         let k = DigestBuilder.shortEvent(t.eventId)
-        guard entries[k] == nil else { return }     // 앞 8자 충돌은 드물다 — 먼저 온 것(레포 턴)을 쓴다
+        guard entries[k] == nil else { return }     // 8자 충돌은 드물다 — 먼저 온 것(레포 턴)을 쓴다
         entries[k] = Entry(eventId: t.eventId, sessionId: t.ccSessionId, turn: turn, ts: t.ts,
                            text: t.prompt + "\n" + (t.answerTail ?? ""), label: label)
     }
 
-    subscript(_ short: String) -> Entry? { entries[String(short.prefix(8))] }
+    /// 다이제스트의 `e:` 8자로 찾는다. 같은 함수(`shortEvent`)를 거쳐 전체 id 를 넣어도 같은 자리를 찾는다.
+    subscript(_ short: String) -> Entry? { entries[DigestBuilder.shortEvent(short)] }
 }
 
 nonisolated enum FindingValidator {

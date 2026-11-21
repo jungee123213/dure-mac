@@ -143,6 +143,8 @@ nonisolated enum ObsCollector {
             var parser = CodexObsParser(state: head.codex ?? .init())
             parsed = batch.lines.map { (no: $0.no, events: parser.parse($0.data, lineNo: $0.no)) }
         }
+        // Codex 턴은 브랜치 없이 온다(파서) — reflog 가 못 정하면 파일 머리 `session_meta.git.branch`(스레드 시작 때 값)로.
+        let fallbackBranch = kind == .codex ? head.codex?.gitBranch : nil
         var repos: [String: RepoInfo?] = [:]
         for line in parsed {
             for e in line.events ?? [] {
@@ -150,7 +152,9 @@ nonisolated enum ObsCollector {
             }
         }
         parsed = parsed.map { line in
-            (no: line.no, events: line.events?.map { recoverBranch($0, repos: repos, resolver: resolver) })
+            (no: line.no, events: line.events?.map {
+                recoverBranch($0, repos: repos, resolver: resolver, fallback: fallbackBranch)
+            })
         }
 
         // 2. 짧은 트랜잭션
@@ -462,13 +466,21 @@ nonisolated enum ObsCollector {
     }
 
     /// 이슈 #32 — `#` 이 든 브랜치는 트랜스크립트에 `"HEAD"` 로 남는다. 턴 시작의 브랜치가 `HEAD` 이거나 없으면
-    /// 그 레포 reflog 로 그 시각의 브랜치를 되살린다. 못 하면 그대로 둔다(지금처럼 날짜 단위).
-    static func recoverBranch(_ e: ObsParser.Event, repos: [String: RepoInfo?], resolver: RepoResolving) -> ObsParser.Event {
+    /// 그 레포 reflog 로 그 시각의 브랜치를 되살린다. 못 하면 `fallback`(Codex 파일 머리의 브랜치, `HEAD` 는 제외)을,
+    /// 그것도 없으면 그대로 둔다(지금처럼 날짜 단위). Claude 는 `fallback` 이 nil — 전과 같다.
+    /// 레포를 못 찾은 cwd 에는 메우지 않는다 — 단위는 어차피 레포 없음이고, 옮겨진 레포 판정(`resolve`)은 기록된 브랜치만 본다.
+    static func recoverBranch(_ e: ObsParser.Event, repos: [String: RepoInfo?], resolver: RepoResolving,
+                              fallback: String? = nil) -> ObsParser.Event {
         guard case .turnStart(var ctx, let prompt, let kind, let mode) = e,
               ctx.gitBranch == nil || ctx.gitBranch == "HEAD",
-              let repo = repos[ctx.cwd] ?? nil,
-              let recovered = resolver.branch(atRoot: repo.root, ts: ctx.ts) else { return e }
-        ctx.gitBranch = recovered
+              let repo = repos[ctx.cwd] ?? nil else { return e }
+        if let recovered = resolver.branch(atRoot: repo.root, ts: ctx.ts) {
+            ctx.gitBranch = recovered
+        } else if let fallback, !fallback.isEmpty, fallback != "HEAD" {
+            ctx.gitBranch = fallback
+        } else {
+            return e
+        }
         return .turnStart(ctx, prompt: prompt, kind: kind, permissionMode: mode)
     }
 
