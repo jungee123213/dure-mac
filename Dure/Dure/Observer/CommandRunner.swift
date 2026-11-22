@@ -41,6 +41,8 @@ nonisolated final class ProcessTracker: @unchecked Sendable {
 
 /// **`zsh -ilc` 다**(GUI 앱은 PATH 가 비어 `claude` · `gh` 를 못 찾는다, `Spawn` 과 같은 이유).
 /// 시간 한도는 **보장**한다(리뷰 P1-H): SIGTERM 을 무시하는 프로세스는 트리째 SIGKILL, 파이프를 쥔 손자는 기다리지 않는다.
+/// 감시 셸(`ProcessLifeline`)로 감싼다(#58) — 두레가 정리 없이 끝나도 평가 중인 `claude -p` 가 남아 한도를 쓰지 않게.
+/// 그래서 루트 pid 는 감시 셸이고 명령은 그 자손이다(시간 초과 · `cancelAll` 은 지금처럼 트리째 죽인다).
 nonisolated struct LiveCommandRunner: CommandRunning {
     var grace: TimeInterval = 5
     let tracker = ProcessTracker()
@@ -70,15 +72,19 @@ nonisolated struct LiveCommandRunner: CommandRunning {
         var snapshot: (data: Data, eof: Bool) { lock.withLock { (data, eof) } }
     }
 
+    /// `innerFlags` 는 테스트가 `.zshrc` 를 안 읽게 `-c` 로, `onStart` 는 테스트가 생명줄을 끊어 보려고 쓴다.
     static func runBlocking(_ script: String, timeout: TimeInterval, grace: TimeInterval,
-                            tracker: ProcessTracker? = nil) -> CommandResult {
+                            tracker: ProcessTracker? = nil, innerFlags: String = "-ilc",
+                            onStart: ((ProcessLifeline.WriteEnd) -> Void)? = nil) -> CommandResult {
+        let (lifelinePipe, lifeline) = ProcessLifeline.make()
+        defer { lifeline.close() }
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/bin/zsh")
-        p.arguments = ["-ilc", script]
+        p.arguments = ProcessLifeline.arguments(script: script, innerFlags: innerFlags)
         let out = Pipe(), err = Pipe()
         p.standardOutput = out
         p.standardError = err
-        p.standardInput = FileHandle.nullDevice
+        p.standardInput = lifelinePipe
         let o = Sink(), e = Sink()
         out.fileHandleForReading.readabilityHandler = { o.append($0.availableData) }
         err.fileHandleForReading.readabilityHandler = { e.append($0.availableData) }
@@ -90,6 +96,7 @@ nonisolated struct LiveCommandRunner: CommandRunning {
             return CommandResult(status: -1, stdout: Data(), stderr: Data("\(error)".utf8), timedOut: false)
         }
         tracker?.add(p.processIdentifier)
+        onStart?(lifeline)
         var timedOut = false
         if exited.wait(timeout: .now() + timeout) == .timedOut {
             timedOut = true

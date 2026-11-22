@@ -72,6 +72,43 @@ struct CommandRunnerTests {
         #expect(await runner.run("echo ok", timeout: 10).cancelled == false)
     }
 
+    /// #58 — 두레가 정리 없이 끝나면 생명줄의 쓰는 끝이 닫힌다. 그때 도는 명령(평가 중인 `claude -p`)이 트리째 끝나야 한다.
+    @Test func 생명줄이_끊기면_도는_명령_트리가_끝난다() async throws {
+        let tag = "dure-t58-\(UUID().uuidString.prefix(8))"
+        let start = Date()
+        let r = await Task.detached {
+            LiveCommandRunner.runBlocking("(exec -a \(tag) sleep 31) & exec sleep 30", timeout: 20, grace: 1,
+                                          innerFlags: "-c", onStart: { end in
+                DispatchQueue.global().asyncAfter(deadline: .now() + 0.5) { end.close() }
+            })
+        }.value
+        #expect(!r.timedOut)
+        #expect(r.status != 0)
+        #expect(Date().timeIntervalSince(start) < 8)
+        var left = ""
+        for _ in 0..<50 {
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
+            p.arguments = ["-fl", tag]
+            let pipe = Pipe(); p.standardOutput = pipe
+            try p.run()
+            left = String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+            p.waitUntilExit()
+            if left.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { break }
+            try await Task.sleep(nanoseconds: 100_000_000)
+        }
+        #expect(left.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, "남은 pid: \(left)")
+    }
+
+    /// 감시 셸을 거쳐도 짧은 명령은 지금처럼 바로 돌아오고, 출력 · 종료 코드가 그대로다.
+    @Test func 감시_셸을_거쳐도_짧은_명령은_바로_돌아온다() {
+        let start = Date()
+        let r = LiveCommandRunner.runBlocking("echo done; exit 5", timeout: 10, grace: 1, innerFlags: "-c")
+        #expect(String(decoding: r.stdout, as: UTF8.self) == "done\n")
+        #expect(r.status == 5 && !r.timedOut)
+        #expect(Date().timeIntervalSince(start) < 0.9)
+    }
+
     @Test func 표지_뒤만_읽는다() {
         let out = "[oh-my-zsh] Would you like to update?\n__DURE_OUT__\n[\n  {\"number\": 1}\n]\n"
         #expect(CommandOutput.afterMarker(Data(out.utf8)) == "[\n  {\"number\": 1}\n]\n")
