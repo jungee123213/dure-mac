@@ -40,6 +40,9 @@ struct ContentView: View {
             // 단계 4 — 지난번 앱이 꺼질 때 전달 중이던 배분은 Stop 을 영영 못 본다. 실패로 닫고 조율자에게 알린다.
             // (유닛 테스트 호스트에서는 이 뷰가 아예 뜨지 않는다 — 이슈 #29, `DureMain`.)
             store.dispatcher.recoverOnLaunch()
+            // 이슈 #56 — 지난 실행이 정리 없이 끝나며(Xcode 재실행 · 강제 종료 · 크래시) 남긴 Codex 서버를 끈다.
+            // 블로킹(최대 3초)이라 메인 밖에서. 떠 있는 서버는 부모가 감시 셸이라 고르지 않으므로 페인 시작과 겹쳐도 된다.
+            Task.detached(priority: .utility) { CodexOrphanReaper.reapAtLaunch() }
             if store.workspaces.isEmpty {
                 store.addWorkspace(name: "기본 워크스페이스")
             }
