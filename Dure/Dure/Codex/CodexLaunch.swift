@@ -69,6 +69,33 @@ nonisolated enum CodexLaunch {
         return (exports(sessionID) + ["export CODEX_HOME=\(Spawn.quoted(home))", launch]).joined(separator: "; ")
     }
 
+    // MARK: - 감시 셸 (이슈 #56)
+
+    /// 서버 스크립트를 감싸는 바깥 셸(`/bin/zsh -c` — `.zshrc` 를 읽지 않는다). `$1` 은 안쪽 셸 플래그, `$2` 는 서버 스크립트.
+    ///
+    /// 앱 종료 알림(`willTerminate`)은 Xcode 재실행 · 강제 종료 · 크래시 때 오지 않아 서버가 launchd 밑에 남았다(#56 실물 8개).
+    /// 그래서 두레가 stdin 으로 파이프를 주고 **쓰는 끝은 두레만 쥔다** — 두레가 어떻게 끝나든 커널이 그 끝을 닫는다.
+    /// 바깥 셸은 그 파이프를 fd 3 으로 옮기고 안쪽 `zsh -ilc` 의 stdin 은 `/dev/null` 로 둔다(`.zshrc` 가 입력을 기다려도
+    /// 멈추지 않게 — 예전과 같은 stdin). 감시 블록은 fd 3 의 EOF 를 기다렸다가 서버 트리를 SIGTERM, 3초 뒤 남으면 SIGKILL.
+    /// 서버가 먼저 끝나면 감시 블록을 끄고 서버의 종료 코드로 끝난다(런타임의 `serverDidExit` 가 그대로 받는다).
+    /// 안쪽 셸은 `exec codex` → npm 래퍼가 `execve` 로 실제 서버가 되므로 `$srv` 가 곧 서버 pid 다.
+    static let serverWatchdog = #"""
+    exec 3<&0 </dev/null
+    /bin/zsh "$1" "$2" 3<&- &
+    srv=$!
+    { read -r -u 3 _; dure_tree() { local c; for c in $(/usr/bin/pgrep -P $1); do dure_tree $c; done; print -r -- $1; }; p=($(dure_tree $srv)); kill -TERM $p 2>/dev/null; sleep 3; kill -0 $srv 2>/dev/null && kill -KILL $p 2>/dev/null; } &
+    w=$!
+    wait $srv
+    st=$?
+    kill $w 2>/dev/null
+    exit $st
+    """#
+
+    /// `/bin/zsh` 에 줄 인자. 테스트는 `.zshrc` 를 안 읽게 `innerFlags: "-c"` 를 준다.
+    static func watchdogArguments(script: String, innerFlags: String = "-ilc") -> [String] {
+        ["-c", serverWatchdog, "zsh", innerFlags, script]
+    }
+
     /// TUI 가 소켓을 기다리는 안전 상한(초). **10초 판정은 런타임이 한다** — 서버를 띄운 때부터 10초 안에 소켓이 없으면
     /// 실패 표식을 쓰고, TUI 는 그 표식을 찍고 끝난다. TUI 의 시계는 PTY 시작부터라 서버 앞 단계(`codex --version` ·
     /// home 준비 · 훅 목록)까지 세므로 10초로 두면 멀쩡한 서버를 두고 페인이 죽는다. 이 상한은 런타임이 표식을
