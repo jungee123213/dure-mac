@@ -264,6 +264,42 @@ struct DispatchBodyTests {
         }
     }
 
+    /// 이슈 #61 — Codex 는 따옴표 밖 `#` 이 든 명령에 규칙을 적용하지 않아 샌드박스로 보낸다(spike L). 브랜치 규칙이
+    /// `type/#N/name` 이라 git switch · push 가 늘 승인 창에 걸렸다. Codex 판은 브랜치 이름을 작은따옴표로 감싼다.
+    @Test func Codex_판_이어_하기는_브랜치_이름을_작은따옴표로_감싼다() {
+        let s = DispatchBody.dispatch(Self.allForms()[1], repoName: "android", kind: .codex)
+        #expect(s.contains("git switch 'feat/#3/x' 로"))
+        #expect(s.contains("git push -u origin 'feat/#3/x' 로"))
+        #expect(!s.contains("git switch feat/#3/x"))
+        #expect(!s.contains("git push -u origin feat/#3/x"))
+    }
+
+    @Test func Codex_판_새_이슈는_브랜치_자리를_작은따옴표로_감싸고_이유를_적는다() {
+        let s = DispatchBody.dispatch(Self.allForms()[0], repoName: "android", kind: .codex)
+        #expect(s.contains("git switch -c '<브랜치>' 'origin/<기본 브랜치>'"))
+        #expect(s.contains("git push -u origin '<브랜치>'"))
+        #expect(s.contains("브랜치 이름은 작은따옴표로 감싼다"))
+        // 기준 브랜치에도 # 이 있을 수 있다 — switch 의 시작점과 gh pr create --base 도 감싼다.
+        let based = DispatchBody.dispatch(Self.row(mode: .newIssue, title: "t", body: "b", scope: .pr, base: "feat/#9/base"),
+                                          repoName: "a", kind: .codex)
+        #expect(based.contains("git switch -c '<브랜치>' 'origin/feat/#9/base'"))
+        #expect(based.contains("gh pr create --base 'feat/#9/base'"))
+    }
+
+    @Test func 작은따옴표가_든_브랜치도_셸_인용을_지킨다() {
+        let d = Self.row(mode: .continueWork, scope: .commit, issue: 3, branch: "feat/#3/it's")
+        #expect(DispatchBody.dispatch(d, repoName: "a", kind: .codex).contains("git switch 'feat/#3/it'\\''s' 로"))
+    }
+
+    /// Claude 의 ask 규칙은 글자 그대로 맞춘다 — `git push -u origin 'main'` 은 `Bash(git push -u origin main)` 을 피한다.
+    /// 그래서 Claude 판에는 따옴표를 들이지 않는다.
+    @Test func Claude_판은_브랜치에_따옴표를_붙이지_않는다() {
+        let s = DispatchBody.dispatch(Self.allForms()[1], repoName: "android")
+        #expect(s.contains("git switch feat/#3/x 로"))
+        #expect(s.contains("git push -u origin feat/#3/x 로"))
+        #expect(!s.contains("작은따옴표로 감싼다"))
+    }
+
     @Test func 따옴표와_달러가_든_이슈_제목도_Codex_판에_그대로_실린다() {
         let d = Self.row(mode: .newIssue, title: "it's $HOME `x`", body: "a'b $(x)", scope: .commit)
         let s = DispatchBody.dispatch(d, repoName: "android", kind: .codex)

@@ -599,18 +599,18 @@ nonisolated enum CodexGitPolicy {
         }
         if let unknown {
             return Danger(reason: "모르는 push 옵션(\(unknown))",
-                          example: "git push -u origin <브랜치 이름> (옵션은 -u · -q · -v · -n · --dry-run · --no-verify · --progress · "
+                          example: "git push -u origin '<브랜치 이름>' (옵션은 -u · -q · -v · -n · --dry-run · --no-verify · --progress · "
                               + "--porcelain · --atomic · --follow-tags · -o <값> 만)",
                           kind: .rewrite)
         }
         if let found { return found }
         if positionals.count < 2 {
-            return Danger(reason: "브랜치 없는 push", example: "git push -u origin <브랜치 이름>")
+            return Danger(reason: "브랜치 없는 push", example: "git push -u origin '<브랜치 이름>'")
         }
         for spec in positionals.dropFirst() {
             if spec.hasPrefix("+") { return force }
             if spec.contains("*") {
-                return Danger(reason: "패턴 refspec push", example: "git push -u origin <브랜치 이름>")
+                return Danger(reason: "패턴 refspec push", example: "git push -u origin '<브랜치 이름>'")
             }
             var src = spec
             var dst = spec
@@ -632,7 +632,7 @@ nonisolated enum CodexGitPolicy {
                 return Danger(reason: "기본 브랜치(\(target)) push", example: example)
             }
             if target.isEmpty || target == "head" || target == "@" {
-                return Danger(reason: "HEAD push", example: "git push -u origin <브랜치 이름>", kind: .hidesTarget)
+                return Danger(reason: "HEAD push", example: "git push -u origin '<브랜치 이름>'", kind: .hidesTarget)
             }
         }
         return nil
