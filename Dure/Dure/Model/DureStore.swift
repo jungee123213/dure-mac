@@ -112,6 +112,7 @@ final class DureStore {
          schedule: @escaping (TimeInterval, @escaping @MainActor @Sendable () -> Void) -> Void = CodexPaneRuntime.mainAfter) {
         self.settings = settings
         self.schedule = schedule
+        self.paneArrangement = PaneArrangement.saved(in: settings)
     }
 
     /// 페인 키 → `DURE_SESSION` (ADR-14). 페인 하나당 UUID 하나.
@@ -970,6 +971,16 @@ final class DureStore {
         // 되풀이할 수 있다(RoleField 와 같은 이유). 다음 런루프로 미룬다. 캐시가 있어 페인당 한 번뿐이다.
         if prompt != nil { DispatchQueue.main.async { [weak self] in self?.dispatchVersion += 1 } }
         return script
+    }
+
+    // MARK: - 이슈 #63 배치
+
+    /// 세로 ↔ 2열. 마지막 선택을 기억한다(D-51).
+    private(set) var paneArrangement: PaneArrangement = .stack
+
+    func togglePaneArrangement() {
+        paneArrangement = paneArrangement.toggled
+        PaneArrangement.remember(paneArrangement, in: settings)
     }
 
     // MARK: - 이슈 #20 접기
