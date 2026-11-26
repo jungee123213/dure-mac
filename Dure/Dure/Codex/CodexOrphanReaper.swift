@@ -3,7 +3,7 @@ import Foundation
 
 /// 지난 실행이 남긴 두레 Codex 서버를 기동 때 끈다(이슈 #56).
 ///
-/// 감시 셸(`CodexLaunch.serverWatchdog`)이 생긴 뒤로는 두레가 죽으면 서버도 따라 끝나지만, 그 전 빌드가 남긴 서버나
+/// 감시 셸(`ProcessLifeline`)이 생긴 뒤로는 두레가 죽으면 서버도 따라 끝나지만, 그 전 빌드가 남긴 서버나
 /// 감시 셸까지 함께 죽은 경우는 launchd(1) 밑에 남는다. 그런 서버만 고른다 —
 /// 실행 파일 이름이 `codex` · 첫 인자가 `app-server` · `--listen unix://<두레 루트>/…` · **부모가 1**.
 /// 떠 있는 두레(다른 빌드 포함)의 서버는 부모가 감시 셸이라 빠지고, 사용자 Codex 데몬(`--listen unix://` · `--managed-daemon`) ·

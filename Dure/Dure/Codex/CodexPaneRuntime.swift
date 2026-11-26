@@ -571,7 +571,7 @@ final class CodexPaneRuntime {
 
 // MARK: - 실제 프로세스
 
-/// 감시 셸(`CodexLaunch.serverWatchdog`) 안의 `/bin/zsh -ilc <서버 스크립트>`(nvm 의 PATH). 출력은 로그 파일로.
+/// 감시 셸(`ProcessLifeline`) 안의 `/bin/zsh -ilc <서버 스크립트>`(nvm 의 PATH). 출력은 로그 파일로.
 /// 루트 pid 는 감시 셸이고 서버 · 감시 블록은 그 자손이다 — 그래서 트리째 신호를 보낸다.
 /// stdin 은 생명줄 파이프 — 쓰는 끝은 두레만 쥐고(`FD_CLOEXEC`, PTY 자식 등에 새지 않게), 두레가 죽으면 감시 셸이 서버를 끈다(#56).
 nonisolated struct LiveCodexProcessLauncher: CodexProcessLaunching {
@@ -579,12 +579,10 @@ nonisolated struct LiveCodexProcessLauncher: CodexProcessLaunching {
                 onExit: @escaping @Sendable (Int32) -> Void) throws -> CodexProcessHandle {
         FileManager.default.createFile(atPath: logPath, contents: nil, attributes: [.posixPermissions: 0o600])
         guard let log = FileHandle(forWritingAtPath: logPath) else { throw CocoaError(.fileWriteNoPermission) }
-        let pipe = Pipe()
-        _ = fcntl(pipe.fileHandleForWriting.fileDescriptor, F_SETFD, FD_CLOEXEC)
-        let lifeline = CodexLifeline(pipe.fileHandleForWriting)
+        let (pipe, lifeline) = ProcessLifeline.make()
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/bin/zsh")
-        p.arguments = CodexLaunch.watchdogArguments(script: script)
+        p.arguments = ProcessLifeline.arguments(script: script)
         p.standardInput = pipe
         p.standardOutput = log
         p.standardError = log
@@ -603,30 +601,13 @@ nonisolated struct LiveCodexProcessLauncher: CodexProcessLaunching {
     }
 }
 
-/// 생명줄 파이프의 쓰는 끝. 종료 핸들러와 `terminate` 가 둘 다 닫으므로 한 번만 닫는다.
-nonisolated final class CodexLifeline: @unchecked Sendable {
-    private let handle: FileHandle
-    private let lock = NSLock()
-    private var open = true
-
-    init(_ handle: FileHandle) { self.handle = handle }
-
-    func close() {
-        lock.lock()
-        defer { lock.unlock() }
-        guard open else { return }
-        open = false
-        try? handle.close()
-    }
-}
-
 nonisolated final class LiveCodexProcessHandle: CodexProcessHandle, @unchecked Sendable {
     private let process: Process
-    private let lifeline: CodexLifeline
+    private let lifeline: ProcessLifeline.WriteEnd
     /// SIGTERM 뒤 이만큼 기다려도 살아 있으면 SIGKILL.
     static let grace: TimeInterval = 3
 
-    init(process: Process, lifeline: CodexLifeline) {
+    init(process: Process, lifeline: ProcessLifeline.WriteEnd) {
         self.process = process
         self.lifeline = lifeline
     }
