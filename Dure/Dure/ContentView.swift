@@ -215,33 +215,48 @@ struct ContentView: View {
         .frame(minWidth: 720, minHeight: 480)
     }
 
-    /// 한 워크스페이스의 세로 스택. **조율자가 맨 위**, 레포가 그 아래 (스펙 6절).
-    /// 높이 균등 고정. 탭 바 없음, 스플리터 없음, 재배치 없음 (ADR-13).
+    /// 한 워크스페이스의 페인들. 세로 스택이면 **조율자가 맨 위**, 2열이면 왼쪽 위(스펙 6절 · D-51).
+    /// 크기 균등 고정. 탭 바 없음, 스플리터 없음, 재배치 없음 (ADR-13).
+    ///
+    /// 이슈 #63 — 세로 ↔ 2열은 `AnyLayout` 만 바꾼다. `if` 로 가르면 자식이 새로 만들어져 PTY 가 닫힌다(D-27).
     private func paneStack(workspaceID: String, isActive: Bool) -> some View {
-        VStack(spacing: 1) {
-            ForEach(store.panes(in: workspaceID)) { target in
-                // 이슈 #20 — 접힌 페인은 헤더만 남고, 펼쳐진 페인끼리 남은 높이를 나눈다.
-                let collapsed = store.isCollapsed(target)
-                VStack(spacing: 0) {
-                    paneHeader(for: target)
-                    paneBody(target, isActive: isActive && !collapsed)
-                        // 펼쳐진 동안의 높이를 기억한다. 접힌 동안 아래 `frame(height:)` 가 이 값으로 터미널을
-                        // 고정하므로 SwiftTerm 은 리사이즈를 보지 않는다(PTY 행 수 그대로, SIGWINCH 없음).
-                        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { h in
-                            if !collapsed, h > 0 { paneHeights[target.key] = h }
-                        }
-                        .frame(height: collapsed ? (paneHeights[target.key] ?? 240) : nil)
-                        // 터미널을 트리에서 빼면 SwiftTerm 이 PTY 를 닫는다(D-27). 바깥 틀만 0 으로 하고
-                        // 위쪽을 남긴 채 잘라낸다. 키 입력은 `isActive` 가 꺼지면서 TerminalPane 이 놓는다.
-                        .frame(maxHeight: collapsed ? 0 : .infinity, alignment: .top)
-                        .clipped()
-                        // AppKit 뷰는 macOS 14 부터 기본이 clipsToBounds = false 라 clip 이 안 먹을 수 있다.
-                        // 숨긴 층(D-27)과 같은 방식으로 아예 그리지 않는다.
-                        .opacity(collapsed ? 0 : 1)
-                        .allowsHitTesting(!collapsed)
-                        .accessibilityHidden(collapsed)
+        let grid = store.paneArrangement == .grid
+        let layout = grid ? AnyLayout(PaneGridLayout(spacing: 1)) : AnyLayout(VStackLayout(spacing: 1))
+        let panes = store.panes(in: workspaceID)
+        return VStack(spacing: 0) {
+            layout {
+                ForEach(panes) { target in
+                    // 이슈 #20 — 접힌 페인은 헤더만 남는다. 세로는 펼쳐진 페인끼리 남은 높이를 나누고,
+                    // 2열은 제자리에 칸을 두고 행이 전부 접힐 때만 줄인다(`PaneGrid`).
+                    let collapsed = store.isCollapsed(target)
+                    VStack(spacing: 0) {
+                        paneHeader(for: target)
+                        paneBody(target, isActive: isActive && !collapsed)
+                            // 펼쳐진 동안의 높이를 기억한다. 접힌 동안 아래 `frame(height:)` 가 이 값으로 터미널을
+                            // 고정하므로 SwiftTerm 은 리사이즈를 보지 않는다(PTY 행 수 그대로, SIGWINCH 없음).
+                            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { h in
+                                if !collapsed, h > 0 { paneHeights[target.key] = h }
+                            }
+                            .frame(height: collapsed ? (paneHeights[target.key] ?? 240) : nil)
+                            // 터미널을 트리에서 빼면 SwiftTerm 이 PTY 를 닫는다(D-27). 바깥 틀만 0 으로 하고
+                            // 위쪽을 남긴 채 잘라낸다. 키 입력은 `isActive` 가 꺼지면서 TerminalPane 이 놓는다.
+                            .frame(maxHeight: collapsed ? 0 : .infinity, alignment: .top)
+                            .clipped()
+                            // AppKit 뷰는 macOS 14 부터 기본이 clipsToBounds = false 라 clip 이 안 먹을 수 있다.
+                            // 숨긴 층(D-27)과 같은 방식으로 아예 그리지 않는다.
+                            .opacity(collapsed ? 0 : 1)
+                            .allowsHitTesting(!collapsed)
+                            .accessibilityHidden(collapsed)
+                    }
+                    // 2열에서 접힌 칸은 칸을 채운 채 헤더를 위에 둔다. 세로에선 헤더 높이로 줄어든다.
+                    .frame(maxWidth: .infinity, maxHeight: collapsed && !grid ? nil : .infinity, alignment: .top)
+                    .background(Color(nsColor: .textBackgroundColor))
+                    .layoutValue(key: PaneGridLayout.Collapsed.self, value: collapsed)
                 }
-                .frame(maxWidth: .infinity, maxHeight: collapsed ? nil : .infinity)
+                // 홀수면 마지막 페인 옆 빈칸(D-51). 세로에선 없다 — ForEach 뒤라 페인 정체성에 영향이 없다.
+                if grid && PaneGrid.needsFiller(paneCount: panes.count) {
+                    Color(nsColor: .textBackgroundColor)
+                }
             }
             if store.allPanesCollapsed(in: workspaceID) {
                 // 전부 접히면 헤더 줄만 쌓이고 아래가 빈다. 깨진 게 아니라는 안내 한 줄.
@@ -297,6 +312,15 @@ struct ContentView: View {
             }
             // 대시보드가 덮고 있으면 보이지 않는 채로 바뀐다 — `전체 시작` 과 같은 이유로 잠근다.
             .disabled(store.visibleRepos.isEmpty || showingDashboard)
+            // 이슈 #63 — 세로 ↔ 2열. 마지막 선택을 기억한다(D-51).
+            Button {
+                store.togglePaneArrangement()
+            } label: {
+                Label(store.paneArrangement == .grid ? "세로로" : "2열로",
+                      systemImage: store.paneArrangement == .grid ? "rectangle.split.1x2" : "square.grid.2x2")
+            }
+            .help(store.paneArrangement == .grid ? "페인을 세로로 쌓습니다" : "페인을 2열로 놓습니다 — 조율자가 왼쪽 위")
+            .disabled(showingDashboard)
             Spacer()
             Button("전체 시작") { store.startAll() }
                 .keyboardShortcut(.return, modifiers: .command)
