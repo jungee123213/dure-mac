@@ -65,7 +65,7 @@ nonisolated enum GenerationSplit {
     /// 수집이 쌓는 규칙과 같게 센다 — Edit 계열 툴은 서브에이전트 행(같은 turn_id)까지 포함한다.
     /// last_ts 는 턴 · 툴 시작 · 툴 결과 중 가장 늦은 것(답 줄의 시각은 저장하지 않아 다시 셀 수 없다).
     /// 턴이 하나도 남지 않은 단위는 시각을 그대로 둔다 — 셀 근거가 없다.
-    private static func recount(_ unitID: String, db: Database) throws {
+    static func recount(_ unitID: String, db: Database) throws {
         let edits = ObsCollector.editTools.map { "'\($0)'" }.joined(separator: ",")
         try db.execute(sql: """
             UPDATE work_unit SET

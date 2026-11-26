@@ -82,8 +82,13 @@ nonisolated enum ObsCollector {
         for f in files {
             total += try ingest(file: f, db: db, config: config, resolver: resolver, excludedSessions: excluded)
         }
-        // 백필 · 앱을 꺼 둔 동안 섞인 머지 전후 턴을 나눈다. 옮길 게 없으면 쓰지 않는다(멱등).
-        try db.write { try GenerationSplit.reconcile(in: $0) }
+        // 정합(멱등 — 옮길 게 없으면 쓰지 않는다). ① 턴을 마지막 활동 때의 브랜치 · 아는 루트로(이슈 #60)
+        // ② 백필 · 앱을 꺼 둔 동안 섞인 머지 전후 턴을 나눈다 ③ 옮겨서 빈 단위를 지운다.
+        try db.write { db in
+            try TurnPlacement.reconcile(in: db, resolver: resolver, config: config)
+            try GenerationSplit.reconcile(in: db)
+            try TurnPlacement.pruneEmpty(in: db)
+        }
         return total
     }
 
@@ -146,9 +151,12 @@ nonisolated enum ObsCollector {
         // Codex 턴은 브랜치 없이 온다(파서) — reflog 가 못 정하면 파일 머리 `session_meta.git.branch`(스레드 시작 때 값)로.
         let fallbackBranch = kind == .codex ? head.codex?.gitBranch : nil
         var repos: [String: RepoInfo?] = [:]
+        var known: [String]?
         for line in parsed {
             for e in line.events ?? [] {
-                if case let .turnStart(ctx, _, _, _) = e, repos[ctx.cwd] == nil { repos[ctx.cwd] = .some(resolve(ctx, resolver)) }
+                guard case let .turnStart(ctx, _, _, _) = e, repos[ctx.cwd] == nil else { continue }
+                if known == nil { known = try db.read { try TurnPlacement.knownRoots($0) } }
+                repos[ctx.cwd] = .some(resolve(ctx, resolver, knownRoots: known ?? []))
             }
         }
         parsed = parsed.map { line in
@@ -484,18 +492,27 @@ nonisolated enum ObsCollector {
         return .turnStart(ctx, prompt: prompt, kind: kind, permissionMode: mode)
     }
 
-    private static func resolve(_ ctx: ObsParser.Context, _ resolver: RepoResolving) -> RepoInfo? {
+    static func resolve(_ ctx: ObsParser.Context, _ resolver: RepoResolving, knownRoots: [String] = [],
+                        exists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) }) -> RepoInfo? {
         if let r = resolver.info(forCwd: ctx.cwd) { return r }
         // 옮겨지거나 지워진 레포 — 기록된 브랜치가 있으면 그 경로를 레포로 본다(날짜 단위로 흩어지지 않게).
-        if ctx.gitBranch != nil, !FileManager.default.fileExists(atPath: ctx.cwd) {
-            return RepoInfo(root: ctx.cwd, defaultBranch: nil, githubRepo: nil)
+        // 이미 아는 루트가 그 경로를 품으면 그 루트로(이슈 #60) — 하위 폴더에서 연 세션이 따로 단위가 되지 않게.
+        if ctx.gitBranch != nil, !exists(ctx.cwd) {
+            let root = TurnPlacement.normalizedRoot(ctx.cwd, known: knownRoots, exists: exists)
+            return RepoInfo(root: root, defaultBranch: nil, githubRepo: nil)
         }
         return nil
     }
 
     private static func unitFor(_ ctx: ObsParser.Context, repo: RepoInfo?, db: Database, config: CollectConfig) throws -> WorkUnit {
-        var p = WorkUnitRules.place(cwd: ctx.cwd, branch: ctx.gitBranch, repo: repo, ts: ctx.ts,
+        let p = WorkUnitRules.place(cwd: ctx.cwd, branch: ctx.gitBranch, repo: repo, ts: ctx.ts,
                                     timeZone: config.timeZone, workspacesRoot: config.workspacesRoot)
+        return try unit(for: p, ts: ctx.ts, githubRepo: repo?.githubRepo, db: db)
+    }
+
+    /// 자리(`Placement`)의 단위 — 같은 자리의 세대 규칙으로 고르고, 없으면 만든다. 수집과 턴 재배치(`TurnPlacement`)가 같이 쓴다.
+    static func unit(for placement: WorkUnitRules.Placement, ts: Int, githubRepo: String?, db: Database) throws -> WorkUnit {
+        var p = placement
         if p.workspaceId == nil, let root = p.repoRoot {
             p.workspaceId = try String.fetchOne(db, sql: "SELECT workspace_id FROM repo WHERE path = ?", arguments: [root])
         }
@@ -504,13 +521,13 @@ nonisolated enum ObsCollector {
             p.workspaceId = nil     // 지워진 워크스페이스 — FK 가 막는다
         }
         let siblings = try WorkUnit.filter(Column("base_key") == p.baseKey).fetchAll(db)
-        switch WorkUnitRules.chooseGeneration(siblings, turnTs: ctx.ts) {
+        switch WorkUnitRules.chooseGeneration(siblings, turnTs: ts) {
         case .existing(let u):
             return u
         case .new(let g):
             let u = WorkUnit(unitKey: p.key(generation: g), baseKey: p.baseKey, kind: p.kind, repoRoot: p.repoRoot,
                              cwd: p.cwd, branch: p.branch, generation: g, day: p.day, issueNo: p.issueNo,
-                             githubRepo: repo?.githubRepo, workspaceId: p.workspaceId, firstTs: ctx.ts, lastTs: ctx.ts)
+                             githubRepo: githubRepo, workspaceId: p.workspaceId, firstTs: ts, lastTs: ts)
             try u.insert(db)
             return u
         }

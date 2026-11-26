@@ -115,8 +115,14 @@ nonisolated struct CodexObsParser {
         }
     }
 
+    /// Codex Desktop 이 Claude 세션을 자기 스레드로 가져온 턴(이슈 #60). paginated 라 legacy 거르기에 안 걸린다.
+    /// 같은 턴이 Claude 트랜스크립트에 이미 있으니 세면 두 번이 된다. 뒤에 직접 친 턴이 이어지는 파일이 있어 턴 단위로 거른다.
+    static let importedTurnPrefix = "external-import-"
+
     private mutating func event(_ p: [String: Any], root: [String: Any], lineNo: Int) -> [Event]? {
         let sub = p["type"] as? String ?? ""
+        // 가져온 턴의 사건은 상태(열린 턴 · 트리거)도 건드리지 않는다 — 직접 친 턴의 끝 · 중단 판정이 흐려지지 않게.
+        if (p["turn_id"] as? String)?.hasPrefix(Self.importedTurnPrefix) == true { return [.ignored] }
         switch sub {
         case "task_started":
             let attribution = p["turn_attribution"] as? [String: Any]
