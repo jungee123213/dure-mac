@@ -74,7 +74,11 @@ nonisolated enum ObsParser {
         if root["isMeta"] as? Bool == true {
             // 두레 배분(인박스 소켓)은 메타로 찍히지만 사람 대신 들어온 작업 지시다.
             guard origin?["kind"] as? String == "peer" else { return [.ignored] }
-            return [.turnStart(ctx, prompt: origin?["body"] as? String ?? text, kind: .peer,
+            // 이슈 #60 — Claude Code 는 서브에이전트가 끝나 본 세션을 다시 깨우는 줄(`[Subagent hand-back]`)도
+            // 같은 `peer` 로 적는다. `handback` 키로 가른다 — 두레 배분은 `{kind, from}` 뿐이다.
+            // 백그라운드 작업이 끝나 깨운다는 점에서 `<task-notification>` 과 같은 뜻이라 알림 턴으로 센다.
+            let handback = origin?["handback"] != nil
+            return [.turnStart(ctx, prompt: origin?["body"] as? String ?? text, kind: handback ? .notice : .peer,
                                permissionMode: root["permissionMode"] as? String)]
         }
         if text.hasPrefix("<local-command-stdout") || text.hasPrefix("<local-command-stderr") { return [.ignored] }

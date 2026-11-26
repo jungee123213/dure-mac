@@ -45,6 +45,19 @@ enum Fx {
         return json(o)
     }
 
+    /// 서브에이전트가 끝나 본 세션을 다시 깨우는 줄(이슈 #60, 실측 모양). 두레 배분과 같은 `origin.kind: "peer"` 다.
+    static func handback(_ report: String, session: String = "s1", cwd: String = "/r/ios", branch: String? = "feat/#52/x",
+                         ts: String = "2026-10-10T01:00:00.000Z") -> String {
+        var o = base("user", session: session, cwd: cwd, branch: branch, ts: ts)
+        let body = "[Subagent hand-back] The text below is the final report of a subagent this session delegated to.\n\(report)"
+        o["message"] = ["role": "user", "content": "Another Claude session sent a message:\n<agent-message from=\"a1\">\n\(body)"]
+        o["isMeta"] = true
+        o["promptSource"] = "system"
+        o["origin"] = ["kind": "peer", "from": "a1", "senderTaskId": "a1", "name": "general-purpose", "body": body,
+                       "handback": true, "handbackReportText": report] as [String: Any]
+        return json(o)
+    }
+
     static func meta(_ text: String) -> String {
         var o = base("user", session: "s1", cwd: "/r/ios", branch: "feat/#52/x", ts: "2026-10-10T01:00:01.000Z")
         o["message"] = ["role": "user", "content": [["type": "text", "text": text]]]

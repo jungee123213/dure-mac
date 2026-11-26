@@ -426,6 +426,46 @@ enum AppDatabase {
             }
         }
 
+        // v12 — 감시자 데이터 정확도(이슈 #60, D-48). 원본이 지워진 턴이 40% 라 다시 수집하지 않고 DB 에서 고친다.
+        // 규칙은 그때 값으로 SQL 에 박는다 — 앱 코드(재계산 · 정리)가 나중에 바뀌어도 이 마이그레이션의 뜻은 그대로다.
+        m.registerMigration("v12_observer_accuracy") { db in
+            // ① 서브에이전트 결과 줄은 배분이 아니라 알림 턴.
+            let handback = "prompt_kind = 'peer' AND prompt LIKE '[Subagent hand-back]%'"
+            // ② Codex Desktop 이 가져온 Claude 세션 사본 — 이미 쌓인 행은 파일 줄로 되짚을 수 없어(가져오기가 파일 앞을 다시 쓴다)
+            // 모양으로 고른다: 토큰 0 · 툴 0 · 그보다 앞선 Claude 턴과 프롬프트가 같다. 파일 대조 실측 66개 오탐 0, 7개 놓침.
+            let imported = """
+                agent_kind = 'codex'
+                AND tokens_input + tokens_output + tokens_cache_creation + tokens_cache_read = 0
+                AND NOT EXISTS (SELECT 1 FROM obs_tool o WHERE o.turn_id = obs_turn.id)
+                AND EXISTS (SELECT 1 FROM obs_turn k WHERE k.agent_kind = 'claude' AND k.prompt = obs_turn.prompt
+                            AND k.ts <= obs_turn.ts)
+                """
+            let changed = Set(try String.fetchAll(db, sql: "SELECT DISTINCT unit_id FROM obs_turn WHERE \(handback)")
+                              + String.fetchAll(db, sql: "SELECT DISTINCT unit_id FROM obs_turn WHERE \(imported)"))
+            try db.execute(sql: "UPDATE obs_turn SET prompt_kind = 'notice' WHERE \(handback)")
+            try db.execute(sql: "DELETE FROM obs_turn WHERE \(imported)")   // obs_tool · obs_usage 는 FK 로 따라간다
+            // 바뀐 단위만 다시 센다 — 안 바뀐 단위에 "평가 뒤 변경" 이 켜지지 않게. 시각은 남은 턴이 없으면 그대로.
+            for id in changed {
+                try db.execute(sql: """
+                    UPDATE work_unit SET
+                      human_turns = (SELECT COUNT(*) FROM obs_turn WHERE unit_id = :id AND prompt_kind IN ('human', 'command')),
+                      peer_turns = (SELECT COUNT(*) FROM obs_turn WHERE unit_id = :id AND prompt_kind = 'peer'),
+                      edit_count = (SELECT COUNT(*) FROM obs_tool o JOIN obs_turn t ON t.id = o.turn_id
+                                    WHERE t.unit_id = :id AND o.name IN ('Edit', 'Write', 'MultiEdit', 'NotebookEdit')),
+                      first_ts = COALESCE((SELECT MIN(ts) FROM obs_turn WHERE unit_id = :id), first_ts),
+                      source_revision = source_revision + 1
+                    WHERE id = :id
+                    """, arguments: ["id": id])
+            }
+            // 턴이 모두 사라진 단위 — 평가 · PR 이 없으면 지운다(PR 은 머지 기록, 평가는 그때 다이제스트가 근거).
+            try db.execute(sql: """
+                DELETE FROM work_unit
+                WHERE pr_number IS NULL
+                  AND NOT EXISTS (SELECT 1 FROM obs_turn t WHERE t.unit_id = work_unit.id)
+                  AND NOT EXISTS (SELECT 1 FROM evaluation_run r WHERE r.unit_id = work_unit.id)
+                """)
+        }
+
         return m
     }
 }

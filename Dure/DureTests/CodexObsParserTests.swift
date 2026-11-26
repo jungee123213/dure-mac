@@ -599,4 +599,52 @@ struct CodexObsParserTests {
         #expect(uses.allSatisfy { $0.isSidechain && $0.sessionId == "01a1f907-8088-7c32-807a-74c16a4ed148" })
         #expect(uses.allSatisfy { $0.eventId?.hasPrefix("01a1f90b-eb39-7e80-b4c1-4f21e85c4854:") == true })
     }
+
+    // MARK: - 이슈 #60 가져온 Claude 세션(paginated)
+
+    /// Codex Desktop 이 Claude 세션을 자기 스레드로 가져오면 턴 id 가 `external-import-turn-N` 이다(paginated 라 legacy 거르기에
+    /// 안 걸린다). 가져온 사건은 턴 단위로 건너뛰고, 같은 파일에서 이어 직접 친 턴은 그대로 센다.
+    @Test func 가져온_턴은_건너뛰고_이어_친_턴은_센다() throws {
+        let imp = "external-import-turn-1"
+        let out = run([
+            CFx.meta(),
+            CFx.taskStarted(turn: imp, trigger: nil, attribution: false),
+            CFx.userItem("커밋해줘", turn: imp),
+            CFx.agentItem("커밋했어요", turn: imp),
+            CFx.item(["type": "CommandExecution", "id": "c-imp", "process_id": "p", "command": ["git", "commit"],
+                      "cwd": "file:///r/ios", "parsed_cmd": [], "source": "unified_exec_startup", "status": "completed",
+                      "aggregated_output": "", "exit_code": 0], turn: imp),
+            CFx.taskComplete(turn: imp, ms: 5_000),
+            CFx.taskStarted(turn: "t1"),
+            CFx.userItem("지금 상태 알려줘", turn: "t1"),
+            CFx.agentItem("main 이에요", turn: "t1"),
+            CFx.taskComplete(turn: "t1", ms: 1_200),
+        ])
+        let events = out.compactMap { $0 }.flatMap { $0 }
+        let starts = events.compactMap { e -> String? in
+            if case let .turnStart(_, prompt, _, _) = e { return prompt } else { return nil }
+        }
+        #expect(starts == ["지금 상태 알려줘"])
+        // 가져온 줄 다섯은 아무것도 내지 않는다.
+        for line in out[1...5] { #expect(line == [.ignored]) }
+        #expect(events.contains(.turnDuration(ms: 1_200)))
+        #expect(!events.contains(.turnDuration(ms: 5_000)))
+    }
+
+    /// 직접 친 턴이 열린 동안 가져오기 묶음이 끼어도 그 턴의 끝 · 중단 판정을 흐리지 않는다.
+    @Test func 가져오기가_끼어도_열린_턴의_시간은_그대로다() throws {
+        let imp = "external-import-turn-9"
+        let out = run([
+            CFx.meta(),
+            CFx.taskStarted(turn: "t1"),
+            CFx.userItem("빌드해줘", turn: "t1"),
+            CFx.taskStarted(turn: imp, trigger: nil, attribution: false),
+            CFx.userItem("옛 질문", turn: imp),
+            CFx.taskComplete(turn: imp, ms: 9_000),
+            CFx.taskComplete(turn: "t1", ms: 3_000),
+        ])
+        let events = out.compactMap { $0 }.flatMap { $0 }
+        #expect(events.contains(.turnDuration(ms: 3_000)))
+        #expect(!events.contains(.turnDuration(ms: 9_000)))
+    }
 }

@@ -31,6 +31,13 @@ struct ObsParserTests {
         #expect(kind == .peer && prompt == "[두레] 조율자 배분 #7")
     }
 
+    /// 이슈 #60 — 서브에이전트 결과 줄도 `origin.kind: "peer"` 지만 두레 배분이 아니다. 알림 턴으로 센다.
+    @Test func 서브에이전트_결과_줄은_배분이_아니라_알림_턴이다() throws {
+        guard case let .turnStart(_, prompt, kind, _) = try one(Fx.handback("다 읽었습니다")) else { Issue.record(""); return }
+        #expect(kind == .notice)
+        #expect(prompt.hasPrefix("[Subagent hand-back]"))
+    }
+
     // MARK: - 이슈 #32 입력 분류
 
     @Test(arguments: [
