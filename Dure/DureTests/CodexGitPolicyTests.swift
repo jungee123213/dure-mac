@@ -460,6 +460,26 @@ struct CodexGitPolicyTests {
     // MARK: - 최종 리뷰 5 — 실제 Codex 배분 글이 시키는 명령
 
     /// 글에 적힌 모양(`shown`, 글 원문 그대로)과 모델이 실제로 칠 명령(`typed`). `read` 는 allow 가 아닌 읽기(샌드박스 몫).
+    /// 작은따옴표 · 큰따옴표 밖에 `#` 이 있나(역슬래시 이스케이프 포함, POSIX 인용 규칙).
+    static func hasUnquotedHash(_ s: String) -> Bool {
+        var single = false, double = false, escaped = false
+        for c in s {
+            if escaped { escaped = false; continue }
+            if c == "\\" && !single { escaped = true; continue }
+            if c == "'" && !double { single.toggle(); continue }
+            if c == "\"" && !single { double.toggle(); continue }
+            if c == "#" && !single && !double { return true }
+        }
+        return false
+    }
+
+    @Test func 따옴표_밖_샵_판정() {
+        #expect(Self.hasUnquotedHash("git switch fix/#1/x"))
+        #expect(!Self.hasUnquotedHash("git switch 'fix/#1/x'"))
+        #expect(!Self.hasUnquotedHash("git commit -m \"fix (#1)\""))
+        #expect(!Self.hasUnquotedHash("git commit -m 'it'\\''s #1'"))
+    }
+
     private struct Taught {
         let shown: String
         let typed: String
@@ -502,31 +522,36 @@ struct CodexGitPolicyTests {
             Taught(shown: "git add <파일…>", typed: "git add Dure/a.swift 'Dure/b c.swift'"),
             Taught(shown: "git commit -m '<메시지>'", typed: "git commit -m 'feat: 공유를 붙입니다\n\n본문 it'\\''s'"),
         ]
+        // 새 이슈 글의 브랜치 인용 예시(이슈 #61) — 예시 그대로 쳐도 창 없이 가야 한다.
+        let quoteExamples = [
+            Taught(shown: "git switch -c 'fix/#12/x' 'origin/main'", typed: "git switch -c 'fix/#12/x' 'origin/main'"),
+            Taught(shown: "git push -u origin 'fix/#12/x'", typed: "git push -u origin 'fix/#12/x'"),
+        ]
         let forms: [(String, Dispatch, [Taught])] = [
             ("새 이슈 · 기준 없음",
              DispatchBodyTests.row(mode: .newIssue, title: "[FEAT] 공유", body: "본문", scope: .pr, hint: "feat/#N/share"),
-             common + [
+             common + quoteExamples + [
                 Taught(shown: "gh issue create --title '<제목>' --body …", typed: "gh issue create --title '[FEAT] 공유' --body " + body),
-                Taught(shown: "git switch -c <브랜치> origin/<기본 브랜치>", typed: "git switch -c \(newBranch) origin/main"),
+                Taught(shown: "git switch -c '<브랜치>' 'origin/<기본 브랜치>'", typed: "git switch -c '\(newBranch)' origin/main"),
                 Taught(shown: "git rev-parse --abbrev-ref origin/HEAD", typed: "git rev-parse --abbrev-ref origin/HEAD", read: true),
                 Taught(shown: "git branch -r", typed: "git branch -r", read: true),
-                Taught(shown: "git push -u origin <브랜치>", typed: "git push -u origin \(newBranch)"),
+                Taught(shown: "git push -u origin '<브랜치>'", typed: "git push -u origin '\(newBranch)'"),
                 Taught(shown: "gh pr create --title '<제목>' --body …", typed: "gh pr create --title '[FEAT] 공유' --body " + body),
              ]),
             ("새 이슈 · 기준 브랜치에 #",
              DispatchBodyTests.row(mode: .newIssue, title: "[FEAT] 공유", body: "본문", scope: .pr, hint: "feat/#N/share", base: baseBranch),
-             common + [
+             common + quoteExamples + [
                 Taught(shown: "gh issue create --title '<제목>' --body …", typed: "gh issue create --title '[FEAT] 공유' --body " + body),
-                Taught(shown: "git switch -c <브랜치> origin/\(baseBranch)", typed: "git switch -c \(newBranch) origin/\(baseBranch)"),
-                Taught(shown: "git push -u origin <브랜치>", typed: "git push -u origin \(newBranch)"),
-                Taught(shown: "gh pr create --base \(baseBranch) --title '<제목>' --body …",
-                       typed: "gh pr create --base \(baseBranch) --title '[FEAT] 공유' --body " + body),
+                Taught(shown: "git switch -c '<브랜치>' 'origin/\(baseBranch)'", typed: "git switch -c '\(newBranch)' 'origin/\(baseBranch)'"),
+                Taught(shown: "git push -u origin '<브랜치>'", typed: "git push -u origin '\(newBranch)'"),
+                Taught(shown: "gh pr create --base '\(baseBranch)' --title '<제목>' --body …",
+                       typed: "gh pr create --base '\(baseBranch)' --title '[FEAT] 공유' --body " + body),
              ]),
             ("이어 하기",
              DispatchBodyTests.row(mode: .continueWork, scope: .pr, issue: 50, branch: contBranch),
              common + [
-                Taught(shown: "git switch \(contBranch)", typed: "git switch \(contBranch)"),
-                Taught(shown: "git push -u origin \(contBranch)", typed: "git push -u origin \(contBranch)"),
+                Taught(shown: "git switch '\(contBranch)'", typed: "git switch '\(contBranch)'"),
+                Taught(shown: "git push -u origin '\(contBranch)'", typed: "git push -u origin '\(contBranch)'"),
                 Taught(shown: "gh pr create --title '<제목>' --body …", typed: "gh pr create --title 'it'\\''s' --body " + body),
              ]),
         ]
@@ -546,6 +571,9 @@ struct CodexGitPolicyTests {
                 let argv = try #require(segs.first)
                 if t.typed.contains("#") {
                     #expect(argv.contains { $0.contains("#") }, "\(name): # 가 주석으로 잘렸다 — \(argv)")
+                    // 이슈 #61 — Codex 는 따옴표 밖 `#` 이 든 명령에 규칙을 적용하지 않는다(spike L). 글이 시키는 모양은 감싸야 한다.
+                    #expect(!Self.hasUnquotedHash(t.typed), "\(name): 따옴표 밖 # — \(t.typed)")
+                    #expect(!Self.hasUnquotedHash(t.shown), "\(name): 따옴표 밖 # — \(t.shown)")
                 }
                 #expect(CodexGitPolicy.gateDecision(t.typed) == .pass, "\(name): \(t.typed)")
                 #expect(!CodexGitPolicy.promptRuleMatches(argv), "\(name): \(t.typed)")

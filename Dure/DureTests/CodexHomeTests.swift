@@ -205,4 +205,72 @@ struct CodexHomeTests {
             #expect(!exists(f.dir.appendingPathComponent(n)))
         }
     }
+
+    // MARK: - 이슈 #61 페인에서 고른 "다시 묻지 않기"
+
+    private func rulesText(_ dir: URL, _ name: String) -> String? {
+        try? String(contentsOf: dir.appendingPathComponent("rules/\(name)"), encoding: .utf8)
+    }
+    private let gradle = #"prefix_rule(pattern=["./gradlew", "assembleDebug"], decision="allow")"#
+    private let simctl = #"prefix_rule(pattern=["xcrun", "simctl"], decision="allow")"#
+
+    /// 페인 안에서 (p) 를 고르면 Codex 가 `rules/default.rules` 에 줄을 더한다(spike E). 다시 준비해도 레포 페인 home 에 남는다.
+    @Test func 페인에서_더한_규칙은_다시_준비해도_남는다() throws {
+        let f = try fixture(); defer { try? fm.removeItem(at: f.base) }
+        try CodexHome.prepare(profile: .repoPane, cwd: "/r/a", userHome: f.user, into: f.dir)
+        try "prefix_rule()\n\(gradle)\n".write(to: f.dir.appendingPathComponent("rules/default.rules"), atomically: true, encoding: .utf8)
+        try CodexHome.prepare(profile: .repoPane, cwd: "/r/a", userHome: f.user, into: f.dir)
+        #expect(rulesText(f.dir, "default.rules") == "prefix_rule()\n")
+        #expect(rulesText(f.dir, CodexHome.learnedRulesName) == "\(gradle)\n")
+        // 사용자 전역 파일은 그대로다.
+        #expect(try String(contentsOf: f.user.appendingPathComponent("rules/default.rules"), encoding: .utf8) == "prefix_rule()\n")
+    }
+
+    @Test func 배운_규칙은_쌓이고_같은_줄은_한_번만() throws {
+        let f = try fixture(); defer { try? fm.removeItem(at: f.base) }
+        try CodexHome.prepare(profile: .repoPane, cwd: "/r/a", userHome: f.user, into: f.dir)
+        try "prefix_rule()\n\(gradle)\n".write(to: f.dir.appendingPathComponent("rules/default.rules"), atomically: true, encoding: .utf8)
+        try CodexHome.prepare(profile: .repoPane, cwd: "/r/a", userHome: f.user, into: f.dir)
+        try "prefix_rule()\n\(gradle)\n\(simctl)\n".write(to: f.dir.appendingPathComponent("rules/default.rules"),
+                                                         atomically: true, encoding: .utf8)
+        try CodexHome.prepare(profile: .repoPane, cwd: "/r/a", userHome: f.user, into: f.dir)
+        try CodexHome.prepare(profile: .repoPane, cwd: "/r/a", userHome: f.user, into: f.dir)
+        #expect(rulesText(f.dir, CodexHome.learnedRulesName) == "\(gradle)\n\(simctl)\n")
+    }
+
+    /// 사용자가 전역 규칙에서 지운 줄은 페인 사본에 남아 있어도 페인에서 고른 것이 아니다 — 지난번에 넣은 사본과 비교한다.
+    @Test func 사용자가_전역에서_지운_줄은_배운_것으로_옮기지_않는다() throws {
+        let f = try fixture(); defer { try? fm.removeItem(at: f.base) }
+        let userRules = f.user.appendingPathComponent("rules/default.rules")
+        try "prefix_rule()\n\(simctl)\n".write(to: userRules, atomically: true, encoding: .utf8)
+        try CodexHome.prepare(profile: .repoPane, cwd: "/r/a", userHome: f.user, into: f.dir)
+        try "prefix_rule()\n".write(to: userRules, atomically: true, encoding: .utf8)
+        try CodexHome.prepare(profile: .repoPane, cwd: "/r/a", userHome: f.user, into: f.dir)
+        #expect(rulesText(f.dir, CodexHome.learnedRulesName) == nil)
+        #expect(rulesText(f.dir, "default.rules") == "prefix_rule()\n")
+    }
+
+    /// 이 기능 전에 만든 home 에는 지난 사본 기록이 없다 — 지금 사용자 파일을 기준으로 본다.
+    @Test func 지난_사본_기록이_없는_옛_home_은_지금_사용자_파일을_기준으로() throws {
+        let f = try fixture(); defer { try? fm.removeItem(at: f.base) }
+        try fm.createDirectory(at: f.dir.appendingPathComponent("rules"), withIntermediateDirectories: true)
+        try "prefix_rule()\n\(gradle)\n".write(to: f.dir.appendingPathComponent("rules/default.rules"), atomically: true, encoding: .utf8)
+        try CodexHome.prepare(profile: .repoPane, cwd: "/r/a", userHome: f.user, into: f.dir)
+        #expect(rulesText(f.dir, CodexHome.learnedRulesName) == "\(gradle)\n")
+    }
+
+    @Test func 조율자는_배우지_않는다() throws {
+        let f = try fixture(); defer { try? fm.removeItem(at: f.base) }
+        try CodexHome.prepare(profile: .orchestrator, cwd: "/w", userHome: f.user, into: f.dir)
+        try "\(gradle)\n".write(to: f.dir.appendingPathComponent("rules/default.rules"), atomically: true, encoding: .utf8)
+        try CodexHome.prepare(profile: .orchestrator, cwd: "/w", userHome: f.user, into: f.dir)
+        #expect(try fm.contentsOfDirectory(atPath: f.dir.appendingPathComponent("rules").path).isEmpty)
+    }
+
+    @Test func 사용자에게_같은_이름의_배운_규칙_파일이_있어도_가져오지_않는다() throws {
+        let f = try fixture(); defer { try? fm.removeItem(at: f.base) }
+        try "user\n".write(to: f.user.appendingPathComponent("rules/\(CodexHome.learnedRulesName)"), atomically: true, encoding: .utf8)
+        try CodexHome.prepare(profile: .repoPane, cwd: "/r/a", userHome: f.user, into: f.dir)
+        #expect(rulesText(f.dir, CodexHome.learnedRulesName) == nil)
+    }
 }
